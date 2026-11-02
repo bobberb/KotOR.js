@@ -53,11 +53,15 @@ export class Planetary {
   }
 
   static SetPlanetAvailable(index: number, bState: boolean){
-    Planetary.planets[index].enabled = bState;
+    const planet = Planetary.planets[index];
+    if(!planet){ return; }
+    planet.enabled = bState;
   }
 
   static SetPlanetSelectable(index: number, bState: boolean){
-    Planetary.planets[index].selectable = bState;
+    const planet = Planetary.planets[index];
+    if(!planet){ return; }
+    planet.selectable = bState;
   }
 
   static GetPlanetByGUITag(sTag = ''): Planet{
@@ -91,7 +95,35 @@ export class Planetary {
     struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapPlntMsk') ).setValue(planetMask);
     struct.addField( new GFFField(GFFDataType.INT, 'GlxyMapSelPnt') ).setValue(Planetary.selectedIndex);
 
+    // Not in retail saves; without it every planet reloads unselectable and the map can't travel.
+    let selectableMask = 0;
+    for(let i = 0; i < Planetary.planets.length; i++){
+      if(Planetary.planets[i].selectable){
+        selectableMask |= 1 << Planetary.planets[i].id;
+      }
+      selectableMask = selectableMask >>> 0;
+    }
+    struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapSelMsk') ).setValue(selectableMask);
+
     return struct;
+  }
+
+  static LoadStruct(struct: GFFStruct){
+    if(!struct){ return; }
+    const planetCount = struct.hasField('GlxyMapNumPnts') ? struct.getFieldByLabel('GlxyMapNumPnts').getValue() : 0;
+    const availableMask = struct.hasField('GlxyMapPlntMsk') ? struct.getFieldByLabel('GlxyMapPlntMsk').getValue() : 0;
+    const hasSelectableMask = struct.hasField('GlxyMapSelMsk');
+    // Retail saves carry no selectable mask; treating available planets as selectable keeps travel possible.
+    const selectableMask = hasSelectableMask ? struct.getFieldByLabel('GlxyMapSelMsk').getValue() : availableMask;
+    const selectedIndex = struct.hasField('GlxyMapSelPnt') ? struct.getFieldByLabel('GlxyMapSelPnt').getValue() : -1;
+
+    for(let i = 0; i < Planetary.planets.length; i++){
+      const inSave = i < planetCount && i < 32;
+      Planetary.SetPlanetAvailable(i, inSave && !!((availableMask >>> i) & 0x01));
+      Planetary.SetPlanetSelectable(i, inSave && !!((selectableMask >>> i) & 0x01));
+    }
+
+    Planetary.SetSelectedPlanet(selectedIndex);
   }
 
 }

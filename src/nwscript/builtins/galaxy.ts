@@ -35,7 +35,7 @@ export const GetPlanetSelectable = defineAction({
   returnType: NWScriptDataType.INTEGER,
   params: [intParam("nPlanet")] as const,
   kotor(this: NWScriptInstance, nPlanet) {
-    return Planetary.planets[nPlanet].selectable ? NW_TRUE : NW_FALSE;
+    return Planetary.planets[nPlanet]?.selectable ? NW_TRUE : NW_FALSE;
   },
 });
 
@@ -57,7 +57,7 @@ export const GetPlanetAvailable = defineAction({
   returnType: NWScriptDataType.INTEGER,
   params: [intParam("nPlanet")] as const,
   kotor(this: NWScriptInstance, nPlanet) {
-    return Planetary.planets[nPlanet].enabled ? NW_TRUE : NW_FALSE;
+    return Planetary.planets[nPlanet]?.enabled ? NW_TRUE : NW_FALSE;
   },
 });
 
