@@ -1808,6 +1808,8 @@ export class ModuleArea extends ModuleObject {
         player.npcId = GameState.PartyManager.GetLoadedPlayerNPCId(player.template);
         
         player.load();
+        // No companion slot means this is the protagonist, whatever IsPC an older save left on it.
+        if(player.npcId < 0){ player.isPC = 1; }
         // GameState.currentLeader = player;
         GameState.PartyManager.Player = player;
       

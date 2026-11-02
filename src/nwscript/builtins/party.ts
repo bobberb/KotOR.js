@@ -61,8 +61,7 @@ export const AddPartyMember = defineAction({
 
   kotor(this: NWScriptInstance, nNPCId, oCreature) {
     if (BitWise.InstanceOfObject(oCreature, ModuleObjectType.ModuleCreature)) {
-      GameState.PartyManager.AddCreatureToParty(nNPCId, oCreature as ModuleCreature);
-      return NW_TRUE;
+      return GameState.PartyManager.AddCreatureToParty(nNPCId, oCreature as ModuleCreature) ? NW_TRUE : NW_FALSE;
     }
 
     return NW_FALSE;

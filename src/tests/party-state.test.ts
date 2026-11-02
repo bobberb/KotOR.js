@@ -36,6 +36,7 @@ import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { ActionStatus } from '@/enums/actions/ActionStatus';
 import { ActionType } from '@/enums/actions/ActionType';
 import { ModuleCreatureAnimState } from '@/enums/module/ModuleCreatureAnimState';
+import { KeyMapAction } from '@/enums/controls/KeyMapAction';
 import { ActionParameterType } from '@/enums/actions/ActionParameterType';
 import { buildRuntimeAction, EngineVariant } from '@/nwscript/builtins/actionBuilder';
 import * as partyRoutines from '@/nwscript/builtins/party';
@@ -54,13 +55,15 @@ function routine(def: any, engine: EngineVariant = 'tsl', caller?: any) {
 
 let nextId = 100;
 /** A creature as far as PartyManager/BitWise care: object type bits, transform, area, tag. */
-function creature(props: { npcId?: number, tag?: string, x?: number, y?: number, facing?: number } = {}): any {
+function creature(props: { npcId?: number, tag?: string, x?: number, y?: number, facing?: number, isPC?: number } = {}): any {
   const c: any = Object.create(ModuleCreature.prototype);
   Object.assign(c, {
     id: nextId++,
     objectType: CREATURE,
     destroyed: false,
     npcId: props.npcId,
+    // npcId -1 stands for the protagonist in these tests, which always carries IsPC.
+    isPC: props.isPC ?? (props.npcId === -1 ? 1 : 0),
     position: new THREE.Vector3(props.x ?? 0, props.y ?? 0, 0),
     rotation: new THREE.Euler(0, 0, props.facing ?? 0),
     area: { id: 7, isPointWalkable: () => true, getNearestWalkablePoint: (p: THREE.Vector3) => p },
@@ -550,13 +553,14 @@ describe('solo mode', () => {
   });
 
   /** Anything-goes stand-in for GUI controls; records the listeners a menu wires. */
-  function guiStub(listeners: Map<string, Function>, name = ''): any {
+  function guiStub(listeners: Map<string, Function>, name = '', keymaps?: Map<string, string>): any {
     const self: any = new Proxy(function(){}, {
       get(_t, key){
         if(key === 'then') return undefined;
         if(key === Symbol.toPrimitive || key === 'valueOf') return () => 0;
         if(key === 'toString') return () => '';
         if(key === 'addEventListener') return (_type: string, fn: Function) => { listeners.set(name, fn); return self; };
+        if(key === 'setKeymapAction' && keymaps) return (action: string) => { keymaps.set(name, action); return self; };
         return self;
       },
       apply(){ return self; },
@@ -565,7 +569,7 @@ describe('solo mode', () => {
     return self;
   }
 
-  async function wireOverlay(game: 'kotor' | 'tsl'){
+  async function wireOverlay(game: 'kotor' | 'tsl', keymaps = new Map<string, string>()){
     const listeners = new Map<string, Function>();
     // Real GameState (PartyManager, SOLOMODE) where the test set it; inert stubs for the HUD's other subsystems.
     const hudGameState = new Proxy(state, { get: (t, key) => key in t ? t[key] : guiStub(new Map()) });
@@ -575,6 +579,8 @@ describe('solo mode', () => {
       '@/gui': { GameMenu: class { async menuControlInitializer(){} }, LBL_MapView: function(){ return guiStub(new Map()); } },
       '@/loaders': { TextureLoader: { Load: async (): Promise<undefined> => undefined } },
       '@/loaders/TextureLoader': { TextureLoader: { Load: async (): Promise<undefined> => undefined } },
+      '@/enums': { KeyMapAction, ModuleObjectType },
+      '@/enums/controls/KeyMapAction': { KeyMapAction },
     };
     const K1 = loadSourceWithStubs('game/kotor/menu/InGameOverlay.ts', imports).InGameOverlay;
     const Overlay = game == 'kotor' ? K1 : loadSourceWithStubs('game/tsl/menu/InGameOverlay.ts', { ...imports, '@/game/kotor/KOTOR': { InGameOverlay: K1 } }).InGameOverlay;
@@ -583,7 +589,7 @@ describe('solo mode', () => {
     const menu = new Proxy(target, {
       get(t, key){
         if(key in t || typeof key !== 'string') return t[key as any];
-        if(!controls.has(key)) controls.set(key, guiStub(listeners, key));
+        if(!controls.has(key)) controls.set(key, guiStub(listeners, key, keymaps));
         return controls.get(key);
       },
       set(t, key, value){ t[key as any] = value; return true; },
@@ -607,6 +613,13 @@ describe('solo mode', () => {
     expect([...member.actionQueue]).toEqual([]);
     click({ stopPropagation(){} });
     expect(state.SOLOMODE).toBe(false);
+  });
+
+  test.each(['kotor', 'tsl'] as const)('the %s HUD solo button is bound to the party-active key', async (game) => {
+    follower();
+    const keymaps = new Map<string, string>();
+    await wireOverlay(game, keymaps);
+    expect(keymaps.get('TB_SOLO')).toBe(KeyMapAction.PartyActive);
   });
 
   test('a stuck companion is warped to its slot, but not in solo mode or when it is the one in control', () => {
@@ -836,6 +849,67 @@ describe('PARTYTABLE scalars round-trip through Export/Load', () => {
     expect(PartyManager.GetControlledNPC()).toBe(-1);
     PartyManager.Player = creature({ npcId: -1 });
     expect(PartyManager.GetControlledNPC()).toBe(-1);
+  });
+
+  test('IsProtagonist needs IsPC and no NPC slot: a slotless party creature is not the PC', () => {
+    expect(PartyManager.IsProtagonist(creature({ npcId: -1 }))).toBe(true);
+    expect(PartyManager.IsProtagonist(creature({ npcId: undefined, isPC: 1 }))).toBe(true);
+    expect(PartyManager.IsProtagonist(creature({ npcId: undefined }))).toBe(false);
+    expect(PartyManager.IsProtagonist(creature({ npcId: 3, isPC: 1 }))).toBe(false); // old companion templates carry IsPC=1
+  });
+
+  test('PartyManager.Save records the companion in control for the module transition that follows', () => {
+    PartyManager.ControlledNPC = -1;
+    PartyManager.Player = creature({ npcId: 4 });
+    PartyManager.party = [];
+    jest.spyOn(PartyManager, 'SyncPlayerStateTemplates').mockImplementation(() => {});
+    PartyManager.Save();
+    expect(PartyManager.ControlledNPC).toBe(4);
+    PartyManager.Player = creature({ npcId: -1 });
+    PartyManager.Save();
+    expect(PartyManager.ControlledNPC).toBe(-1);
+  });
+});
+
+describe('AddPartyMember (574)', () => {
+  beforeEach(() => {
+    state.module = { area: { id: 7, creatures: [] as any[] } };
+    jest.spyOn(PartyManager, 'SavePartyMember').mockResolvedValue(undefined);
+  });
+
+  test('binds the creature to its NPC slot, so it is a companion, not the protagonist, and persists in PT_MEMBERS', async () => {
+    const protagonist = creature({ npcId: -1, tag: 'revan' });
+    const hk = creature({ tag: 'hk47', isPC: 1 }); // a world template that (wrongly) carries IsPC
+    hk.clearAllActions = jest.fn();
+    hk.template = utc('hk47');
+    state.module.area.creatures.push(hk);
+    PartyManager.Player = protagonist;
+    PartyManager.party = [protagonist];
+
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    expect(add(5, hk)).toBe(1);
+    expect(hk.npcId).toBe(5);
+    expect(hk.isPC).toBe(0); // its saved template must not claim to be the protagonist (Module.setFromIFO trusts IsPC)
+    expect(PartyManager.IsProtagonist(hk)).toBe(false);
+    expect(PartyManager.IsNPCInParty(5)).toBe(true);
+    expect(state.module.area.creatures).toEqual([]);
+    expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(5)).toBe(1);
+
+    PartyManager.Save();
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 5 }]);
+    const ids = (await exportPartyTable()).RootNode.getFieldByLabel('PT_MEMBERS').getChildStructs()
+      .map(s => s.getFieldByLabel('PT_MEMBER_ID').getValue());
+    expect(ids).toEqual([5]);
+  });
+
+  test('refuses an invalid NPC slot', () => {
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    const stray = creature({ tag: 'stray' });
+    stray.clearAllActions = jest.fn();
+    expect(add(12, stray)).toBe(0);
+    expect(add(-1, stray)).toBe(0);
+    expect(stray.npcId).toBeUndefined();
+    expect(PartyManager.party).toEqual([]);
   });
 
   test('PT_CONTROLLED_NP is the companion the player switched into; party leadership is PT_IS_LEADER\'s job', async () => {

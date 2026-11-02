@@ -191,6 +191,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     state.time = 0;
     state.getCurrentPlayer = () => PartyManager.party[0] ?? PartyManager.Player;
     state.group = { party: { add: jest.fn() } };
+    (CurrentGame as any).gameinprogress_dir = 'gip';
     jest.spyOn(GFFObject.prototype, 'export').mockImplementation(function(this: GFFObject, _file: string, onExport?: Function){
       exported = this.getExportBuffer();
       onExport?.();
@@ -292,7 +293,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(PartyManager.GetLoadedPlayerNPCId(creatureTemplate('atton', 0))).toBe(-1);
   });
 
-  test('a companion in control keeps its NPC slot across a module transition', async () => {
+  test('loadPlayer reusing a live player (no dispose in between) keeps a controlled companion\'s slot', async () => {
     const companion = PartyManager.SwitchPlayerCharacter(2)!;
     PartyManager.party = [];
     jest.spyOn(companion, 'load').mockImplementation(() => {});
@@ -300,6 +301,85 @@ describe('a save made while a companion is in control survives save -> load -> s
     await areaLoadPlayer();
     expect(PartyManager.Player).toBe(companion);
     expect(companion.npcId).toBe(2);
+  });
+
+  /** GameState.LoadModule: module.save() runs PartyManager.Save(), module.dispose() drops the player, the next area rebuilds it. */
+  async function moduleTransition(){
+    PartyManager.Save();
+    PartyManager.Player = undefined;
+    PartyManager.party = [];
+    await areaLoadPlayer();
+    PartyManager.party = [PartyManager.Player];
+    return PartyManager.Player;
+  }
+
+  test('a companion in control stays that companion across a real module transition (fresh game)', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.party = [PartyManager.SwitchPlayerCharacter(2)!];
+    const exile = PartyManager.ActualPlayerTemplate;
+    expect(exile.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
+
+    const after = await moduleTransition();
+    expect(after.getTag()).toBe('atton');
+    expect(after.npcId).toBe(2);
+    expect(PartyManager.IsProtagonist(after)).toBe(false);
+    after.save();
+    expect(PartyManager.ActualPlayerTemplate === exile).toBe(true);
+
+    (CurrentGame.WriteFile as jest.Mock).mockClear();
+    const back = PartyManager.SwitchPlayerCharacter(-1)!;
+    expect(CurrentGame.WriteFile).not.toHaveBeenCalled();
+    expect(back.getTag()).toBe('exile');
+  });
+
+  test('SwitchPlayerCharacter keeps ControlledNPC in step with the companion in control', () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.ControlledNPC = 7; // stale, from a loaded save
+    PartyManager.SwitchPlayerCharacter(2);
+    expect(PartyManager.ControlledNPC).toBe(2);
+    PartyManager.SwitchPlayerCharacter(-1);
+    expect(PartyManager.ControlledNPC).toBe(-1);
+  });
+
+  test('a stale PT_CONTROLLED_NP never relabels the companion switched into later', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.ControlledNPC = 2; // loaded from a save made while Atton was in control
+    PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+    PartyManager.party = [PartyManager.SwitchPlayerCharacter(5)!];
+
+    const after = await moduleTransition();
+    after.save();
+    expect(after.getTag()).toBe('bao');
+    expect(after.npcId).toBe(5);
+    expect(PartyManager.NPCS[2].template.RootNode.getFieldByLabel('Tag').getValue()).toBe('atton');
+    expect(PartyManager.NPCS[5].template.RootNode.getFieldByLabel('Tag').getValue()).toBe('bao');
+    expect(PartyManager.GetControlledNPC()).toBe(5);
+  });
+
+  test('switching back to the protagonist before a transition reloads the protagonist', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.party = [PartyManager.SwitchPlayerCharacter(2)!];
+    PartyManager.party = [PartyManager.SwitchPlayerCharacter(-1)!];
+    const after = await moduleTransition();
+    expect(after.getTag()).toBe('exile');
+    expect(after.npcId).toBe(-1);
+    expect(PartyManager.IsProtagonist(after)).toBe(true);
+  });
+
+  test('an older save whose protagonist carries no IsPC still reloads as the protagonist', async () => {
+    PartyManager.ResetPartyTableState();
+    const noIsPC = new GFFObject();
+    noIsPC.RootNode.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue('revan');
+    PartyManager.PlayerTemplate = noIsPC;
+    PartyManager.Player = undefined;
+    await areaLoadPlayer();
+    expect(PartyManager.Player.npcId).toBe(-1);
+    expect(PartyManager.IsProtagonist(PartyManager.Player)).toBe(true);
   });
 
   test('ExportPlayerCharacter writes the protagonist to pc.utc, not a reloaded companion ModulePlayer', async () => {
@@ -324,6 +404,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     const companionAsPlayer = new ModulePlayer(creatureTemplate('atton', 0));
     companionAsPlayer.npcId = 2;
     const exile = new ModulePlayer(creatureTemplate('exile', 1));
+    exile.load();
     exile.npcId = -1;
     const remote = new ModuleCreature(creatureTemplate('remote', 0));
     PartyManager.AddAvailablePUPByObject(0, remote);

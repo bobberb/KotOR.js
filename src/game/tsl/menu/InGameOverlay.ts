@@ -11,6 +11,7 @@ import { AutoPauseState } from "@/enums/engine/AutoPauseState";
 import type { OdysseyTexture } from "@/three/odyssey/OdysseyTexture";
 import { TextureLoader } from "@/loaders/TextureLoader";
 import * as THREE from "three";
+import { KeyMapAction } from "@/enums/controls/KeyMapAction";
 
 const preloadTextures = ['enemy_bar', 'hostilearrow', 'friend_bar', 'friendlyarrow'];
 const preloadTexturesMap = new Map<string, OdysseyTexture>();
@@ -280,7 +281,7 @@ export class InGameOverlay extends K1_InGameOverlay {
       this.TB_SOLO.addEventListener('click', (e) => {
         e.stopPropagation();
         GameState.PartyManager.SetSoloMode(!GameState.SOLOMODE);
-      });
+      }).setKeymapAction(KeyMapAction.PartyActive);
 
       this.TB_STEALTH.addEventListener('click', (e) => {
         e.stopPropagation();

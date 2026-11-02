@@ -940,17 +940,18 @@ export class PartyManager {
   static GetControlledNPC(){
     const player = PartyManager.Player;
     if(BitWise.InstanceOfObject(player, ModuleObjectType.ModuleCreature)){
-      return PartyManager.IsProtagonist(player) ? -1 : player.npcId;
+      return PartyManager.IsValidNPCSlot(player.npcId) ? player.npcId : -1;
     }
     return PartyManager.ControlledNPC;
   }
 
   /**
-   * The protagonist is the player creature without an NPC slot. Not `instanceof ModulePlayer`:
-   * a save made while a companion was in control reloads that companion as the ModulePlayer.
+   * The protagonist carries IsPC and no NPC slot. Not `instanceof ModulePlayer`: a save made while a
+   * companion was in control reloads that companion as the ModulePlayer. Not "no NPC slot" alone:
+   * plain world creatures in the party (followers, script-spawned allies) have no slot either.
    */
   static IsProtagonist(creature: ModuleCreature){
-    return !!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) && !(creature.npcId >= 0);
+    return !!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) && !(creature.npcId >= 0) && !!creature.isPC;
   }
 
   /**
@@ -1193,12 +1194,22 @@ export class PartyManager {
    * @param creature - The creature to add to the list of Party Members
    * @returns void
    */
-  static AddCreatureToParty(slot = 1, creature: ModuleCreature){
+  static AddCreatureToParty(slot = 1, creature: ModuleCreature): boolean {
     if(!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature)){
-      return;
+      return false;
+    }
+    // AddPartyMember (574) binds the creature to NPC slot nNPC: it is a companion like any other and
+    // persists through PT_MEMBERS + AVAILNPCn.utc, never mistaken for the protagonist.
+    if(!PartyManager.IsValidNPCSlot(slot)){
+      return false;
     }
 
     creature = creature as ModuleCreature;
+    creature.npcId = slot;
+    creature.isPC = 0;
+    if(!PartyManager.IsNPCInParty(slot)){
+      PartyManager.CurrentMembers.push({ isLeader: false, memberID: slot });
+    }
     creature.isPM = true;
     creature.clearAllActions();
     PartyManager.NPCS[slot].available = true;
@@ -1212,6 +1223,7 @@ export class PartyManager {
     if(cIdx > -1){
       GameState.module.area.creatures.splice(cIdx, 1);
     }
+    return true;
   }
 
   /**
@@ -1236,6 +1248,7 @@ export class PartyManager {
     }
 
     PartyManager.Player = partyMember;
+    PartyManager.ControlledNPC = PartyManager.IsValidNPCSlot(npcId) ? npcId : -1;
 
     try{
       const spawn = oldPC.position.clone();
@@ -1271,6 +1284,8 @@ export class PartyManager {
     }
   }
   static Save(){
+    // Module transitions dispose the player and rebuild it from PlayerTemplate; this tells loadPlayer which companion it was.
+    PartyManager.ControlledNPC = PartyManager.GetControlledNPC();
     PartyManager.SyncPlayerStateTemplates();
 
     const npcs = PartyManager.party.filter( (pm) => pm instanceof ModuleCreature && pm.npcId >= 0 );
