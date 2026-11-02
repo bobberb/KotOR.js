@@ -978,6 +978,13 @@ export class ModuleItem extends ModuleObject {
     return row && row.spellindex !== '****' && Number.isFinite(spellIndex) ? spellIndex : subType;
   }
 
+  /** The CastSpell property that grants spells.2da row `spellId`, if this item has one. */
+  getCastSpellProperty(spellId: number){
+    return (this.properties || []).find((property) =>
+      property?.propertyName == ModuleItemProperty.CastSpell && ModuleItem.GetCastSpellId(property.subType) == spellId
+    );
+  }
+
   initProperties(){
 
     if(this.loaded){

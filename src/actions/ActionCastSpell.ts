@@ -15,6 +15,7 @@ import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleCreature } from "@/module/ModuleCreature";
 import type { ModuleItem } from "@/module/ModuleItem";
 import { ActionParameterType } from "@/enums/actions/ActionParameterType";
+import { ModuleItemCostTable } from "@/enums/module/ModuleItemCostTable";
 import * as THREE from "three";
 
 /**
@@ -35,6 +36,9 @@ export class ActionCastSpell extends Action {
   instant: boolean = false;
   /** ActionCastFakeSpellAt*: conjure/cast animation and visuals only; no force point gate or cost, no impact script. Runtime-only, not saved. */
   fake: boolean = false;
+  /** Walks queued to get into range for this cast. */
+  approachAttempts: number = 0;
+  static MAX_APPROACH_ATTEMPTS = 3;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -73,38 +77,25 @@ export class ActionCastSpell extends Action {
       return ActionStatus.COMPLETE;
     }
 
-    if(this.target && !spell.inRange(this.target, this.owner)){
+    const castPoint = this.target
+      ? this.target.position
+      : new THREE.Vector3(this.getParameter<number>(6) || 0, this.getParameter<number>(7) || 0, this.getParameter<number>(8) || 0);
+    if(this.target != this.owner && !spell.isPointInRange(this.owner, castPoint)){
+      // Walks that keep ending out of range (unreachable point, blocked walkmesh) fail the cast instead of looping forever.
+      if(this.approachAttempts >= ActionCastSpell.MAX_APPROACH_ATTEMPTS) return this.refuse(spell);
+      this.approachAttempts++;
       enqueueMoveToPoint(this.owner, {
-        x: this.target.position.x,
-        y: this.target.position.y,
-        z: this.target.position.z,
+        x: castPoint.x,
+        y: castPoint.y,
+        z: castPoint.z,
         area: GameState.module.area.id,
-        target: this.target.id,
+        target: this.target ? this.target.id : ModuleObjectConstant.OBJECT_INVALID,
         run: true,
-        range: spell.getCastRange(),
+        range: spell.getApproachRange(!!this.target),
         timeout: 30.0,
         groupId: this.groupId,
       });
       return ActionStatus.IN_PROGRESS;
-    }
-
-    if(!this.target){
-      const range = spell.getCastRange();
-      const x = this.getParameter<number>(6) || 0;
-      const y = this.getParameter<number>(7) || 0;
-      const z = this.getParameter<number>(8) || 0;
-      if(Number.isFinite(range) && this.owner.position.distanceTo(new THREE.Vector3(x, y, z)) > range){
-        enqueueMoveToPoint(this.owner, {
-          x, y, z,
-          area: GameState.module.area.id,
-          target: ModuleObjectConstant.OBJECT_INVALID,
-          run: true,
-          range,
-          timeout: 30.0,
-          groupId: this.groupId,
-        });
-        return ActionStatus.IN_PROGRESS;
-      }
     }
 
     const combatRound = this.owner.combatRound;
@@ -117,18 +108,17 @@ export class ActionCastSpell extends Action {
     const castSpell: TalentSpell = (reuseQueued && queued.spell) || spell;
     // Item-granted powers (armbands) are paid for by the item, not the caster's force points. Param 4 carries the
     // item id so the source survives a save/load of the queued action (the round action is runtime-only).
+    const itemRequested = !!castSpell.item || this.hasSourceItemId();
     const item = (castSpell.item || this.getSourceItem()) as ModuleItem | undefined;
     if(item && !castSpell.item) castSpell.setItem(item);
-    const paysForcePoints = !this.cheat && !this.fake && !item;
-    const usesItemCharge = !this.cheat && !this.fake && !!item;
+    const paysForcePoints = !this.cheat && !this.fake && !itemRequested;
+    const usesItemCharge = !this.cheat && !this.fake && itemRequested;
     if(
       (paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, castSpell)) ||
-      (usesItemCharge && !ActionCastSpell.ItemHasCharge(item))
+      // The power comes from the item: refuse when it is gone, no longer equipped by the caster, or out of charges.
+      (usesItemCharge && !(ActionCastSpell.IsItemEquippedBy(item, this.owner) && ActionCastSpell.ItemHasCharge(item, spell.id)))
     ){
-      if(reuseQueued) combatRound.action = undefined;
-      // The creature still loses its round, so the end-of-round AI hook fires and it can choose something else.
-      if(!combatRound.roundStarted) combatRound.beginCombatRound();
-      return ActionStatus.FAILED;
+      return this.refuse(spell);
     }
 
     this.owner.force = 0;
@@ -155,7 +145,7 @@ export class ActionCastSpell extends Action {
       this.owner.subtractFP(ActionCastSpell.GetSpellForceCost(castSpell));
     }
     if(usesItemCharge){
-      ActionCastSpell.ConsumeItemCharge(item);
+      ActionCastSpell.ConsumeItemCharge(item, spell.id);
     }
 
     if(!this.fake){
@@ -201,26 +191,80 @@ export class ActionCastSpell extends Action {
     return spell ? spell.getForcePointCost() : 0;
   }
 
+  /**
+   * The cast cannot happen. The creature still loses its round so the end-of-round AI hook fires and it can
+   * choose something else; that round is empty, so a different pending round action is neither started nor
+   * reported (GetLastForcePowerUsed) by this refusal.
+   */
+  private refuse(spell: TalentSpell): ActionStatus {
+    const combatRound = this.owner.combatRound;
+    if(combatRound){
+      const pending = combatRound.action;
+      if(pending && pending.actionType == CombatActionType.CAST_SPELL && pending.spellId == spell.id){
+        combatRound.action = undefined;
+      }
+      if(!combatRound.action && !combatRound.roundStarted) combatRound.beginCombatRound();
+    }
+    return ActionStatus.FAILED;
+  }
+
+  private hasSourceItemId(): boolean {
+    const param = this.parameters[4];
+    if(param?.type !== ActionParameterType.DWORD) return false;
+    const id = param.value;
+    return typeof id === 'number' && id > 0 && id !== ModuleObjectConstant.OBJECT_INVALID && id !== 0xFFFFFFFF;
+  }
+
   private getSourceItem(): ModuleItem | undefined {
-    if(this.parameters[4]?.type !== ActionParameterType.DWORD) return undefined;
+    if(!this.hasSourceItemId()) return undefined;
     const item = this.getParameter<ModuleItem>(4);
     return BitWise.InstanceOfObject(item, ModuleObjectType.ModuleItem) ? item : undefined;
   }
 
+  /** Item powers come from equipped items (armbands); a destroyed, sold or unequipped item grants nothing. */
+  static IsItemEquippedBy(item: ModuleItem, owner: ModuleObject): boolean {
+    if(!item || item.destroyed) return false;
+    const equipment: Record<string, any> = (owner as any)?.equipment || {};
+    return Object.values(equipment).includes(item);
+  }
+
   /**
-   * Charge-based items (MaxCharges > 0) spend one charge per use and refuse at 0; other items are unlimited.
-   * Uses-per-day properties are not limited: the engine has no rest cycle to restore them yet.
+   * Charges spent per use, from the CastSpell property's iprp_chargecost CostValue. Rows follow the NWN
+   * layout (KotOR inherits it; unverified against KotOR data): 0 single use, 1-6 = 5..0 charges/use,
+   * 7-11 = 1..5 uses/day, 12 unlimited. Without a SpellUse cost the default is 1 charge per use.
+   * Uses/day are not limited: there is no rest cycle to restore them yet.
+   */
+  static ChargesPerUse(item: ModuleItem, spellId: number): number | 'single' {
+    const property = item?.getCastSpellProperty?.(spellId);
+    if(!property || Number(property.costTable) !== ModuleItemCostTable.SpellUse) return 1;
+    const row = Number(property.costValue);
+    if(row === 0) return 'single';
+    if(row >= 1 && row <= 6) return 6 - row;
+    return 0;
+  }
+
+  /**
+   * Charge-based items (MaxCharges > 0) need enough charges for one use. Charges belong to the item object,
+   * so a stack shares one counter. Single-use powers mark the item spent instead of destroying it.
    */
   static IsChargeItem(item: ModuleItem): boolean {
     return Number(item?.maxCharges) > 0;
   }
 
-  static ItemHasCharge(item: ModuleItem): boolean {
-    return !ActionCastSpell.IsChargeItem(item) || Number(item.charges) > 0;
+  static ItemHasCharge(item: ModuleItem, spellId: number): boolean {
+    if(!ActionCastSpell.IsChargeItem(item)) return true;
+    const perUse = ActionCastSpell.ChargesPerUse(item, spellId);
+    return Number(item.charges) >= (perUse === 'single' ? 1 : perUse);
   }
 
-  static ConsumeItemCharge(item: ModuleItem){
-    if(ActionCastSpell.IsChargeItem(item)) item.charges = Math.max(0, (Number(item.charges) || 0) - 1);
+  static ConsumeItemCharge(item: ModuleItem, spellId: number){
+    const perUse = ActionCastSpell.ChargesPerUse(item, spellId);
+    if(perUse === 'single'){
+      item.maxCharges = Math.max(1, Number(item.maxCharges) || 0);
+      item.charges = 0;
+    }else if(ActionCastSpell.IsChargeItem(item)){
+      item.charges = Math.max(0, (Number(item.charges) || 0) - perUse);
+    }
   }
 
   static CanAffordSpell(caster: ModuleObject, spell: TalentSpell): boolean {

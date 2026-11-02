@@ -3276,7 +3276,8 @@ export class ModuleCreature extends ModuleObject {
 
   getTalentBest(nCategory = 0, nCRMax = 0, nInclusion = 0, nExcludeType = -1, nExcludeId = -1) {
     let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax) && this.canAffordTalent(talent));
-    talents.sort((a: TalentObject, b: TalentObject) => (a.maxCR > b.maxCR) ? 1 : -1);
+    // GetCreatureTalentBest: the strongest talent whose CR does not exceed nCRMax.
+    talents.sort((a: TalentObject, b: TalentObject) => b.maxCR - a.maxCR);
     //console.log('getTalentBest', talents);
     if (talents.length) {
       return talents[0];

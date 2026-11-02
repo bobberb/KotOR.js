@@ -67,6 +67,8 @@ import { CombatRoundAction } from '@/combat/CombatRoundAction';
 import { TalentObject } from '@/talents/TalentObject';
 import { GFFStruct } from '@/resource/GFFStruct';
 import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
+import { ModuleItemCostTable } from '@/enums/module/ModuleItemCostTable';
+import { ActionStatus } from '@/enums/actions/ActionStatus';
 
 const SPELL_ID = 7;
 const SPELL_COST = 10;
@@ -492,12 +494,15 @@ describe('force power casting', () => {
     const caster = makeCreature({ base: 0, max: 0, current: 0 });
     const rich = makeCreature();
     const target = makeCreature();
-    const item: any = { id: 999 };
+    const item: any = Object.assign(Object.create(ModuleItem.prototype), { id: 999, properties: [] });
+    const item2: any = Object.assign(Object.create(ModuleItem.prototype), { id: 998, properties: [] });
+    caster.equipment.RIGHTARMBAND = item;
+    rich.equipment.RIGHTARMBAND = item2;
     const power = new TalentSpell(SPELL_ID);
     power.setItem(item);
     power.useTalentOnObject(target, caster);
     const power2 = new TalentSpell(SPELL_ID);
-    power2.setItem(item);
+    power2.setItem(item2);
     power2.useTalentOnObject(target, rich);
     tick([caster, rich, target]);
     expect(impactRuns).toHaveLength(2);
@@ -951,10 +956,16 @@ describe('AI and force point shortage', () => {
   }
 
   test('GetCreatureTalentBest/Random skip powers the creature cannot pay for (item powers excepted)', () => {
-    const expensive = power(20, 30, 1);
+    const expensive = power(20, 30, 3);
     const cheap = power(21, 5, 2);
-    expect(casterWith(10, [expensive, cheap]).getTalentBest(1, 5)).toBe(cheap);
-    expect(casterWith(40, [expensive, cheap]).getTalentBest(1, 5)).toBe(expensive);
+    const tooStrong = power(23, 1, 9);
+    // Best = highest CR not exceeding nCRMax, among the affordable ones.
+    expect(casterWith(10, [cheap, expensive, tooStrong]).getTalentBest(1, 5)).toBe(cheap);
+    expect(casterWith(40, [cheap, expensive, tooStrong]).getTalentBest(1, 5)).toBe(expensive);
+    expect(casterWith(40, [cheap, expensive, tooStrong]).getTalentBest(1, 9)).toBe(tooStrong);
+    // Exactly enough force points is enough.
+    expect(casterWith(30, [cheap, expensive]).getTalentBest(1, 5)).toBe(expensive);
+    expect(casterWith(29, [cheap, expensive]).getTalentBest(1, 5)).toBe(cheap);
     expect(casterWith(10, [expensive]).getRandomTalent(1, 1)).toBeUndefined();
     expect(casterWith(40, [expensive]).getRandomTalent(1, 1)).toBe(expensive);
     const armband = power(22, 50, 0, { id: 5 });
@@ -990,22 +1001,150 @@ describe('force power success bookkeeping', () => {
   });
 });
 
-describe('creature location casts and range', () => {
-  test('a creature walks into range before a location cast lands', () => {
+describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', () => {
+  const RUN_SPEED = 5;
+
+  /** One straight path segment to the destination; no walkmesh. */
+  function stubPathing(){
+    const area: any = GameState.module.area;
+    area.creatures = [];
+    area.getNearestWalkablePoint = (v: any) => v.clone();
+    area.scorePointEdgeDistance = () => 0;
+    area.path = { traverseToPoint: (_o: any, _from: any, to: any) => ({
+      points: [{ vector: to.clone() }], destination: { vector: to.clone() }, timer: 20, realtime: false,
+      fixWalkEdges(){}, setColor(){}, buildHelperLine(){}, pop(){ this.points.shift(); }, dispose(){},
+    }) };
+    (GameState as any).ActionFactory.ActionJumpToPoint = class {};
+  }
+
+  /** tick() plus the creature physics step that applies the move's force vector. */
+  function walkTick(creatures: ModuleCreature[], seconds: number, delta = 0.05){
+    for(let t = 0; t < seconds - 1e-9; t += delta){
+      for(const creature of creatures) if(!(creature as any).context?.debug) (creature as any).context = { debug: {} };
+      tick(creatures, delta, delta);
+      for(const creature of creatures){
+        if(creature.force > 0) creature.position.addScaledVector(creature.forceVector, RUN_SPEED * delta);
+      }
+    }
+  }
+
+  function countMoves(caster: ModuleCreature){
+    const moves: ActionMoveToPoint[] = [];
+    const addFront = caster.actionQueue.addFront.bind(caster.actionQueue);
+    jest.spyOn(caster.actionQueue, 'addFront').mockImplementation((action: any) => {
+      if(action instanceof ActionMoveToPoint) moves.push(action);
+      return addFront(action);
+    });
+    return moves;
+  }
+
+  beforeEach(() => {
     installSpells({ [SPELL_ID]: spellRow({ range: 'S' }) });
+    stubPathing();
+  });
+
+  test.each([
+    ['inside 2D range but higher up (no walk needed)', 9.9, 0],
+    ['exactly at range, higher up (no walk needed)', 10, 0],
+    ['between 1x and 2x range, higher up', 15, 1],
+    ['far away, higher up', 40, 1],
+  ])('location cast %s: one walk at most, then it lands', (_label, x, expectedMoves) => {
     const caster = makeCreature();
-    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(200, 0, 0), 0, 0, 0, 0);
-    caster.actionQueue.process(0.05);
-    expect(caster.actionQueue[0]).toBeInstanceOf(ActionMoveToPoint);
-    expect((caster.actionQueue[0] as ActionMoveToPoint).getParameter(0)).toBe(200);
-    expect((caster.actionQueue[0] as ActionMoveToPoint).getParameter(6)).toBe(10);
-    expect(impactRuns).toHaveLength(0);
-    // Arrived: drop the move and let the cast resolve.
-    caster.actionQueue.shift();
-    caster.position.set(195, 0, 0);
-    tick([caster]);
+    const moves = countMoves(caster);
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(x, 0, 2), 0, 0, 0, 0);
+    walkTick([caster], 15);
     expect(impactRuns).toHaveLength(1);
-    expect(impactRuns[0].location).toEqual({ x: 200, y: 0, z: 0 });
+    expect(moves).toHaveLength(expectedMoves);
+    expect(impactRuns[0].location).toEqual({ x, y: 0, z: 2 });
+    if(expectedMoves) expect(moves[0].getParameter(6)).toBeCloseTo(9);
+    expect(Math.hypot(caster.position.x - x, caster.position.y)).toBeLessThanOrEqual(10);
+  });
+
+  test.each([
+    ['inside 2D range but higher up (no walk needed)', 9.9, 0],
+    ['between 1x and 2x range, higher up', 15, 1],
+  ])('object cast %s: one walk at most, then it lands', (_label, x, expectedMoves) => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    target.position.set(x, 0, 2);
+    const moves = countMoves(caster);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    walkTick([caster, target], 15);
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].spellTarget).toBe(target);
+    expect(moves).toHaveLength(expectedMoves);
+    if(expectedMoves) expect(moves[0].getParameter(6)).toBeCloseTo(4.5);
+  });
+
+  test('a walk that keeps ending out of range gives up after a few attempts instead of looping', () => {
+    const caster = makeCreature();
+    const moves = countMoves(caster);
+    caster.combatData.combatState = true;
+    let endRounds = 0;
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){ endRounds++; } }) } as any;
+    // An unreachable spot: every walk "arrives" without the caster getting any closer.
+    jest.spyOn(ActionMoveToPoint.prototype, 'update').mockReturnValue(ActionStatus.COMPLETE);
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0, 0, 0, 0);
+    tick([caster], 6);
+    expect(moves).toHaveLength(ActionCastSpell.MAX_APPROACH_ATTEMPTS);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.actionQueue).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+    expect(endRounds).toBe(1);
+  });
+});
+
+describe('refused casts and pending round actions', () => {
+  function onEndRound(caster: ModuleCreature){
+    const seen: any[] = [];
+    caster.combatData.combatState = true;
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){
+      seen.push({ used: GetLastForcePowerUsed.kotor.call({} as any, caster), attackTarget: caster.combatData.lastAttackTarget });
+    } }) } as any;
+    return seen;
+  }
+
+  test('a refused menu power is not reported as used at round end', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const seen = onEndRound(caster);
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].used).toBe(-1);
+  });
+
+  test('a refused script cast does not start or report a different pending power', () => {
+    installSpells({ [SPELL_ID]: spellRow(), 8: spellRow({ __rowlabel: '8' }) });
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const pending = new CombatRoundAction(caster);
+    pending.actionType = CombatActionType.CAST_SPELL;
+    pending.target = target;
+    pending.setSpell(new TalentSpell(SPELL_ID));
+    caster.combatRound.action = pending;
+    const seen = onEndRound(caster);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, 8, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 4);
+    expect(caster.combatRound.roundStarted).toBe(false);
+    expect(caster.combatRound.action).toBe(pending);
+    expect(seen).toHaveLength(0);
+    expect(caster.combatData.lastForcePowerUsed).toBeUndefined();
+  });
+
+  test('a refused script cast does not fake a round for a pending attack', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const attack = new CombatRoundAction(caster);
+    attack.actionType = CombatActionType.ATTACK;
+    attack.target = target;
+    caster.combatRound.action = attack;
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 4);
+    expect(caster.combatRound.roundStarted).toBe(false);
+    expect(caster.combatData.lastAttackTarget).toBeUndefined();
+    expect(caster.combatData.lastAttackAction).not.toBe(ActionType.ActionPhysicalAttacks);
   });
 });
 
@@ -1016,11 +1155,13 @@ describe('item-granted powers', () => {
     item.objectType = ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem;
     item.charges = charges;
     item.maxCharges = maxCharges;
+    item.properties = [];
     objects.set(item.id, item);
     return item;
   }
 
   function useArmband(caster: ModuleCreature, target: ModuleCreature, item: ModuleItem){
+    caster.equipment.RIGHTARMBAND = item;
     const power = new TalentSpell(SPELL_ID);
     power.setItem(item);
     power.useTalentOnObject(target, caster);
@@ -1077,6 +1218,99 @@ describe('item-granted powers', () => {
     ActionCastSpellAtObject.kotor.call({ caller: caster } as any, 8, target, 0, 0, 0, 0, 0);
     tick([caster, target]);
     expect(impactRuns).toHaveLength(0);
+  });
+
+  test('an item that was destroyed before the (reloaded) cast runs grants nothing and costs no FP', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const band = armband(0, 0);
+    useArmband(caster, target, band);
+    caster.actionQueue.process(0.05); // ActionCombat -> ActionCastSpell with the item id in param 4
+    caster.combatRound.action = undefined; // save/load: the round action and talent are runtime-only
+    objects.delete(band.id);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('an item no longer equipped by the caster grants nothing and keeps its charges', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const band = armband(3, 3);
+    useArmband(caster, target, band);
+    caster.equipment.RIGHTARMBAND = undefined; // given away / unequipped before the cast ran
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(0);
+    expect(band.charges).toBe(3);
+  });
+
+  test('a destroyed item still in the slot grants nothing', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const band = armband(0, 0);
+    useArmband(caster, target, band);
+    band.destroyed = true;
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(0);
+  });
+
+  function withCastSpellCost(item: ModuleItem, costValue: number){
+    item.properties = [{ propertyName: ModuleItemProperty.CastSpell, subType: SPELL_ID, costTable: ModuleItemCostTable.SpellUse, costValue, isUseable: () => true, is: () => false } as any];
+    return item;
+  }
+
+  test('iprp_chargecost: n charges per use', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const band = withCastSpellCost(armband(7, 10), 3); // row 3 = 3 charges/use
+    for(let i = 0; i < 3; i++){
+      useArmband(caster, target, band);
+      tick([caster, target], 4);
+    }
+    expect(impactRuns).toHaveLength(2);
+    expect(band.charges).toBe(1);
+  });
+
+  test('iprp_chargecost: single use', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const stim = withCastSpellCost(armband(0, 0), 0);
+    for(let i = 0; i < 2; i++){
+      useArmband(caster, target, stim);
+      tick([caster, target], 4);
+    }
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  test('iprp_chargecost: uses/day and unlimited rows spend no charges', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const perDay = withCastSpellCost(armband(2, 2), 8);
+    const unlimited = withCastSpellCost(armband(2, 2), 12);
+    for(const band of [perDay, perDay, perDay, unlimited, unlimited, unlimited]){
+      useArmband(caster, target, band);
+      tick([caster, target], 4);
+    }
+    expect(impactRuns).toHaveLength(6);
+    expect([perDay.charges, unlimited.charges]).toEqual([2, 2]);
+  });
+
+  test('ChargesPerUse maps every iprp_chargecost row', () => {
+    const band = armband(0, 0);
+    const rows = [0, 1, 2, 3, 4, 5, 6, 7, 11, 12].map((row) => ActionCastSpell.ChargesPerUse(withCastSpellCost(band, row), SPELL_ID));
+    expect(rows).toEqual(['single', 5, 4, 3, 2, 1, 0, 0, 0, 0]);
+    band.properties = [];
+    expect(ActionCastSpell.ChargesPerUse(band, SPELL_ID)).toBe(1);
+    // Only a SpellUse (iprp_chargecost) cost table carries charges/use.
+    band.properties = [{ propertyName: ModuleItemProperty.CastSpell, subType: SPELL_ID, costTable: 0, costValue: 3 } as any];
+    expect(ActionCastSpell.ChargesPerUse(band, SPELL_ID)).toBe(1);
+    // Each power reads its own CastSpell property.
+    band.properties = [
+      { propertyName: ModuleItemProperty.CastSpell, subType: 99, costTable: ModuleItemCostTable.SpellUse, costValue: 0 } as any,
+      { propertyName: ModuleItemProperty.CastSpell, subType: SPELL_ID, costTable: ModuleItemCostTable.SpellUse, costValue: 3 } as any,
+    ];
+    expect(ActionCastSpell.ChargesPerUse(band, SPELL_ID)).toBe(3);
+    expect(ActionCastSpell.ChargesPerUse(band, 99)).toBe('single');
   });
 });
 

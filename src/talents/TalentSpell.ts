@@ -12,6 +12,8 @@ import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState"
 import { CombatActionType } from "@/enums/combat/CombatActionType";
 import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { TwoDAObject } from "@/resource/TwoDAObject";
+import { Utility } from "@/utility/Utility";
+import type * as THREE from "three";
 
 const underscoreParser = (value: string = ''): number[] => {
   return value.split('_').map((val) => {
@@ -231,23 +233,27 @@ export class TalentSpell extends TalentObject {
     if(oTarget == oCaster){
       return true;
     }
-    let distance = oCaster.position.distanceTo(oTarget.position);
-    //Spell ranges are defined in the ranges.2da file
-    switch(this.range){
-      case 'L': //Large
-        return distance < 28;
-      case 'M': //Medium
-        return distance < 15;
-      case 'P': //Personal
-        return true;
-      case 'S': //Small
-        return distance < 10;
-      case 'T': //Touch
-        return true;//distance < 2.25;
-      case 'W': //Throw
-        return distance < 15;
-    }
-    return true;
+    return this.isPointInRange(oCaster, oTarget.position);
+  }
+
+  /**
+   * ActionMoveToPoint arrives on 2D distance, so cast range is measured in 2D too; a 3D check would
+   * re-queue the same move forever whenever the target sits higher or lower than the caster.
+   */
+  isPointInRange(oCaster: ModuleObject, point: THREE.Vector3){
+    const range = this.getCastRange();
+    if(!Number.isFinite(range)) return true;
+    return Utility.Distance2D(oCaster.position, point) <= range;
+  }
+
+  /**
+   * ActionMoveToPoint range to request so that arriving satisfies isPointInRange.
+   * A point move arrives within `range` of the point, so 0.9 x cast range is enough.
+   * An object move stands off 0.9 x range from the target and may stop within `range` of that stand-off
+   * point, i.e. up to 1.9 x range from the target, so it asks for 0.45 x cast range (arrives within 0.855 x).
+   */
+  getApproachRange(toObject = false){
+    return this.getCastRange() * (toObject ? 0.45 : 0.9);
   }
 
   getCastRange(){
