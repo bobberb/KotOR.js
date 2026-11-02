@@ -35,11 +35,13 @@ import { GameEngineType } from '@/enums/engine/GameEngineType';
 import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { ActionStatus } from '@/enums/actions/ActionStatus';
 import { ActionType } from '@/enums/actions/ActionType';
+import { ModuleCreatureAnimState } from '@/enums/module/ModuleCreatureAnimState';
 import { ActionParameterType } from '@/enums/actions/ActionParameterType';
 import { buildRuntimeAction, EngineVariant } from '@/nwscript/builtins/actionBuilder';
 import * as partyRoutines from '@/nwscript/builtins/party';
 import { SetSoloMode, GetSoloMode } from '@/nwscript/builtins/objects/party';
 import { ActionFollowLeader } from '@/actions/ActionFollowLeader';
+import { loadSourceWithStubs } from './support/loadSourceWithStubs';
 
 const state = GameState as any;
 const CREATURE = ModuleObjectType.ModuleObject | ModuleObjectType.ModuleCreature;
@@ -78,28 +80,11 @@ function utc(tag: string){
   return gff;
 }
 
-/**
- * The real ModuleArea source with every import stubbed except GameState and ModuleCreature:
- * importing it for real drags in the renderer (three/examples ESM), which jest cannot parse.
- */
 function loadModuleAreaClass(): any {
-  const fs = require('fs'), path = require('path'), ts = require('typescript');
-  const filename = path.resolve(__dirname, '../module/ModuleArea.ts');
-  const js = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-  }).outputText;
-  const stub: any = new Proxy(function(){}, {
-    get(target: any, key) { if(key === '__esModule') return true; if(key === 'prototype') return target.prototype; return stub; },
-    construct() { return stub; },
-    apply() { return stub; },
-  });
-  const module = { exports: {} as any };
-  new Function('require', 'module', 'exports', js)((id: string) => {
-    if(id === '@/GameState') return { GameState };
-    if(id === '@/module/ModuleCreature') return { ModuleCreature };
-    return stub;
-  }, module, module.exports);
-  return module.exports.ModuleArea;
+  return loadSourceWithStubs('module/ModuleArea.ts', {
+    '@/GameState': { GameState },
+    '@/module/ModuleCreature': { ModuleCreature },
+  }).ModuleArea;
 }
 
 let exported: Uint8Array | undefined;
@@ -135,7 +120,8 @@ beforeEach(() => {
   (GameFileSystem.readFile as any).mockImplementation(async () => new Uint8Array());
 
   state.PartyManager = PartyManager;
-  state.Planetary = { SaveStruct: () => new GFFStruct(), LoadStruct: jest.fn() };
+  state.Planetary = { SaveStruct: () => new GFFStruct(), LoadStruct: jest.fn(), Reset: jest.fn() };
+  state.InventoryManager = { ClearInventory: jest.fn() };
   state.TwoDAManager = { datatables: new Map() };
   state.TutorialWindowTracker = [];
   const messages = () => ({ Entries: [] as any[], ClearEntries: jest.fn(), AddEntry: jest.fn(), SortOrder: 0 });
@@ -144,7 +130,7 @@ beforeEach(() => {
   state.FeedbackMessageManager = messages();
   const cards = new Map();
   for(let i = 0; i < 19; i++){ cards.set(i, { card: i, count: 0 }); }
-  state.PazaakManager = { Cards: cards, PlayerSideDeck: new Map() };
+  state.PazaakManager = { Cards: cards, PlayerSideDeck: new Map(), Initialize: jest.fn() };
   state.time = 0;
   state.getCurrentPlayer = () => PartyManager.party[0] ?? PartyManager.Player;
   state.Mode = 0;
@@ -558,7 +544,69 @@ describe('solo mode', () => {
     expect(followMove.dispose).toHaveBeenCalled();
     expect(member.setComputedPath).toHaveBeenCalledWith(undefined);
     expect(member.speed).toBe(0);
+    expect(member.setAnimationState).toHaveBeenCalledWith(ModuleCreatureAnimState.IDLE);
+    expect(leader.setAnimationState).not.toHaveBeenCalled();
     expect([...leader.actionQueue]).toEqual([leaderFollow]);
+  });
+
+  /** Anything-goes stand-in for GUI controls; records the listeners a menu wires. */
+  function guiStub(listeners: Map<string, Function>, name = ''): any {
+    const self: any = new Proxy(function(){}, {
+      get(_t, key){
+        if(key === 'then') return undefined;
+        if(key === Symbol.toPrimitive || key === 'valueOf') return () => 0;
+        if(key === 'toString') return () => '';
+        if(key === 'addEventListener') return (_type: string, fn: Function) => { listeners.set(name, fn); return self; };
+        return self;
+      },
+      apply(){ return self; },
+      set(){ return true; },
+    });
+    return self;
+  }
+
+  async function wireOverlay(game: 'kotor' | 'tsl'){
+    const listeners = new Map<string, Function>();
+    // Real GameState (PartyManager, SOLOMODE) where the test set it; inert stubs for the HUD's other subsystems.
+    const hudGameState = new Proxy(state, { get: (t, key) => key in t ? t[key] : guiStub(new Map()) });
+    const imports: Record<string, any> = {
+      '@/GameState': { GameState: hudGameState },
+      'three': THREE,
+      '@/gui': { GameMenu: class { async menuControlInitializer(){} }, LBL_MapView: function(){ return guiStub(new Map()); } },
+      '@/loaders': { TextureLoader: { Load: async (): Promise<undefined> => undefined } },
+      '@/loaders/TextureLoader': { TextureLoader: { Load: async (): Promise<undefined> => undefined } },
+    };
+    const K1 = loadSourceWithStubs('game/kotor/menu/InGameOverlay.ts', imports).InGameOverlay;
+    const Overlay = game == 'kotor' ? K1 : loadSourceWithStubs('game/tsl/menu/InGameOverlay.ts', { ...imports, '@/game/kotor/KOTOR': { InGameOverlay: K1 } }).InGameOverlay;
+    const target = Object.create(Overlay.prototype);
+    const controls = new Map<string, any>();
+    const menu = new Proxy(target, {
+      get(t, key){
+        if(key in t || typeof key !== 'string') return t[key as any];
+        if(!controls.has(key)) controls.set(key, guiStub(listeners, key));
+        return controls.get(key);
+      },
+      set(t, key, value){ t[key as any] = value; return true; },
+    });
+    state.TLKManager = { TLKStrings: guiStub(new Map()) };
+    // The tail of the initializer builds renderer objects; the button wiring under test happens before it.
+    const done = Overlay.prototype.menuControlInitializer.call(menu).catch((): undefined => undefined);
+    await Promise.race([done, new Promise((resolve) => setTimeout(resolve, 50))]);
+    return listeners;
+  }
+
+  test.each(['kotor', 'tsl'] as const)('the %s HUD solo button toggles solo mode through SetSoloMode, cancelling follows', async (game) => {
+    const { member } = follower();
+    const follow = { type: ActionType.ActionFollowLeader, groupId: 4, dispose: jest.fn() };
+    member.actionQueue.push(follow);
+    const click = (await wireOverlay(game)).get('TB_SOLO')!;
+    expect(click).toBeDefined();
+
+    click({ stopPropagation(){} });
+    expect(state.SOLOMODE).toBe(true);
+    expect([...member.actionQueue]).toEqual([]);
+    click({ stopPropagation(){} });
+    expect(state.SOLOMODE).toBe(false);
   });
 
   test('a stuck companion is warped to its slot, but not in solo mode or when it is the one in control', () => {
@@ -782,21 +830,22 @@ describe('PARTYTABLE scalars round-trip through Export/Load', () => {
     expect([PartyManager.CurrentMembers, PartyManager.party, PartyManager.PortraitOrder, PartyManager.Gold]).toEqual([[], [], [], 0]);
   });
 
-  test('GetControlledNPC is -1 for a leader with no NPC slot, whatever was loaded', () => {
+  test('GetControlledNPC is -1 for a player creature with no NPC slot, whatever was loaded', () => {
     PartyManager.ControlledNPC = 5;
-    PartyManager.party = [creature({ npcId: undefined })];
+    PartyManager.Player = creature({ npcId: undefined });
     expect(PartyManager.GetControlledNPC()).toBe(-1);
-    PartyManager.party = [creature({ npcId: -1 })];
+    PartyManager.Player = creature({ npcId: -1 });
     expect(PartyManager.GetControlledNPC()).toBe(-1);
   });
 
-  test('PT_CONTROLLED_NP is the leading companion\'s NPC id, -1 when the protagonist leads', async () => {
+  test('PT_CONTROLLED_NP is the companion the player switched into; party leadership is PT_IS_LEADER\'s job', async () => {
     const protagonist = Object.assign(Object.create(ModulePlayer.prototype), creature({ npcId: -1 }));
     const companion = creature({ npcId: 6 });
     PartyManager.Player = protagonist;
-    PartyManager.party = [companion, protagonist];
-    expect((await exportPartyTable()).RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue()).toBe(6);
-    PartyManager.party = [protagonist, companion];
+    PartyManager.party = [companion, protagonist]; // companion leads, protagonist is still the player
     expect((await exportPartyTable()).RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue()).toBe(-1);
+    PartyManager.Player = companion; // SwitchPlayerCharacter(6)
+    PartyManager.party = [companion];
+    expect((await exportPartyTable()).RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue()).toBe(6);
   });
 });

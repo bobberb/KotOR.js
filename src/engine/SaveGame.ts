@@ -594,6 +594,8 @@ export class SaveGame {
    */
   async loadInventory(){
     console.log('SaveGame', 'Loading Inventory...');
+    // Loading save B after save A must not stack A's items under B's.
+    GameState.InventoryManager.ClearInventory();
 
     try{
       const buffer = await GameFileSystem.readFile( path.join( CurrentGame.gameinprogress_dir, 'inventory.res'));

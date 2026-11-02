@@ -1771,7 +1771,8 @@ export class ModuleArea extends ModuleObject {
     try{
       if(GameState.PartyManager.Player instanceof ModuleCreature && !GameState.PartyManager.Player.destroyed){
         const player = GameState.PartyManager.Player;
-        player.npcId = -1;
+        // A companion in control (SwitchPlayerCharacter) keeps its NPC slot across module transitions.
+        if(!(player.npcId >= 0)){ player.npcId = -1; }
 
         if(!this.miniGame){
           const playerSlot = GameState.PartyManager.GetCreatureStartingPartyIndex(player);
@@ -1804,7 +1805,7 @@ export class ModuleArea extends ModuleObject {
         }
       }else{
         let player = new ModulePlayer( this.getPlayerTemplate() );
-        player.npcId = -1;
+        player.npcId = GameState.PartyManager.GetLoadedPlayerNPCId(player.template);
         
         player.load();
         // GameState.currentLeader = player;

@@ -150,7 +150,7 @@ export class PartyManager {
     const currentPlayerTemplate = PartyManager.Player.save();
     PartyManager.PlayerTemplate = currentPlayerTemplate;
 
-    if(PartyManager.Player instanceof ModulePlayer || PartyManager.Player.isPlayer || PartyManager.Player.npcId < 0){
+    if(PartyManager.IsProtagonist(PartyManager.Player)){
       PartyManager.ActualPlayerTemplate = currentPlayerTemplate;
     }else if(!(PartyManager.ActualPlayerTemplate instanceof GFFObject)){
       PartyManager.ActualPlayerTemplate = currentPlayerTemplate;
@@ -938,10 +938,28 @@ export class PartyManager {
    * NPC_* id of the companion the player controls, -1 for the protagonist
    */
   static GetControlledNPC(){
-    const leader = PartyManager.party[0];
-    if(leader instanceof ModuleCreature){
-      return (leader instanceof ModulePlayer || !(leader.npcId >= 0)) ? -1 : leader.npcId;
+    const player = PartyManager.Player;
+    if(BitWise.InstanceOfObject(player, ModuleObjectType.ModuleCreature)){
+      return PartyManager.IsProtagonist(player) ? -1 : player.npcId;
     }
+    return PartyManager.ControlledNPC;
+  }
+
+  /**
+   * The protagonist is the player creature without an NPC slot. Not `instanceof ModulePlayer`:
+   * a save made while a companion was in control reloads that companion as the ModulePlayer.
+   */
+  static IsProtagonist(creature: ModuleCreature){
+    return !!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) && !(creature.npcId >= 0);
+  }
+
+  /**
+   * NPC slot of the player creature rebuilt from a save's Mod_PlayerList: the companion recorded in
+   * PT_CONTROLLED_NP when the saved player is not the protagonist (IsPC 0), else -1
+   */
+  static GetLoadedPlayerNPCId(template: GFFObject){
+    const isPC = template?.RootNode?.hasField('IsPC') ? !!template.RootNode.getFieldByLabel('IsPC').getValue() : true;
+    if(isPC || !PartyManager.IsValidNPCSlot(PartyManager.ControlledNPC)){ return -1; }
     return PartyManager.ControlledNPC;
   }
 
@@ -993,7 +1011,9 @@ export class PartyManager {
   }
 
   /**
-   * Every new game (K1/TSL, Quick/Custom chargen) passes here: drop whatever a previously loaded save left behind
+   * Every new game (K1/TSL, Quick/Custom chargen) passes here: drop whatever a previously loaded save
+   * left behind in PARTYTABLE (roster, scalars, journal, message logs, pazaak, tutorials, galaxy map)
+   * and INVENTORY.res. Must run before chargen registers the new protagonist's portrait.
    */
   static ResetForNewGame(){
     PartyManager.ResetPartyTableState();
@@ -1001,6 +1021,14 @@ export class PartyManager {
     PartyManager.party = [];
     PartyManager.PortraitOrder = [];
     PartyManager.Gold = 0;
+    GameState.JournalManager.ClearEntries();
+    GameState.JournalManager.SortOrder = 0;
+    GameState.DialogMessageManager.ClearEntries();
+    GameState.FeedbackMessageManager.ClearEntries();
+    GameState.PazaakManager.Initialize();
+    GameState.TutorialWindowTracker = [];
+    GameState.Planetary.Reset();
+    GameState.InventoryManager.ClearInventory();
   }
 
   static IsValidPuppetSlot(pupId: number){
@@ -1126,7 +1154,7 @@ export class PartyManager {
     if(owner == undefined){ return undefined; }
     if(owner == PartyManager.NPC_PLAYER){
       // Not PartyManager.Player: during SwitchPlayerCharacter that is the companion in control.
-      return PartyManager.party.find((pm) => pm instanceof ModulePlayer || pm?.npcId == PartyManager.NPC_PLAYER);
+      return PartyManager.party.find((pm) => PartyManager.IsProtagonist(pm));
     }
     return PartyManager.party.find((pm) => pm?.npcId == owner);
   }
@@ -1195,7 +1223,7 @@ export class PartyManager {
     let partyMember: ModuleCreature;
     const oldPC = PartyManager.Player;
 
-    if(oldPC instanceof ModuleCreature && (oldPC instanceof ModulePlayer || oldPC.isPlayer || oldPC.npcId < 0)){
+    if(oldPC instanceof ModuleCreature && PartyManager.IsProtagonist(oldPC)){
       PartyManager.ActualPlayerTemplate = oldPC.save();
       CurrentGame.WriteFile('pc.utc', PartyManager.ActualPlayerTemplate.getExportBuffer());
     }
@@ -1694,7 +1722,7 @@ export class PartyManager {
    * @returns void
    */
   static async ExportPlayerCharacter(){
-    if(GameState.PartyManager.Player instanceof ModuleCreature && (GameState.PartyManager.Player instanceof ModulePlayer || GameState.PartyManager.Player.isPlayer || GameState.PartyManager.Player.npcId < 0)){
+    if(GameState.PartyManager.Player instanceof ModuleCreature && PartyManager.IsProtagonist(GameState.PartyManager.Player)){
       GameState.PartyManager.ActualPlayerTemplate = GameState.PartyManager.Player.save();
     }
 

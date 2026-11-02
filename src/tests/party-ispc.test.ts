@@ -49,6 +49,8 @@ import { GFFObject } from '@/resource/GFFObject';
 import { GFFField } from '@/resource/GFFField';
 import { GFFStruct } from '@/resource/GFFStruct';
 import { GFFDataType } from '@/enums/resource/GFFDataType';
+import { CurrentGame } from '@/engine/CurrentGame';
+import { loadSourceWithStubs } from './support/loadSourceWithStubs';
 
 const state = GameState as any;
 
@@ -169,5 +171,167 @@ describe('IsPC marks the real protagonist', () => {
 
     expect(PartyManager.ActualPlayerTemplate === PartyManager.PlayerTemplate).toBe(true);
     expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
+  });
+});
+
+describe('a save made while a companion is in control survives save -> load -> save -> switch back', () => {
+  let exported: Uint8Array | undefined;
+
+  beforeEach(() => {
+    state.GameKey = 'TSL';
+    state.Planetary = { SaveStruct: () => new GFFStruct(), LoadStruct: jest.fn() };
+    state.TutorialWindowTracker = [];
+    const messages = () => ({ Entries: [] as any[], ClearEntries: jest.fn(), AddEntry: jest.fn(), SortOrder: 0 });
+    state.JournalManager = messages();
+    state.DialogMessageManager = messages();
+    state.FeedbackMessageManager = messages();
+    const cards = new Map();
+    for(let i = 0; i < 19; i++){ cards.set(i, { card: i, count: 0 }); }
+    state.PazaakManager = { Cards: cards, PlayerSideDeck: new Map() };
+    state.time = 0;
+    state.getCurrentPlayer = () => PartyManager.party[0] ?? PartyManager.Player;
+    state.group = { party: { add: jest.fn() } };
+    jest.spyOn(GFFObject.prototype, 'export').mockImplementation(function(this: GFFObject, _file: string, onExport?: Function){
+      exported = this.getExportBuffer();
+      onExport?.();
+      return Promise.resolve(this);
+    });
+  });
+
+  async function exportControlledNPC(){
+    await PartyManager.Export('save');
+    return new GFFObject(exported).RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue();
+  }
+
+  /** ModuleArea.loadPlayer's real body, with the renderer-heavy imports stubbed. */
+  async function areaLoadPlayer(){
+    const { ModuleArea } = loadSourceWithStubs('module/ModuleArea.ts', {
+      '@/GameState': { GameState },
+      '@/module/ModuleCreature': { ModuleCreature },
+      '@/module/ModulePlayer': { ModulePlayer },
+      '@/resource/GFFField': { GFFField },
+      '@/enums/resource/GFFDataType': { GFFDataType },
+    });
+    const area = Object.create(ModuleArea.prototype);
+    area.miniGame = undefined;
+    area.getSpawnLocation = () => ({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 1, z: 0 } });
+    (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValueOnce({ userData: {} } as never);
+    await area.loadPlayer();
+  }
+
+  test('controlled NPC preserved, protagonist template untouched', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    const companion = PartyManager.SwitchPlayerCharacter(2)!;
+    PartyManager.party = [companion];
+    const pcUtc = PartyManager.ActualPlayerTemplate;
+    expect(PartyManager.GetControlledNPC()).toBe(2);
+    expect(await exportControlledNPC()).toBe(2);
+    const partytable = new GFFObject(exported);
+    const ifo = new GFFObject(savegameIFO(companion.save()).getExportBuffer());
+
+    // Load, the way SaveGame.load -> Module.setFromIFO -> ModuleArea.loadPlayer does it.
+    PartyManager.Player = undefined;
+    PartyManager.party = [];
+    PartyManager.PlayerTemplate = undefined;
+    PartyManager.ActualPlayerTemplate = undefined;
+    await PartyManager.Load(partytable);
+    state.SaveGame = { pc: pcUtc };
+    loadSavegameModule(ifo);
+    await areaLoadPlayer();
+
+    const loaded = PartyManager.Player;
+    expect(loaded).toBeInstanceOf(ModulePlayer);
+    expect(loaded.getTag()).toBe('atton');
+    expect(loaded.npcId).toBe(2);
+    expect(loaded.isPC).toBe(0);
+    expect(PartyManager.GetControlledNPC()).toBe(2);
+    expect(PartyManager.IsProtagonist(loaded)).toBe(false);
+
+    // Re-save keeps it, and keeps pc.utc as the protagonist.
+    expect(await exportControlledNPC()).toBe(2);
+    expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
+
+    // Switching back must not overwrite the protagonist with the companion.
+    (CurrentGame.WriteFile as jest.Mock).mockClear();
+    const back = PartyManager.SwitchPlayerCharacter(-1)!;
+    expect(CurrentGame.WriteFile).not.toHaveBeenCalled();
+    expect(back.getTag()).toBe('exile');
+    expect(back.isPC).toBe(1);
+    expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
+    PartyManager.party = [back];
+    expect(PartyManager.GetControlledNPC()).toBe(-1);
+    expect(await exportControlledNPC()).toBe(-1);
+  });
+
+  test('a protagonist save never relabels the player as a companion, even with a stale PT_CONTROLLED_NP', async () => {
+    PartyManager.ResetPartyTableState();
+    const partytable = new GFFObject();
+    partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
+    // Pre-fix builds wrote the leader's party index here: 0 whenever any companion led.
+    partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CONTROLLED_NP')).setValue(0);
+    await PartyManager.Load(partytable);
+    PartyManager.Player = undefined;
+    PartyManager.party = [];
+    PartyManager.PlayerTemplate = creatureTemplate('exile', 1);
+    await areaLoadPlayer();
+    expect(PartyManager.Player.npcId).toBe(-1);
+    expect(PartyManager.GetControlledNPC()).toBe(-1);
+  });
+
+  test('GetLoadedPlayerNPCId trusts PT_CONTROLLED_NP only for a non-protagonist template and a real NPC slot', () => {
+    PartyManager.ResetPartyTableState();
+    const noIsPC = new GFFObject();
+    PartyManager.ControlledNPC = 3;
+    expect(PartyManager.GetLoadedPlayerNPCId(creatureTemplate('atton', 0))).toBe(3);
+    expect(PartyManager.GetLoadedPlayerNPCId(creatureTemplate('exile', 1))).toBe(-1);
+    expect(PartyManager.GetLoadedPlayerNPCId(noIsPC)).toBe(-1); // chargen/generated templates carry no IsPC
+    PartyManager.ControlledNPC = 12;
+    expect(PartyManager.GetLoadedPlayerNPCId(creatureTemplate('atton', 0))).toBe(-1);
+    PartyManager.ControlledNPC = -1;
+    expect(PartyManager.GetLoadedPlayerNPCId(creatureTemplate('atton', 0))).toBe(-1);
+  });
+
+  test('a companion in control keeps its NPC slot across a module transition', async () => {
+    const companion = PartyManager.SwitchPlayerCharacter(2)!;
+    PartyManager.party = [];
+    jest.spyOn(companion, 'load').mockImplementation(() => {});
+    (companion as any).collisionManager = {};
+    await areaLoadPlayer();
+    expect(PartyManager.Player).toBe(companion);
+    expect(companion.npcId).toBe(2);
+  });
+
+  test('ExportPlayerCharacter writes the protagonist to pc.utc, not a reloaded companion ModulePlayer', async () => {
+    const exile = PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+    const companionAsPlayer = new ModulePlayer(creatureTemplate('atton', 0));
+    companionAsPlayer.load();
+    companionAsPlayer.npcId = 2;
+    PartyManager.Player = companionAsPlayer;
+    (CurrentGame as any).gameinprogress_dir = 'gip';
+    const written: string[] = [];
+    (GFFObject.prototype.export as jest.Mock).mockImplementation(function(this: GFFObject){
+      written.push(this.RootNode.getFieldByLabel('Tag').getValue());
+      return Promise.resolve(this);
+    });
+    await PartyManager.ExportPlayerCharacter();
+    expect(written).toEqual(['exile']);
+    expect(PartyManager.ActualPlayerTemplate).toBe(exile);
+  });
+
+  test('GetPUPOwner(NPC_PLAYER) is the protagonist, not a reloaded companion ModulePlayer', () => {
+    PartyManager.ResetPartyTableState();
+    const companionAsPlayer = new ModulePlayer(creatureTemplate('atton', 0));
+    companionAsPlayer.npcId = 2;
+    const exile = new ModulePlayer(creatureTemplate('exile', 1));
+    exile.npcId = -1;
+    const remote = new ModuleCreature(creatureTemplate('remote', 0));
+    PartyManager.AddAvailablePUPByObject(0, remote);
+    PartyManager.AssignPUP(0, -1);
+    PartyManager.AddPartyPuppet(0, remote);
+    PartyManager.party = [companionAsPlayer];
+    expect(PartyManager.GetPuppetOwner(remote)).toBeUndefined();
+    PartyManager.party = [companionAsPlayer, exile];
+    expect(PartyManager.GetPuppetOwner(remote)).toBe(exile);
   });
 });

@@ -31,7 +31,10 @@ export class ModulePlayer extends ModuleCreature {
   save(){
     const gff = super.save();
     GameState.PartyManager.PlayerTemplate = gff;
-    GameState.PartyManager.ActualPlayerTemplate = gff;
+    // A save made while a companion was in control reloads it as the ModulePlayer; pc.utc stays the protagonist.
+    if(GameState.PartyManager.IsProtagonist(this)){
+      GameState.PartyManager.ActualPlayerTemplate = gff;
+    }
     this.template = gff;
     return gff;
   }

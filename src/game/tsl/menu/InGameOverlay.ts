@@ -279,6 +279,7 @@ export class InGameOverlay extends K1_InGameOverlay {
 
       this.TB_SOLO.addEventListener('click', (e) => {
         e.stopPropagation();
+        GameState.PartyManager.SetSoloMode(!GameState.SOLOMODE);
       });
 
       this.TB_STEALTH.addEventListener('click', (e) => {
