@@ -166,7 +166,7 @@ describe('starting a new game', () => {
     player.classes = [soldierClass()];
     player.firstName = 'Revan';
     expect(player.template.RootNode.hasField('IsPC')).toBe(false);
-    const party: any = { AddPortraitToOrder: jest.fn() };
+    const party: any = { AddPortraitToOrder: jest.fn(), ResetForNewGame: jest.fn() };
     state.PartyManager = party;
     state.GlobalVariableManager = { Init: jest.fn() };
     state.LoadModule = jest.fn();

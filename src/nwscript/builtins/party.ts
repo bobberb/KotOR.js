@@ -316,7 +316,9 @@ export const SpawnAvailablePUP = defineAction({
     if (!puppet?.available) {
       return undefined;
     }
-    return spawnCreatureFromTemplate(puppet.template, lLocation);
+    const creature = spawnCreatureFromTemplate(puppet.template, lLocation);
+    GameState.PartyManager.RelinkPuppet(creature, nPUP);
+    return creature;
   },
 });
 

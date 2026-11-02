@@ -34,6 +34,7 @@ import { GFFDataType } from '@/enums/resource/GFFDataType';
 import { GameEngineType } from '@/enums/engine/GameEngineType';
 import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { ActionStatus } from '@/enums/actions/ActionStatus';
+import { ActionType } from '@/enums/actions/ActionType';
 import { ActionParameterType } from '@/enums/actions/ActionParameterType';
 import { buildRuntimeAction, EngineVariant } from '@/nwscript/builtins/actionBuilder';
 import * as partyRoutines from '@/nwscript/builtins/party';
@@ -61,7 +62,7 @@ function creature(props: { npcId?: number, tag?: string, x?: number, y?: number,
     position: new THREE.Vector3(props.x ?? 0, props.y ?? 0, 0),
     rotation: new THREE.Euler(0, 0, props.facing ?? 0),
     area: { id: 7, isPointWalkable: () => true, getNearestWalkablePoint: (p: THREE.Vector3) => p },
-    actionQueue: { add: jest.fn(), addFront: jest.fn() },
+    actionQueue: Object.assign([] as any[], { add: jest.fn(), addFront: jest.fn() }),
     setAnimationState: jest.fn(),
     setComputedPath: jest.fn(),
     getHitDistance: () => 1,
@@ -75,6 +76,30 @@ function utc(tag: string){
   const gff = new GFFObject();
   gff.RootNode.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue(tag);
   return gff;
+}
+
+/**
+ * The real ModuleArea source with every import stubbed except GameState and ModuleCreature:
+ * importing it for real drags in the renderer (three/examples ESM), which jest cannot parse.
+ */
+function loadModuleAreaClass(): any {
+  const fs = require('fs'), path = require('path'), ts = require('typescript');
+  const filename = path.resolve(__dirname, '../module/ModuleArea.ts');
+  const js = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  const stub: any = new Proxy(function(){}, {
+    get(target: any, key) { if(key === '__esModule') return true; if(key === 'prototype') return target.prototype; return stub; },
+    construct() { return stub; },
+    apply() { return stub; },
+  });
+  const module = { exports: {} as any };
+  new Function('require', 'module', 'exports', js)((id: string) => {
+    if(id === '@/GameState') return { GameState };
+    if(id === '@/module/ModuleCreature') return { ModuleCreature };
+    return stub;
+  }, module, module.exports);
+  return module.exports.ModuleArea;
 }
 
 let exported: Uint8Array | undefined;
@@ -197,12 +222,44 @@ describe('TSL influence (routines 795-797)', () => {
     expect(get()(7)).toBe(PartyManager.INFLUENCE_DEFAULT);
   });
 
-  test('a corrupt out-of-range PT_NPC_INFLUENCE loads clamped', async () => {
+  test('an out-of-range PT_NPC_INFLUENCE loads as the neutral default, not a clamped extreme', async () => {
     PartyManager.InfluenceMap.set(1, 250);
     PartyManager.InfluenceMap.set(2, -9);
+    PartyManager.InfluenceMap.set(3, 100);
+    PartyManager.InfluenceMap.set(4, 0);
     await saveAndReload();
-    expect(get()(1)).toBe(100);
-    expect(get()(2)).toBe(0);
+    expect(get()(1)).toBe(PartyManager.INFLUENCE_DEFAULT);
+    expect(get()(2)).toBe(PartyManager.INFLUENCE_DEFAULT);
+    expect(get()(3)).toBe(100);
+    expect(get()(4)).toBe(0);
+  });
+
+  test('an older kotor.js/Forge TSL save with PT_NPC_INFLUENCE -1 in every slot loads neutral', async () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
+    const list = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_INFLUENCE'));
+    for(let i = 0; i < 12; i++){
+      const s = new GFFStruct();
+      s.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(-1);
+      list.addChildStruct(s);
+    }
+    await PartyManager.Load(new GFFObject(gff.getExportBuffer()));
+    for(let i = 0; i < 12; i++){ expect(get()(i)).toBe(PartyManager.INFLUENCE_DEFAULT); }
+  });
+
+  test('PT_INFLUENCE entries past the last CNPC slot are ignored', async () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
+    const list = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_INFLUENCE'));
+    for(let i = 0; i < 14; i++){
+      const s = new GFFStruct();
+      s.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(70);
+      list.addChildStruct(s);
+    }
+    await PartyManager.Load(gff);
+    expect(get()(11)).toBe(70);
+    expect(PartyManager.InfluenceMap.has(12)).toBe(false);
+    expect(PartyManager.InfluenceMap.has(13)).toBe(false);
   });
 });
 
@@ -281,13 +338,168 @@ describe('TSL puppets (routines 836-843)', () => {
     expect(PartyManager.Puppets[1]).toMatchObject({ available: false, owner: undefined });
     expect(PartyManager.Puppets[2]).toMatchObject({ available: true, select: false });
 
-    // The area save brings the creature back; scripts on it must still see a puppet with an owner.
+    // The area save brings the creature back; the area's party load relinks it, then scripts see a puppet with an owner.
     const reloadedOwner = creature({ npcId: 4 });
     PartyManager.party = [creature({ npcId: -1 }), reloadedOwner];
     const reloadedRemote = creature({ tag: 'G_REMOTE' });
+    const baoRemote = creature({ tag: 'bao_dur_remote' });
+    expect(routine(partyRoutines.GetIsPuppet)(reloadedRemote)).toBe(0); // not linked until the area load says so
+    PartyManager.RelinkPuppets([creature({ tag: 'trandoshan' }), reloadedRemote, baoRemote]);
     expect(routine(partyRoutines.GetIsPuppet)(reloadedRemote)).toBe(1);
     expect(routine(partyRoutines.GetPUPOwner)(reloadedRemote)).toBe(reloadedOwner);
-    expect(routine(partyRoutines.GetIsPuppet)(creature({ tag: 'bao_dur_remote' }))).toBe(0); // available, not in party
+    expect(routine(partyRoutines.GetIsPuppet)(baoRemote)).toBe(0); // available, not in party
+  });
+
+  test('ExportPartyMemberTemplates refreshes a live puppet from its creature, never from a destroyed one', async () => {
+    (GFFObject.prototype.export as jest.Mock).mockImplementation(function(this: GFFObject){ return Promise.resolve(this); });
+    jest.spyOn(PartyManager, 'ExportPlayerCharacter').mockResolvedValue(undefined);
+    const live = joinedRemote();
+    live.save = jest.fn(() => utc('g_remote_levelled'));
+    await PartyManager.ExportPartyMemberTemplates();
+    expect(PartyManager.Puppets[0].template!.RootNode.getFieldByLabel('Tag').getValue()).toBe('g_remote_levelled');
+
+    live.destroyed = true;
+    live.save = jest.fn(() => utc('torn_down'));
+    await PartyManager.ExportPartyMemberTemplates();
+    expect(live.save).not.toHaveBeenCalled();
+    expect(PartyManager.Puppets[0].template!.RootNode.getFieldByLabel('Tag').getValue()).toBe('g_remote_levelled');
+  });
+
+  function joinedRemote(tag = 'g_remote'){
+    const remote = creature({ tag });
+    routine(partyRoutines.AddAvailablePUPByObject)(0, remote);
+    routine(partyRoutines.AddPartyPuppet)(0, remote);
+    return remote;
+  }
+
+  test('queries never relink: asking about a same-tag decoy does not steal the slot', () => {
+    const remote = joinedRemote();
+    remote.destroyed = true;
+    const decoy = creature({ tag: 'g_remote' });
+    expect(routine(partyRoutines.GetIsPuppet)(decoy)).toBe(0);
+    expect(routine(partyRoutines.GetPUPOwner)(decoy)).toBeUndefined();
+    expect(PartyManager.Puppets[0].moduleObject).toBe(remote);
+  });
+
+  test('a destroyed puppet creature (module transition) relinks to its same-tag replacement', () => {
+    const remote = joinedRemote();
+    remote.destroyed = true;
+    const next = creature({ tag: 'g_remote' });
+    PartyManager.RelinkPuppets([next]);
+    expect(routine(partyRoutines.GetIsPuppet)(next)).toBe(1);
+  });
+
+  test('a puppet creature that is in no area counts as unlinked', () => {
+    const remote = joinedRemote();
+    remote.area = undefined;
+    const next = creature({ tag: 'g_remote' });
+    PartyManager.RelinkPuppets([next]);
+    expect(PartyManager.Puppets[0].moduleObject).toBe(next);
+  });
+
+  test('a live, linked puppet is not replaced by another creature with its tag', () => {
+    const remote = joinedRemote();
+    const twin = creature({ tag: 'g_remote' });
+    PartyManager.RelinkPuppets([twin]);
+    expect(PartyManager.Puppets[0].moduleObject).toBe(remote);
+    expect(routine(partyRoutines.GetIsPuppet)(twin)).toBe(0);
+  });
+
+  test('ModuleArea.loadParty relinks puppets from the area creatures', async () => {
+    const ModuleArea = loadModuleAreaClass();
+    const remote = joinedRemote();
+    remote.destroyed = true;
+    const restored = creature({ tag: 'g_remote' });
+    PartyManager.party = [creature({ npcId: -1 })];
+    jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
+    await ModuleArea.prototype.loadParty.call({ creatures: [creature({ tag: 'rodian' }), restored] });
+    expect(PartyManager.Puppets[0].moduleObject).toBe(restored);
+  });
+
+  test('SpawnAvailablePUP spawns only an available puppet, and links a party puppet to the spawn', () => {
+    const attached: any[] = [];
+    state.Module = { ModuleArea: { ModuleCreature: class {
+      objectType = CREATURE; area = { id: 7 }; template: any;
+      constructor(t: any){ this.template = t; }
+      load(){} clearAllActions(){} loadModel(){ return new Promise(() => {}); }
+      getTag(){ return 'g_remote'; }
+    } } };
+    const location: any = { area: { attachObject: (o: any) => attached.push(o) }, position: new THREE.Vector3(), getFacing: () => 0 };
+    const spawn = routine(partyRoutines.SpawnAvailablePUP);
+
+    PartyManager.Puppets[0].template = utc('g_remote'); // a template, but never made available
+    expect(spawn(0, location)).toBeUndefined();
+    expect(attached).toEqual([]);
+
+    const old = joinedRemote();
+    old.destroyed = true;
+    const spawned = spawn(0, location);
+    expect(spawned).toBeDefined();
+    expect(spawned.template).toBe(PartyManager.Puppets[0].template);
+    expect(attached).toEqual([spawned]);
+    expect(PartyManager.Puppets[0].moduleObject).toBe(spawned);
+  });
+
+  test('SavePUPByObject stores the puppet template', () => {
+    const { SavePUPByObject } = require('@/nwscript/builtins/missing');
+    routine(SavePUPByObject)(2, creature({ tag: 'hk_pup' }));
+    expect(PartyManager.Puppets[2].available).toBe(true);
+    expect(PartyManager.Puppets[2].template.RootNode.getFieldByLabel('Tag').getValue()).toBe('hk_pup');
+  });
+
+  test('AddPartyPuppet refuses a creature already bound to another puppet slot', () => {
+    const remote = joinedRemote();
+    routine(partyRoutines.AddAvailablePUPByObject)(1, creature({ tag: 'other' }));
+    expect(routine(partyRoutines.AddPartyPuppet)(1, remote)).toBe(0);
+    expect(PartyManager.PuppetMembers).toEqual([0]);
+  });
+
+  test('NPC_PLAYER owner is the protagonist in the party, never the companion in control', () => {
+    const remote = joinedRemote();
+    routine(partyRoutines.AssignPUP)(0, -1);
+    const atton = creature({ npcId: 0 });
+    PartyManager.Player = atton; // SwitchPlayerCharacter puppet segment
+    PartyManager.party = [atton];
+    expect(routine(partyRoutines.GetPUPOwner)(remote)).toBeUndefined();
+    const protagonist = Object.assign(Object.create(ModulePlayer.prototype), creature({ npcId: -1 }));
+    PartyManager.party = [atton, protagonist];
+    expect(routine(partyRoutines.GetPUPOwner)(remote)).toBe(protagonist);
+  });
+
+  test('ActionFollowOwner does nothing when the puppet is its own owner', () => {
+    const self = creature({ npcId: 2, tag: 'g_remote' });
+    PartyManager.party = [creature({ npcId: -1 }), self];
+    routine(partyRoutines.AddAvailablePUPByObject)(0, self);
+    routine(partyRoutines.AssignPUP)(0, 2);
+    routine(partyRoutines.AddPartyPuppet)(0, self);
+    routine(partyRoutines.ActionFollowOwner, 'tsl', self)();
+    expect(self.actionQueue.add).not.toHaveBeenCalled();
+  });
+
+  test('PT_PUPPETS with a differently labelled element still loads the puppet id', async () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
+    const list = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_PUPPETS'));
+    const s = new GFFStruct();
+    s.addField(new GFFField(GFFDataType.DWORD, 'PT_PUP_ID')).setValue(2);
+    list.addChildStruct(s);
+    await PartyManager.Load(new GFFObject(gff.getExportBuffer()));
+    expect(PartyManager.PuppetMembers).toEqual([2]);
+  });
+
+  test('a PT_AVAIL_PUPS list longer than the puppet table loads without throwing', async () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
+    const list = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_AVAIL_PUPS'));
+    for(let i = 0; i < 5; i++){
+      const s = new GFFStruct();
+      s.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_AVAIL')).setValue(1);
+      s.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_SELECT')).setValue(1);
+      list.addChildStruct(s);
+    }
+    await PartyManager.Load(gff);
+    expect([0, 1, 2].map(i => PartyManager.Puppets[i].available)).toEqual([true, true, true]);
+    expect(PartyManager.Puppets[3]).toBeUndefined();
   });
 
   test('ExportPartyMemberTemplates writes each puppet template', async () => {
@@ -326,6 +538,48 @@ describe('solo mode', () => {
     expect(routine(GetSoloMode, 'kotor')()).toBe(1);
     expect(action.update(0)).toBe(ActionStatus.COMPLETE);
     expect(member.actionQueue.addFront).not.toHaveBeenCalled();
+  });
+
+  test('turning solo mode on cancels a follow move already under way, for non-leaders only', () => {
+    const { leader, member } = follower();
+    const act = (type: number, groupId: number) => ({ type, groupId, dispose: jest.fn() });
+    const followMove = act(ActionType.ActionMoveToPoint, 5);
+    const follow = act(ActionType.ActionFollowLeader, 5);
+    const scriptedMove = act(ActionType.ActionMoveToPoint, 9);
+    member.actionQueue.push(followMove, follow, scriptedMove);
+    const leaderFollow = act(ActionType.ActionFollowLeader, 3);
+    leader.actionQueue.push(leaderFollow);
+
+    routine(SetSoloMode, 'kotor')(0);
+    expect(member.actionQueue.length).toBe(3);
+
+    routine(SetSoloMode, 'kotor')(1);
+    expect([...member.actionQueue]).toEqual([scriptedMove]);
+    expect(followMove.dispose).toHaveBeenCalled();
+    expect(member.setComputedPath).toHaveBeenCalledWith(undefined);
+    expect(member.speed).toBe(0);
+    expect([...leader.actionQueue]).toEqual([leaderFollow]);
+  });
+
+  test('a stuck companion is warped to its slot, but not in solo mode or when it is the one in control', () => {
+    const { leader, member } = follower();
+    member.collisionTimer = 1;
+    expect(PartyManager.ShouldWarpStuckMember(member)).toBe(true);
+    state.SOLOMODE = true;
+    expect(PartyManager.ShouldWarpStuckMember(member)).toBe(false);
+    state.SOLOMODE = false;
+    member.collisionTimer = 0.5;
+    expect(PartyManager.ShouldWarpStuckMember(member)).toBe(false);
+    leader.collisionTimer = 2;
+    expect(PartyManager.ShouldWarpStuckMember(leader)).toBe(false);
+    const stranger = creature();
+    stranger.collisionTimer = 2;
+    expect(PartyManager.ShouldWarpStuckMember(stranger)).toBe(false);
+  });
+
+  test('ModuleCreature routes its stuck-member warp through ShouldWarpStuckMember', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../module/ModuleCreature.ts'), 'utf8');
+    expect(source).toMatch(/if \(GameState\.PartyManager\.ShouldWarpStuckMember\(this\)\) \{\s*this\.setPosition\(GameState\.PartyManager\.GetFollowPosition\(this\)\);/);
   });
 
   test('PT_SOLOMODE round-trips both ways', async () => {
@@ -413,6 +667,26 @@ describe('SetFormation (729)', () => {
     set(a, a, PartyFormationPattern.LINE, 2);
     near(PartyManager.GetFollowPosition(a).clone(), -1.5, 0);
   });
+
+  test('a destroyed anchor falls back to the default party slot', () => {
+    const leader = creature({ npcId: -1, x: 0, y: 0, facing: 0 });
+    const guard = creature({ npcId: -1, x: 50, y: 50, facing: 0 });
+    const a = creature({ npcId: 1 });
+    PartyManager.party = [leader, a];
+    routine(partyRoutines.SetFormation, 'kotor')(guard, a, PartyFormationPattern.LINE, 2);
+    near(PartyManager.GetFollowPosition(a).clone(), 51.5, 50);
+    guard.destroyed = true;
+    near(PartyManager.GetFollowPosition(a).clone(), -1.5, 0);
+  });
+
+  test('a formation slot off the walkmesh snaps to the nearest walkable point', () => {
+    const leader = creature({ npcId: -1, x: 0, y: 0, facing: 0 });
+    const a = creature({ npcId: 1 });
+    a.area = { isPointWalkable: () => false, getNearestWalkablePoint: () => new THREE.Vector3(9, 9, 0) };
+    PartyManager.party = [leader, a];
+    routine(partyRoutines.SetFormation, 'kotor')(leader, a, PartyFormationPattern.WEDGE, 1);
+    near(PartyManager.GetFollowPosition(a).clone(), 9, 9);
+  });
 });
 
 describe('PARTYTABLE scalars round-trip through Export/Load', () => {
@@ -457,15 +731,63 @@ describe('PARTYTABLE scalars round-trip through Export/Load', () => {
     }
   });
 
-  test('a save without the optional scalars loads defaults, not the previous session\'s values', async () => {
+  /** Dirty every piece of state PARTYTABLE owns, as a previous session would leave it. */
+  function dirtyPartyTableState(){
     PartyManager.XPPool = 9; PartyManager.aiStyle = 2; PartyManager.FollowState = 1; PartyManager.ControlledNPC = 3;
-    PartyManager.SwoopUpgrade1 = 4; PartyManager.InfluenceMap.set(0, 99); PartyManager.ChemicalCount = 5;
+    PartyManager.CheatUsed = 1; PartyManager.LastGUIPanel = 4;
+    PartyManager.SwoopUpgrade1 = 4; PartyManager.SwoopUpgrade2 = 5; PartyManager.SwoopUpgrade3 = 6;
+    PartyManager.InfluenceMap.set(0, 99); PartyManager.ChemicalCount = 5; PartyManager.ComponentCount = 6;
+    state.SOLOMODE = true; state.disableHealthRegen = true;
+    PartyManager.NPCS[3].available = true;
+    PartyManager.Puppets[0].available = true; PartyManager.Puppets[0].owner = 4;
+    PartyManager.PuppetMembers = [0];
+    const anchor = creature({ npcId: -1 }), member = creature({ npcId: 1 });
+    PartyManager.SetFormation(anchor, member, PartyFormationPattern.WEDGE, 2);
+    return member;
+  }
+
+  function expectPartyTableDefaults(formationMember: any){
+    expect({
+      XPPool: PartyManager.XPPool, aiStyle: PartyManager.aiStyle, FollowState: PartyManager.FollowState,
+      ControlledNPC: PartyManager.ControlledNPC, CheatUsed: PartyManager.CheatUsed, LastGUIPanel: PartyManager.LastGUIPanel,
+      swoop: [PartyManager.SwoopUpgrade1, PartyManager.SwoopUpgrade2, PartyManager.SwoopUpgrade3],
+      influence0: PartyManager.InfluenceMap.get(0), chemical: PartyManager.ChemicalCount, component: PartyManager.ComponentCount,
+      solo: state.SOLOMODE, noRegen: state.disableHealthRegen, npc3: PartyManager.NPCS[3].available,
+      pup0: { available: PartyManager.Puppets[0].available, owner: PartyManager.Puppets[0].owner },
+      puppetMembers: PartyManager.PuppetMembers, formation: PartyManager.Formations.has(formationMember),
+    }).toEqual({
+      XPPool: 0, aiStyle: 0, FollowState: 0, ControlledNPC: -1, CheatUsed: 0, LastGUIPanel: 0,
+      swoop: [-1, -1, -1], influence0: PartyManager.INFLUENCE_DEFAULT, chemical: 0, component: 0,
+      solo: false, noRegen: false, npc3: false, pup0: { available: false, owner: undefined },
+      puppetMembers: [], formation: false,
+    });
+  }
+
+  test('a save without the optional scalars loads defaults, not the previous session\'s values', async () => {
+    const member = dirtyPartyTableState();
     const gff = new GFFObject();
     gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(0);
     await PartyManager.Load(gff);
-    expect([PartyManager.XPPool, PartyManager.aiStyle, PartyManager.FollowState, PartyManager.ControlledNPC,
-      PartyManager.SwoopUpgrade1, PartyManager.InfluenceMap.get(0), PartyManager.ChemicalCount])
-      .toEqual([0, 0, 0, -1, -1, PartyManager.INFLUENCE_DEFAULT, 0]);
+    expectPartyTableDefaults(member);
+  });
+
+  test('ResetForNewGame clears the party table plus the roster, portraits and gold', () => {
+    const member = dirtyPartyTableState();
+    PartyManager.CurrentMembers = [{ isLeader: false, memberID: 3 }];
+    PartyManager.party = [creature({ npcId: 3 })];
+    PartyManager.PortraitOrder = ['po_patton'];
+    PartyManager.Gold = 500;
+    PartyManager.ResetForNewGame();
+    expectPartyTableDefaults(member);
+    expect([PartyManager.CurrentMembers, PartyManager.party, PartyManager.PortraitOrder, PartyManager.Gold]).toEqual([[], [], [], 0]);
+  });
+
+  test('GetControlledNPC is -1 for a leader with no NPC slot, whatever was loaded', () => {
+    PartyManager.ControlledNPC = 5;
+    PartyManager.party = [creature({ npcId: undefined })];
+    expect(PartyManager.GetControlledNPC()).toBe(-1);
+    PartyManager.party = [creature({ npcId: -1 })];
+    expect(PartyManager.GetControlledNPC()).toBe(-1);
   });
 
   test('PT_CONTROLLED_NP is the leading companion\'s NPC id, -1 when the protagonist leads', async () => {

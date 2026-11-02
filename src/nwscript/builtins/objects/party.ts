@@ -63,7 +63,7 @@ export const SetSoloMode = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [intParam("bSoloMode")] as const,
   kotor(this: NWScriptInstance, bSoloMode) {
-    GameState.SOLOMODE = !!bSoloMode;
+    GameState.PartyManager.SetSoloMode(!!bSoloMode);
   },
 });
 

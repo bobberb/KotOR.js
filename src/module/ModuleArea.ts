@@ -1847,6 +1847,7 @@ export class ModuleArea extends ModuleObject {
       await GameState.PartyManager.LoadPartyMember(i);
     }
     GameState.PartyManager.party = GameState.PartyManager.party.filter((member) => member instanceof ModuleCreature);
+    GameState.PartyManager.RelinkPuppets(this.creatures);
     GameState.PartyManager.RebuildPortraitOrder();
     GameState.currentLeader = GameState.PartyManager.party[0];
   }

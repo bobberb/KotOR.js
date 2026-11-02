@@ -24,6 +24,8 @@ import { PazaakSideDeckSlots } from "@/enums/minigames/PazaakSideDeckSlots";
 import { type SWPortrait } from "@/engine/rules/SWPortrait";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { BitWise } from "@/utility/BitWise";
+import { ActionType } from "@/enums/actions/ActionType";
+import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
 
 export interface CurrentMember {
   isLeader: boolean,
@@ -282,7 +284,9 @@ export class PartyManager {
       const list = gff.getFieldByLabel('PT_INFLUENCE').getChildStructs();
       for(let i = 0; i < list.length && i < PartyManager.MaxPartyCount; i++){
         const influence = list[i].getFieldByLabel('PT_NPC_INFLUENCE').getValue();
-        GameState.PartyManager.InfluenceMap.set(i, PartyManager.ClampInfluence(influence));
+        // Older kotor.js and Forge saves wrote -1 ("unset") for every slot; clamping that would mean hostile 0.
+        const valid = Number.isFinite(influence) && influence >= PartyManager.INFLUENCE_MIN && influence <= PartyManager.INFLUENCE_MAX;
+        GameState.PartyManager.InfluenceMap.set(i, valid ? influence : PartyManager.INFLUENCE_DEFAULT);
       }
     }
 
@@ -941,6 +945,64 @@ export class PartyManager {
     return PartyManager.ControlledNPC;
   }
 
+  /**
+   * Solo mode: followers stay where they are. Turning it on also cancels follow moves already under way.
+   */
+  static SetSoloMode(enabled: boolean){
+    GameState.SOLOMODE = !!enabled;
+    if(!GameState.SOLOMODE){ return; }
+    const leader = PartyManager.party[0];
+    for(const member of PartyManager.party){
+      if(member && member !== leader){
+        PartyManager.CancelFollowLeader(member);
+      }
+    }
+  }
+
+  /**
+   * Drop queued ActionFollowLeader actions and the moves they enqueued (same groupId), and stop in place
+   */
+  static CancelFollowLeader(creature: ModuleCreature){
+    const queue = creature?.actionQueue;
+    if(!queue){ return; }
+    const groups = new Set<number>();
+    for(const action of queue){
+      if(action?.type == ActionType.ActionFollowLeader){ groups.add(action.groupId); }
+    }
+    if(!groups.size){ return; }
+    let index = queue.length;
+    while(index--){
+      const action = queue[index];
+      const isFollow = action?.type == ActionType.ActionFollowLeader;
+      const isFollowMove = action?.type == ActionType.ActionMoveToPoint && groups.has(action.groupId);
+      if(isFollow || isFollowMove){
+        queue.splice(index, 1).forEach((a) => a.dispose?.());
+      }
+    }
+    creature.force = 0;
+    creature.speed = 0;
+    creature.setComputedPath?.(undefined);
+    creature.setAnimationState?.(ModuleCreatureAnimState.IDLE);
+  }
+
+  /**
+   * A stuck, non-controlled party member is warped to its follow slot, except in solo mode where it must stay put
+   */
+  static ShouldWarpStuckMember(creature: ModuleCreature){
+    return creature?.npcId != undefined && !GameState.SOLOMODE && creature != GameState.getCurrentPlayer() && creature.collisionTimer >= 1;
+  }
+
+  /**
+   * Every new game (K1/TSL, Quick/Custom chargen) passes here: drop whatever a previously loaded save left behind
+   */
+  static ResetForNewGame(){
+    PartyManager.ResetPartyTableState();
+    PartyManager.CurrentMembers = [];
+    PartyManager.party = [];
+    PartyManager.PortraitOrder = [];
+    PartyManager.Gold = 0;
+  }
+
   static IsValidPuppetSlot(pupId: number){
     return Number.isInteger(pupId) && pupId >= 0 && pupId < PartyManager.MaxPuppetCount && !!PartyManager.Puppets[pupId];
   }
@@ -1012,18 +1074,46 @@ export class PartyManager {
     for(const pupId of PartyManager.PuppetMembers){
       if(PartyManager.Puppets[pupId]?.moduleObject === object){ return pupId; }
     }
-    // After a reload the creature comes back from the area save, not from PARTYTABLE; relink it by its template tag.
+    return -1;
+  }
+
+  /**
+   * A party puppet whose creature is gone (destroyed, or never placed in an area) needs relinking
+   */
+  static IsPuppetUnlinked(pupId: number){
+    const object = PartyManager.Puppets[pupId]?.moduleObject;
+    return !BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature) || !object.area;
+  }
+
+  /**
+   * Bind a creature to an unlinked party puppet whose template tag it carries.
+   * PARTYTABLE stores only PT_PUPPETS ids; the creature itself comes back from the area save,
+   * so this runs when an area's creatures are loaded and when SpawnAvailablePUP creates one.
+   * @returns the PUP_* id it was bound to, or -1
+   */
+  static RelinkPuppet(object: ModuleCreature, pupId?: number): number {
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return -1; }
+    const linked = PartyManager.GetPuppetId(object);
+    if(linked >= 0){ return linked; }
     const tag = object.getTag?.()?.toLowerCase();
-    if(!tag){ return -1; }
-    for(const pupId of PartyManager.PuppetMembers){
-      const puppet = PartyManager.Puppets[pupId];
-      if(!puppet || puppet.moduleObject || !puppet.template?.RootNode.hasField('Tag')){ continue; }
-      if(String(puppet.template.RootNode.getFieldByLabel('Tag').getValue()).toLowerCase() == tag){
-        puppet.moduleObject = object;
-        return pupId;
+    const candidates = pupId === undefined ? PartyManager.PuppetMembers : PartyManager.PuppetMembers.filter((id) => id === pupId);
+    for(const id of candidates){
+      const puppet = PartyManager.Puppets[id];
+      if(!puppet || !PartyManager.IsPuppetUnlinked(id)){ continue; }
+      if(pupId === undefined){
+        if(!tag || !puppet.template?.RootNode.hasField('Tag')){ continue; }
+        if(String(puppet.template.RootNode.getFieldByLabel('Tag').getValue()).toLowerCase() != tag){ continue; }
       }
+      puppet.moduleObject = object;
+      return id;
     }
     return -1;
+  }
+
+  static RelinkPuppets(creatures: ModuleCreature[] = []){
+    for(const creature of creatures){
+      PartyManager.RelinkPuppet(creature);
+    }
   }
 
   /**
@@ -1035,7 +1125,8 @@ export class PartyManager {
     const owner = PartyManager.Puppets[pupId].owner;
     if(owner == undefined){ return undefined; }
     if(owner == PartyManager.NPC_PLAYER){
-      return PartyManager.party.find((pm) => pm instanceof ModulePlayer || pm?.npcId == PartyManager.NPC_PLAYER) ?? PartyManager.Player;
+      // Not PartyManager.Player: during SwitchPlayerCharacter that is the companion in control.
+      return PartyManager.party.find((pm) => pm instanceof ModulePlayer || pm?.npcId == PartyManager.NPC_PLAYER);
     }
     return PartyManager.party.find((pm) => pm?.npcId == owner);
   }
@@ -1501,7 +1592,7 @@ export class PartyManager {
    */
   static GetFollowPosition(creature: ModuleCreature){
     const formation = PartyManager.Formations.get(creature);
-    if(formation && BitWise.InstanceOfObject(formation.anchor, ModuleObjectType.ModuleCreature) && !formation.anchor.destroyed){
+    if(formation && BitWise.InstanceOfObject(formation.anchor, ModuleObjectType.ModuleCreature)){
       return this.GetFormationPosition(creature, formation.anchor, formation.pattern, formation.position);
     }
     return this.GetFollowPositionAtIndex(PartyManager.party.indexOf(creature));
@@ -1586,7 +1677,7 @@ export class PartyManager {
       }
       for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
         const puppet = PartyManager.Puppets[i];
-        if(BitWise.InstanceOfObject(puppet?.moduleObject, ModuleObjectType.ModuleCreature) && !puppet.moduleObject.destroyed){
+        if(BitWise.InstanceOfObject(puppet?.moduleObject, ModuleObjectType.ModuleCreature)){
           puppet.template = puppet.moduleObject.save();
         }
         if(puppet?.template instanceof GFFObject){
