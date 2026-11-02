@@ -1,5 +1,10 @@
 import type { GUILabel, GUIButton } from "@/gui";
 import { MenuPazaakGame as K1_MenuPazaakGame } from "@/game/kotor/KOTOR";
+import { GameState } from "@/GameState";
+import { PazaakCards } from "@/enums/minigames/PazaakCards";
+import { PazaakHandSlots } from "@/enums/minigames/PazaakHandSlots";
+import { PazaakTurnMode } from "@/enums/minigames/PazaakTurnMode";
+import { getCardModifier } from "@/engine/minigames/PazaakRules";
 
 /**
  * MenuPazaakGame class.
@@ -102,11 +107,49 @@ export class MenuPazaakGame extends K1_MenuPazaakGame {
   }
 
   async menuControlInitializer(skipInit: boolean = false) {
-    await super.menuControlInitializer(true);
+    // pazaakgame_p carries every K1 control (flip, side, end turn, stand), so
+    // the K1 bindings apply as-is; BTN_CHANGE0-3 are the TSL-only additions.
+    await super.menuControlInitializer(skipInit);
     if(skipInit) return;
     return new Promise<void>((resolve, reject) => {
+      for(let i = 0; i < PazaakHandSlots.MAX_SLOTS; i++){
+        const button = this.getHandCardChangeButton(i);
+        if(!button) continue;
+        button.addEventListener('click', () => {
+          if(this.noClicks() || GameState.PazaakManager.Tables[PazaakTurnMode.PLAYER].handCardPlayed){
+            return;
+          }
+          GameState.PazaakManager.ToggleHandCardValue(PazaakTurnMode.PLAYER, i);
+        });
+      }
       resolve();
     });
+  }
+
+  getHandCardChangeButton(cardIndex: number): GUIButton {
+    return (this as any)[`BTN_CHANGE${cardIndex}`] as GUIButton;
+  }
+
+  rebuild(){
+    super.rebuild();
+    const pm = GameState.PazaakManager;
+    const table = pm.Tables[PazaakTurnMode.PLAYER];
+    for(let i = 0; i < PazaakHandSlots.MAX_SLOTS; i++){
+      const button = this.getHandCardChangeButton(i);
+      const cardIndex = table.handCards.get(i);
+      const card = (cardIndex == undefined || cardIndex == PazaakCards.INVALID) ? undefined : pm.Config.data.sideDeckCards[cardIndex];
+      if(card?.altModifier){
+        const value = getCardModifier(card, { flipped: table.flipCards.get(i), swapped: table.swapValueCards.get(i) });
+        (this.getHandCardLabel(PazaakTurnMode.PLAYER, i) as any)?.setText(`${value > 0 ? '+' : ''}${value}`);
+      }
+      if(!button) continue;
+      if(card?.altModifier){
+        button.show();
+        button.disableSelection = this.noClicks() || table.handCardPlayed;
+      }else{
+        button.hide();
+      }
+    }
   }
 
   hide(): void {

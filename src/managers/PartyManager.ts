@@ -318,39 +318,64 @@ export class PartyManager {
       }
     }
 
-    /**
-     * Pazaak Cards
-     * PT_PAZAAKCARDS contains the cards that the player has in their deck
-     * struct child index is the card enum value
-     * PT_PAZAAKCOUNT is the number of that card in the deck
-     * - max index is 17
-     * - unknown 18th index always contains a PT_PAZAAKCOUNT of 0 unlike the other 17 PT_PAZAAKCOUNT is a BYTE
-     * - where the other 17 are INTs
-     */
-    if(gff.RootNode.hasField('PT_PAZAAKCARDS')){
-      const list = gff.RootNode.getFieldByLabel('PT_PAZAAKCARDS').getChildStructs();
-      for(let i = 0; i < list.length; i++){
-        GameState.PazaakManager.Cards.set(i, {
-          card: i,
-          count: list[i].getFieldByLabel('PT_PAZAAKCOUNT').getValue()
-        });
+    PartyManager.ReadPazaakCollection(gff.RootNode);
+  }
+
+  /**
+   * Read the pazaak card collection and side deck from a PARTYTABLE root.
+   * PT_PAZAAKCARDS: struct index is the card enum value, PT_PAZAAKCOUNT its count.
+   * PT_PAZSIDELIST: struct index is the side deck slot, PT_PAZSIDECARD the card.
+   * Entries missing from an older/shorter save are zeroed (or emptied) rather
+   * than keeping stale counts from the previous session.
+   */
+  static ReadPazaakCollection(root: GFFStruct){
+    const pazaak = GameState.PazaakManager;
+    if(root.hasField('PT_PAZAAKCARDS')){
+      const list = root.getFieldByLabel('PT_PAZAAKCARDS').getChildStructs();
+      for(let i = 0; i < PazaakCards.TSL_MAX_CARDS; i++){
+        const struct = list[i];
+        const count = struct?.hasField('PT_PAZAAKCOUNT') ? Number(struct.getFieldByLabel('PT_PAZAAKCOUNT').getValue()) || 0 : 0;
+        pazaak.Cards.set(i, { card: i, count: Math.max(0, count) });
       }
     }
 
-    /**
-     * Pazaak Side Deck
-     * PT_PAZSIDELIST contains the cards that the player has equipped in their side deck
-     * struct child index is the card index in the side deck
-     * PT_PAZSIDECARD is the card enum value
-     * max index is 10
-     */
-    if(gff.RootNode.hasField('PT_PAZSIDELIST')){
-      const list = gff.RootNode.getFieldByLabel('PT_PAZSIDELIST').getChildStructs();
-      for(let i = 0; i < list.length; i++){
-        GameState.PazaakManager.PlayerSideDeck.set(i, list[i].getFieldByLabel('PT_PAZSIDECARD').getValue());
+    if(root.hasField('PT_PAZSIDELIST')){
+      const list = root.getFieldByLabel('PT_PAZSIDELIST').getChildStructs();
+      const maxCards = pazaak.GetMaxCards();
+      for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
+        const struct = list[i];
+        const card = struct?.hasField('PT_PAZSIDECARD') ? Number(struct.getFieldByLabel('PT_PAZSIDECARD').getValue()) : PazaakCards.INVALID;
+        pazaak.PlayerSideDeck.set(i, (card >= 0 && card < maxCards) ? card : PazaakCards.INVALID);
       }
     }
-    
+  }
+
+  /**
+   * Write the pazaak card collection and side deck to a PARTYTABLE root.
+   * K1 writes MAX_CARDS + 1 entries (the 19th is an unused BYTE, always 0);
+   * TSL writes TSL_MAX_CARDS INT entries so its special cards persist.
+   */
+  static WritePazaakCollection(root: GFFStruct){
+    const pazaak = GameState.PazaakManager;
+    const isTSL = GameState.GameKey == GameEngineType.TSL;
+    const entries = isTSL ? PazaakCards.TSL_MAX_CARDS : PazaakCards.MAX_CARDS + 1;
+    const pazaakCardsList = root.addField(new GFFField(GFFDataType.LIST, 'PT_PAZAAKCARDS'));
+    for(let i = 0; i < entries; i++){
+      const cardStruct = new GFFStruct(0);
+      const isUnusedCard = !isTSL && i == PazaakCards.UNUSED_CARD;
+      cardStruct.addField(new GFFField(isUnusedCard ? GFFDataType.BYTE : GFFDataType.INT, 'PT_PAZAAKCOUNT'))
+        .setValue(isUnusedCard ? 0 : (pazaak.Cards.get(i)?.count ?? 0));
+      pazaakCardsList.addChildStruct(cardStruct);
+    }
+
+    const pazaakSideDeckList = root.addField(new GFFField(GFFDataType.LIST, 'PT_PAZSIDELIST'));
+    for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
+      const sideDeckStruct = new GFFStruct(0);
+      const sideDeckCard = pazaak.PlayerSideDeck.get(i);
+      sideDeckStruct.addField(new GFFField(GFFDataType.INT, 'PT_PAZSIDECARD'))
+        .setValue(sideDeckCard ?? PazaakCards.INVALID);
+      pazaakSideDeckList.addChildStruct(sideDeckStruct);
+    }
   }
 
   /**
@@ -450,35 +475,7 @@ export class PartyManager {
 
       partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_NUM_MEMBERS')).setValue(numMembers);
 
-      /**
-       * Pazaak Cards
-       */
-      const pazaakCardsList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_PAZAAKCARDS'));
-      for(let i = 0; i < PazaakCards.MAX_CARDS + 1; i++){
-        let cardStruct = new GFFStruct(0);
-        const card = GameState.PazaakManager.Cards.get(i);
-        const isUnusedCard = i == PazaakCards.UNUSED_CARD;
-        /**
-         * Pazaak Unused Card
-         * - index 0-17: set the card count
-         * - index 18, unknown card, not sure if it's used at all
-         */
-        cardStruct.addField(new GFFField( isUnusedCard ? GFFDataType.BYTE : GFFDataType.INT, 'PT_PAZAAKCOUNT'))
-          .setValue(isUnusedCard ? 0 : card.count);
-        pazaakCardsList.addChildStruct(cardStruct);
-      }
-
-      /**
-       * Pazaak Side Deck
-       */
-      const pazaakSideDeckList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_PAZSIDELIST'));
-      for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
-        let sideDeckStruct = new GFFStruct(0);
-        const sideDeckCard = GameState.PazaakManager.PlayerSideDeck.get(i);
-        sideDeckStruct.addField(new GFFField(GFFDataType.INT, 'PT_PAZSIDECARD'))
-          .setValue(sideDeckCard);
-        pazaakSideDeckList.addChildStruct(sideDeckStruct);
-      }
+      PartyManager.WritePazaakCollection(partytable.RootNode);
 
       partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_PLAYEDSECONDS')).setValue(GameState.time | 0);
       partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_SOLOMODE')).setValue(0);

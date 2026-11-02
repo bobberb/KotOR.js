@@ -150,7 +150,8 @@ export class InventoryManager {
       GameState.PartyManager.AddGold(itemStackSize);
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.CREDITS_RECEIVED);
     }else if(item.getBaseItemId() == BaseItemType.PAZAAK_CARD){
-      GameState.PazaakManager.AddCard(item.getModelVariation(), itemStackSize);
+      // ModelVariation is 1-based (getModelVariation() coerces 0 to 1), card enum is 0-based
+      GameState.PazaakManager.AddCard(item.getModelVariation() - 1, itemStackSize);
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_RECEIVED);
     }else{
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_RECEIVED);

@@ -809,6 +809,21 @@ export class PazaakManager {
   }
 
   /**
+   * Toggle a hand card between its base and alternate value (TSL 1±2 card).
+   * @returns true if the card has an alternate value and was toggled
+   */
+  static ToggleHandCardValue(tableIndex: number, handIndex: number): boolean {
+    const table = this.Tables[tableIndex];
+    const cardIndex = table.handCards.get(handIndex);
+    const card = (cardIndex == undefined || cardIndex == PazaakCards.INVALID) ? undefined : this.Config.data.sideDeckCards[cardIndex];
+    if(!card?.altModifier || table.handCardPlayed){
+      return false;
+    }
+    table.swapValueCards.set(handIndex, !table.swapValueCards.get(handIndex));
+    return true;
+  }
+
+  /**
    * End the turn
    */
   static AddEndTurnAction(tableIndex: number){
