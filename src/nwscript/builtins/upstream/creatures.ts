@@ -97,6 +97,10 @@ export const GetFortitudeSavingThrow: INWScriptDefAction = {
     args: [NWScriptDataType.OBJECT],
     action: function(this: NWScriptInstance, args: [ModuleObject]){
       if(BitWise.InstanceOfObject(args[0], ModuleObjectType.ModuleCreature)){
+        //Saves are derived at runtime (class base + ability modifier + bonuses); the stored field is only the bonus
+        if(typeof (args[0] as any).getTotalFortitudeSave === 'function'){
+          return (args[0] as any).getTotalFortitudeSave() || 0;
+        }
         return (args[0] as any).fortitudeSaveThrow || 0;
       }
       return 0;
@@ -111,6 +115,9 @@ export const GetWillSavingThrow: INWScriptDefAction = {
     args: [NWScriptDataType.OBJECT],
     action: function(this: NWScriptInstance, args: [ModuleObject]){
       if(BitWise.InstanceOfObject(args[0], ModuleObjectType.ModuleCreature)){
+        if(typeof (args[0] as any).getTotalWillSave === 'function'){
+          return (args[0] as any).getTotalWillSave() || 0;
+        }
         return (args[0] as any).willSaveThrow || 0;
       }
       return 0;
@@ -125,6 +132,9 @@ export const GetReflexSavingThrow: INWScriptDefAction = {
     args: [NWScriptDataType.OBJECT],
     action: function(this: NWScriptInstance, args: [ModuleObject]){
       if(BitWise.InstanceOfObject(args[0], ModuleObjectType.ModuleCreature)){
+        if(typeof (args[0] as any).getTotalReflexSave === 'function'){
+          return (args[0] as any).getTotalReflexSave() || 0;
+        }
         return (args[0] as any).reflexSaveThrow || 0;
       }
       return 0;

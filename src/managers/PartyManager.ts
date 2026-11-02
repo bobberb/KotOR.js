@@ -871,9 +871,12 @@ export class PartyManager {
       const quaternion = oldPC.quaternion.clone();
 
       partyMember.isPM = true;
-      partyMember.isPC = 1;
       partyMember.npcId = npcId;
       partyMember.load();
+      // IsPC marks the real protagonist: Module load trusts a Mod_PlayerList entry with
+      // IsPC=1 as ActualPlayerTemplate, so a companion in control must save 0. Set after
+      // load(), which would otherwise restore whatever IsPC the template carried.
+      partyMember.isPC = npcId == -1 ? 1 : 0;
       partyMember.clearAllActions();
       partyMember.position.copy(spawn);
       partyMember.quaternion.copy(quaternion);

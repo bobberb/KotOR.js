@@ -3830,6 +3830,10 @@ export class ModuleCreature extends ModuleObject {
       if (this.template.RootNode.hasField('IsPC'))
         this.isPC = this.template.getFieldByLabel('IsPC').getValue();
 
+      // save() writes this from SetIsDestroyable's flag; without the read it reset to true on load.
+      if (this.template.RootNode.hasField('IsDestroyable'))
+        this.isDestroyable = !!this.template.getFieldByLabel('IsDestroyable').getValue();
+
       if (this.template.RootNode.hasField('LastName'))
         this.lastName = this.template.getFieldByLabel('LastName').getValue();
 
@@ -3970,15 +3974,6 @@ export class ModuleCreature extends ModuleObject {
 
       if (this.template.RootNode.hasField('WillSaveThrow'))
         this.willSaveThrow = this.template.RootNode.getFieldByLabel('WillSaveThrow').getValue();
-
-      if (this.template.RootNode.hasField('fortbonus'))
-        this.fortbonus = this.template.RootNode.getFieldByLabel('fortbonus').getValue();
-
-      if (this.template.RootNode.hasField('refbonus'))
-        this.refbonus = this.template.RootNode.getFieldByLabel('refbonus').getValue();
-
-      if (this.template.RootNode.hasField('willbonus'))
-        this.willbonus = this.template.RootNode.getFieldByLabel('willbonus').getValue();
 
       if (this.template.RootNode.hasField('SubraceIndex'))
         this.subraceIndex = this.template.RootNode.getFieldByLabel('SubraceIndex').getValue();
@@ -4538,16 +4533,16 @@ export class ModuleCreature extends ModuleObject {
       firstNameLoc.addSubString(this.firstName || '', 0);
     }
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOLOCSTRING, 'FirstName') ).setValue( firstNameLoc );
-    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'ForcePoints') ).setValue(this.forcePoints);
+    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'ForcePoints') ).setValue(clampShort(this.forcePoints));
     gff.RootNode.addField( new GFFField(GFFDataType.CHAR, 'FortSaveThrow') ).setValue(this.fortitudeSaveThrow);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Gender') ).setValue(this.gender);
     gff.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Gold') ).setValue(0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'GoodEvil') ).setValue(this.goodEvil);
-    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'HitPoints') ).setValue(this.hitPoints);
+    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'HitPoints') ).setValue(clampShort(this.hitPoints));
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Int') ).setValue(this.int);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Interruptable') ).setValue(this.interruptable ? 1 : 0);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsDestroyable') ).setValue(1);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsPC') ).setValue( this.playerCreated ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsDestroyable') ).setValue(this.isDestroyable ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsPC') ).setValue(this.isPC ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsRaiseable') ).setValue(1);
     if(this.playerCreated){
       gff.RootNode.addField( new GFFField(GFFDataType.INT, 'PlayerCreated') ).setValue(1);
@@ -4658,10 +4653,10 @@ export class ModuleCreature extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.WORD, 'SkillPoints') ).setValue( this.skillPoints ? this.skillPoints : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.WORD, 'SoundSetFile') ).setValue(this.soundSetFile);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StartingPackage') ).setValue(0);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StealthMode') ).setValue(0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StealthMode') ).setValue(this.stealthMode ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Str') ).setValue(this.str);
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Subrace') ).setValue('');
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'SubraceIndex') ).setValue(this.subrace);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'SubraceIndex') ).setValue(this.subraceIndex);
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Tag') ).setValue(this.tag);
     // Blueprint reference; dropped by every save path until now - see ModulePlaceable.save.
     gff.RootNode.addField( new GFFField(GFFDataType.RESREF, 'TemplateResRef') ).setValue(this.templateResRef || '');

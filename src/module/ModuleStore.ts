@@ -124,7 +124,11 @@ export class ModuleStore extends ModuleObject {
     // 82 modules that contain a store, and in no module that does not. ForgeStore
     // reads and writes this same struct through `ResRef`, which is what settled
     // which of the two names is the authored one.
-    const blueprint = this.getResRef();
+    //
+    // A store reloaded from a savegame carries the `TemplateResRef` that save()
+    // wrote and no `ResRef`, so it is checked first; merge() appends, so the saved
+    // fields still win over the blueprint's.
+    const blueprint = this.getTemplateResRef() || this.getResRef();
     if(blueprint){
       // Hold on to it, or save() writes an empty TemplateResRef from the untouched
       // `templateResRef` and the savegame loses the blueprint as well.
@@ -134,13 +138,11 @@ export class ModuleStore extends ModuleObject {
       if(buffer){
         const gff = new GFFObject(buffer);
         this.template.merge(gff);
-        this.templateResRef = templateResRef;
         this.initProperties();
         this.loadScripts();
       }else{
         console.error('Failed to load ModuleStore template');
         if(this.template instanceof GFFObject){
-          this.templateResRef = templateResRef;
           this.initProperties();
           this.loadScripts();
         }
@@ -283,7 +285,6 @@ export class ModuleStore extends ModuleObject {
       this.onOpenStore instanceof NWScriptInstance ? this.onOpenStore.name : (typeof this.onOpenStore === 'string' ? this.onOpenStore : '')
     );
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'BuySellFlag') ).setValue(this.buySellFlag);
-    gff.RootNode.addField( new GFFField(GFFDataType.RESREF, 'TemplateResRef') ).setValue(this.templateResRef || '');
 
     let itemList = gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'ItemList') );
     for(let i = 0; i < this.inventory.length; i++){

@@ -1,65 +1,51 @@
-import { describe, expect, test } from '@jest/globals';
-import * as fs from 'fs';
-import * as path from 'path';
-import { inheritK1Actions } from '@/nwscript/inheritK1Actions';
-import type { INWScriptDefAction } from '@/interface/nwscript/INWScriptDefAction';
-
-const def = (name: string, action?: () => unknown): INWScriptDefAction =>
-  ({ comment: '', name, type: 0, args: [], action } as unknown as INWScriptDefAction);
-
-describe('inheritK1Actions', () => {
-  test('an unimplemented TSL routine borrows the K1 body when the names match', () => {
-    const body = () => 1;
-    const k1 = { 1: def('Random', body) };
-    const k2 = { 1: def('Random') };
-    inheritK1Actions(k1, k2);
-    expect(k2[1].action).toBe(body);
-  });
-
-  test('a TSL routine with a different name at the same id stays unimplemented', () => {
-    const k1 = { 770: def('PlayMovieQueue', () => 'movie') };
-    const k2 = { 770: def('EffectForceBody') };
-    inheritK1Actions(k1, k2);
-    expect(k2[770].action).toBeUndefined();
-  });
-
-  test('a routine TSL already implements is left alone', () => {
-    const own = () => 2;
-    const k1 = { 5: def('Same', () => 1) };
-    const k2 = { 5: def('Same', own) };
-    inheritK1Actions(k1, k2);
-    expect(k2[5].action).toBe(own);
-  });
-
-  test('ids only K1 has are not added to TSL', () => {
-    const k2: { [key: number]: INWScriptDefAction } = {};
-    inheritK1Actions({ 9: def('K1Only', () => 1) }, k2);
-    expect(k2[9]).toBeUndefined();
-  });
-});
+import { beforeAll, describe, expect, test } from '@jest/globals';
+import { harness } from './routineHarness';
 
 /**
- * Parsed from source rather than imported: the tables pull in the whole engine,
- * including THREE's ESM examples, which jest cannot load.
+ * TSL inherits K1 routine bodies by NAME, never by colliding id. The two tables
+ * agree on every shared id except 768-771, where TSL inserted its own routines
+ * and K1's continue at other ids (K1 770 PlayMovieQueue is TSL 807).
+ *
+ * This runs against the real runtime tables (buildReconciledActionMap through
+ * NWScriptDefK1/K2), not against a parse of the table source: the source files
+ * are now stubs that build the tables at load time, so a source parse would
+ * see nothing.
  */
-function routineNames(file: string): Map<number, string> {
-  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'nwscript', file), 'utf8');
-  const names = new Map<number, string>();
-  for (const match of source.matchAll(/\n {2}(\d+)\s*:\s*\{[^]*?name:\s*['"]([^'"]+)['"]/g)) {
-    names.set(Number(match[1]), match[2]);
-  }
-  return names;
-}
+let runtime: ReturnType<typeof harness>;
+let isEngineRoutineFallback: (action: unknown) => boolean;
+
+beforeAll(() => {
+  runtime = harness();
+  ({ isEngineRoutineFallback } = runtime.loadScript('engineRoutineFallbacks'));
+});
+
+const ids = (table: Record<number, unknown>) => Object.keys(table).map(Number);
+const hasBody = (action: any) => typeof action?.action === 'function' && !isEngineRoutineFallback(action);
 
 describe('K1 and TSL routine tables', () => {
   test('disagree on the names of exactly ids 768-771', () => {
-    const k1 = routineNames('NWScriptDefK1.ts');
-    const k2 = routineNames('NWScriptDefK2.ts');
-    expect(k1.size).toBeGreaterThan(700);
-    expect(k2.size).toBeGreaterThan(800);
-    const differing = [...k2.keys()].filter((id) => k1.has(id) && k1.get(id) !== k2.get(id));
+    const { kotor, tsl } = runtime;
+    expect(ids(kotor).length).toBeGreaterThan(700);
+    expect(ids(tsl).length).toBeGreaterThan(800);
+    const differing = ids(tsl).filter((id) => kotor[id] && kotor[id].name !== tsl[id].name);
     expect(differing.sort((a, b) => a - b)).toEqual([768, 769, 770, 771]);
-    expect(k1.get(770)).toBe('PlayMovieQueue');
-    expect(k2.get(770)).toBe('EffectForceBody');
+  });
+
+  test('TSL 770 is its own EffectForceBody, not K1 PlayMovieQueue at the colliding id', () => {
+    expect(runtime.kotor[770].name).toBe('PlayMovieQueue');
+    expect(runtime.tsl[770].name).toBe('EffectForceBody');
+    expect(runtime.tsl[770].action).not.toBe(runtime.kotor[770].action);
+  });
+
+  test('TSL 807 PlayMovieQueue has a real body', () => {
+    expect(runtime.tsl[807].name).toBe('PlayMovieQueue');
+    expect(hasBody(runtime.tsl[807])).toBe(true);
+  });
+
+  test('every TSL routine whose K1 namesake at the same id has a body has one too', () => {
+    const { kotor, tsl } = runtime;
+    const missing = ids(tsl).filter((id) =>
+      kotor[id] && kotor[id].name === tsl[id].name && hasBody(kotor[id]) && !hasBody(tsl[id]));
+    expect(missing).toEqual([]);
   });
 });
