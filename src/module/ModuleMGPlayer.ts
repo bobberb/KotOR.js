@@ -17,6 +17,7 @@ import type { ModuleMGGunBullet } from "@/module/ModuleMGGunBullet";
 import type { ModuleMGEnemy } from "@/module/ModuleMGEnemy";
 import type { ModuleMGObstacle } from "@/module/ModuleMGObstacle";
 import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
+import type { ModuleMiniGame } from "@/module/ModuleMiniGame";
 
 /**
 * ModuleMGPlayer class.
@@ -31,8 +32,13 @@ import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
 * @memberof KotOR
 */
 export class ModuleMGPlayer extends ModuleObject {
+  /** Swoop gear count; each gear unlocks an equal slice of Minimum_Speed..Maximum_Speed. */
+  static readonly GEAR_COUNT = 5;
+  static readonly JUMP_GRAVITY = 9.8;
 
   readonly supportsRuntimeStatePersistence: boolean = false;
+
+  miniGame?: ModuleMiniGame;
 
   camera: OdysseyModel3D;
   models: OdysseyModel3D[] = [];
@@ -57,19 +63,31 @@ export class ModuleMGPlayer extends ModuleObject {
   invince: number;
   gear: number;
   gunTimer: number;
-  jumpVelcolity: number;
-  boostVelocity: number;
+  jumpSpeed: number = 0;
+  jumpVelocity: number = 0;
+  jumpHeight: number = 0;
+  externalForce: THREE.Vector3 = new THREE.Vector3();
   falling: boolean;
   alive: boolean;
+  /** Tunnel limits in radians (templates and scripts use degrees). */
   tunnel: { neg: { x: number; y: number; z: number; }; pos: { x: number; y: number; z: number; }; };
-  hit_points: any;
-  max_hps: any;
+  tunnelInfinite: { x: number; y: number; z: number; } = { x: 0, y: 0, z: 0 };
+  hit_points: number;
+  max_hps: number;
   onCreateRun: boolean;
   sphere_radius: number;
   invince_period: number;
-  bump_damage: any;
+  bump_damage: number;
   cameraRotate: any;
-  num_loops: any;
+  num_loops: number;
+
+  /** Swoop track progress: distance along the track, its length, and lap timing. */
+  trackDistance: number = 0;
+  trackLength: number = 0;
+  loopsCompleted: number = 0;
+  lapStartTime: number = 0;
+  lapTimes: number[] = [];
+  finishTime: number = -1;
 
   cameraName: string = '';
   trackName: string = '';
@@ -100,11 +118,8 @@ export class ModuleMGPlayer extends ModuleObject {
     this.lateralForce = 0;
     this.invince = 0;
 
-    this.gear = -1;
-    //this.timer = 0;
+    this.gear = 0;
     this.gunTimer = 0;
-    this.jumpVelcolity = 0;
-    this.boostVelocity = 0;
     this.falling = true;
     this.alive = true;
 
@@ -114,8 +129,6 @@ export class ModuleMGPlayer extends ModuleObject {
     }
 
     this.setTrack(this.track);
-
-    this._heartbeatTimerOffset = -2900;
 
     const geometry = new THREE.SphereGeometry( 1, 16, 16 );
     const material = new THREE.MeshBasicMaterial( { color: 0x0000FF } );
@@ -168,28 +181,64 @@ export class ModuleMGPlayer extends ModuleObject {
 
   }
 
+  getMiniGame(): ModuleMiniGame | undefined {
+    return this.miniGame ?? GameState.module?.area?.miniGame;
+  }
+
+  isAirborne(): boolean {
+    return this.jumpHeight > 0;
+  }
+
+  getCollisionRadius(): number {
+    return this.sphere_radius || 0;
+  }
+
+  /** Collision sphere in world space; the player rides its track's modelhook. */
+  getWorldSphere(): THREE.Sphere {
+    this.container.getWorldPosition(this.sphere.center);
+    this.sphere.radius = this.getCollisionRadius();
+    return this.sphere;
+  }
+
+  getEventModelName(): string {
+    return this.models[0]?.name || this.modelProps[0]?.model?.replace(/\0[\s\S]*$/g,'').toLowerCase() || '';
+  }
+
+  /** Top speed reachable in the current gear; boosts may exceed it and decay back. */
+  getGearMaxSpeed(): number {
+    if(!(this.speed_max > 0)){ return Infinity; }
+    const band = (this.speed_max - this.speed_min) / ModuleMGPlayer.GEAR_COUNT;
+    return this.speed_min + band * (this.gear + 1);
+  }
+
+  /**
+   * Swoop courses run along world +Y (the direction updateSwoop moves the track), so
+   * one loop is the distance from the track's start to the far end of the area's
+   * room geometry. An explicitly set trackLength wins.
+   */
+  initTrackLength(rooms: { model?: THREE.Object3D }[] = []){
+    if(this.trackLength > 0 || !this.track){ return; }
+    const bounds = new THREE.Box3();
+    for(const room of rooms){
+      if(room?.model){
+        bounds.expandByObject(room.model);
+      }
+    }
+    if(!bounds.isEmpty() && bounds.max.y > this.track.position.y){
+      this.trackLength = bounds.max.y - this.track.position.y;
+    }
+  }
+
   update(delta: number = 0){
+    const miniGame = this.getMiniGame();
 
     this.invince -= delta;
     if(this.invince < 0) this.invince = 0;
 
-    //super.update(delta);
-    //Process the heartbeat timer
-    if(GameState.module){
-      this.triggerHeartbeat();
-    }
-
-    this.sphere.radius = this.sphere_radius;
-    // this.model.parent.getWorldPosition(this.position);
-    this.sphere.center.copy(this.position);
-
-    this.sphere_geom.scale.setScalar(this.sphere_radius);
-    this.sphere_geom.position.copy(this.sphere.center);
-
     for(let i = 0; i < this.animationManagers.length; i++){
       const aManager = this.animationManagers[i];
       if(
-        aManager.currentAnimationState.loop || 
+        aManager.currentAnimationState.loop ||
         ( !aManager.currentAnimationState.loop && !aManager.currentAnimationState.elapsedCount )
       ){
         aManager.updateAnimation(aManager.currentAnimation, aManager.currentAnimationState, delta);
@@ -203,73 +252,18 @@ export class ModuleMGPlayer extends ModuleObject {
       }
     }
 
-    //this.animationManagers
     this.forceVector.set(0, 0, 0);
 
-    switch(GameState.module.area.miniGame.type){
-      case 1:
-
-        if(this.speed_min || this.speed){
-
-          if(this.speed < this.speed_min){
-            this.speed = this.speed_min;
-          }
-
-          this.speed += (this.accel_secs * delta);
-
-          if(this.speed_max && (this.speed >= this.speed_max)){
-            this.speed = this.speed_max;
-          }
-
-          this.forceVector.set( this.lateralForce * delta, this.speed * delta, 0 );
-
-          //this.track.position.y += ;
-          //this.model.position.z = this.jumpVelcolity;
-
-        }
-
-
-        this.track.updateMatrixWorld();
-        //this.updateCollision(delta);
-        this.track.position.add(this.forceVector);
-        //this.model.box.setFromObject(this.model);
-
-        const enemies = GameState.module.area.miniGame.enemies;
-        for(let i = 0; i < enemies.length; i++){
-          const enemy = enemies[i];
-          if(enemy.sphere.containsPoint(this.sphere.center)){
-            if(!enemy.collided){
-              enemy.collided = true;
-              this.onHitFollower(enemy);
-            }
-          }
-        }
-
-        if(this.jumpVelcolity > 0){
-          this.jumpVelcolity -= (2 *delta);
-        }else{
-          this.jumpVelcolity = 0;
-        }
-
-        if(this.boostVelocity > 0){
-          this.boostVelocity -= (2 *delta);
-        }else{
-          this.boostVelocity = 0;
-        }
-
-      break;
-      case 2:
-
-      break;
+    if(miniGame?.type == MiniGameType.SWOOPRACE && this.alive){
+      this.updateSwoop(delta);
     }
-        
+
     for(let i = 0; i < this.gunBanks.length; i++){
       this.gunBanks[i].update(delta);
     }
-    
-    // this.model.parent.getWorldPosition(this.position);
 
-    this.sphere.center.copy(this.position);
+    this.getWorldSphere();
+    this.sphere_geom.scale.setScalar(this.sphere_radius || 0);
     this.sphere_geom.position.copy(this.sphere.center);
 
     if(this.camera instanceof OdysseyModel3D && this.camera.bonesInitialized && this.camera.visible){
@@ -280,7 +274,70 @@ export class ModuleMGPlayer extends ModuleObject {
       if(camerahook)
         this.camera = camerahook.parent.parent as OdysseyModel3D;
     }
-    
+
+  }
+
+  /**
+   * Swoop physics: speed climbs at Accel_Secs toward the current gear's top speed
+   * (boosts above it bleed off at the same rate), steering input is consumed once
+   * per frame, and every track length travelled is one OnTrackLoop.
+   */
+  updateSwoop(delta: number){
+    if(this.speed < this.speed_min){
+      this.speed = this.speed_min;
+    }
+
+    const gearMax = this.getGearMaxSpeed();
+    if(this.speed < gearMax){
+      this.speed = Math.min(gearMax, this.speed + this.accel_secs * delta);
+    }else if(this.speed > gearMax){
+      this.speed = Math.max(gearMax, this.speed - this.accel_secs * delta);
+    }
+    if(this.speed_max > 0 && this.speed > this.speed_max){
+      this.speed = this.speed_max;
+    }
+
+    this.forceVector.set(this.lateralForce * delta, this.speed * delta, 0);
+    this.forceVector.add(this.externalForce);
+    this.externalForce.set(0, 0, 0);
+    // Steering is re-applied by the input processor every frame the key is held.
+    this.lateralForce = 0;
+
+    if(this.jumpHeight > 0 || this.jumpVelocity > 0){
+      const previousHeight = this.jumpHeight;
+      this.jumpHeight += this.jumpVelocity * delta;
+      this.jumpVelocity -= ModuleMGPlayer.JUMP_GRAVITY * delta;
+      if(this.jumpHeight <= 0){
+        this.jumpHeight = 0;
+        this.jumpVelocity = 0;
+      }
+      this.position.z += this.jumpHeight - previousHeight;
+    }
+
+    this.track.position.add(this.forceVector);
+    this.track.updateMatrixWorld();
+
+    this.trackDistance += this.forceVector.y;
+    if(this.trackLength > 0){
+      while(this.trackDistance >= this.trackLength){
+        this.trackDistance -= this.trackLength;
+        this.track.position.y -= this.trackLength;
+        this.track.updateMatrixWorld();
+        this.completeLoop();
+      }
+    }
+  }
+
+  completeLoop(){
+    const miniGame = this.getMiniGame();
+    const now = miniGame?.elapsed ?? 0;
+    this.loopsCompleted++;
+    this.lapTimes.push(now - this.lapStartTime);
+    this.lapStartTime = now;
+    if(this.num_loops > 0 && this.loopsCompleted >= this.num_loops && this.finishTime < 0){
+      this.finishTime = now;
+    }
+    this.onTrackLoop();
   }
 
   updatePaused(delta: number = 0){
@@ -288,33 +345,74 @@ export class ModuleMGPlayer extends ModuleObject {
   }
 
   damage(damage = 0){
-    if(this.alive){
-      this.hit_points -= damage;
-      let model: OdysseyModel3D;
-      for(let i = 0; i < this.container.children.length; i++){
-        model = (this.container.children[i] as OdysseyModel3D);
-        if(model instanceof OdysseyModel3D){
-          if(model.bonesInitialized && model.visible){
-            model.playAnimation('damage', false);
-          }
-        }
-      }
-      this.onDamaged();
-    }
+    this.getMiniGame()?.applyDamage(this, damage);
   }
 
   adjustHitPoints(nHP = 0, nAbsolute = 0){
-    this.hit_points += nHP;
+    return this.getMiniGame()?.adjustHitPoints(this, nHP, !!nAbsolute) ?? this.hit_points;
   }
 
   startInvulnerability(){
     this.invince = this.invince_period || 0;
   }
 
+  playModelAnimation(name: string){
+    for(const model of this.models){
+      if(model instanceof OdysseyModel3D && model.bonesInitialized && model.visible){
+        model.playAnimation(name, false);
+      }
+    }
+  }
+
+  /** Engine default for OnDamage (SWMG_OnDamage). */
+  defaultOnDamage(){
+    this.playModelAnimation('damage');
+  }
+
+  /** Engine default for OnDeath (SWMG_OnDeath). */
+  defaultOnDeath(){
+    this.playModelAnimation('die');
+  }
+
+  isAccelerator(object: ModuleObject): boolean {
+    return /accel|boost/i.test(object?.name || '');
+  }
+
+  /**
+   * Engine default for OnHitObstacle/OnHitFollower (SWMG_OnObstacleHit): accelerator
+   * pads boost to top speed; anything else is a crash unless invulnerable: bump
+   * damage, drop to minimum speed in first gear, then the invulnerability period.
+   */
+  defaultObstacleHit(object?: ModuleObject){
+    if(!object || !this.alive){ return; }
+    if(this.isAccelerator(object)){
+      this.boost();
+      return;
+    }
+    if(this.invince > 0){ return; }
+    this.getMiniGame()?.applyDamage(this, this.bump_damage || 0);
+    this.speed = this.speed_min;
+    this.gear = 0;
+    this.startInvulnerability();
+    this.onBrake();
+  }
+
+  boost(){
+    this.speed = this.speed_max > 0 ? this.speed_max : this.speed + this.accel_secs;
+    this.onAccelerate();
+  }
+
+  shiftGear(): boolean {
+    if(!this.alive || this.gear >= ModuleMGPlayer.GEAR_COUNT - 1){ return false; }
+    this.gear++;
+    this.onAccelerate();
+    return true;
+  }
+
   shoot(){
-    switch(GameState.module.area.miniGame.type){
+    switch(this.getMiniGame()?.type){
       case MiniGameType.SWOOPRACE:
-        this.jump();
+        this.shiftGear();
       break;
       case MiniGameType.TURRET:
         this.fire();
@@ -322,22 +420,24 @@ export class ModuleMGPlayer extends ModuleObject {
     }
   }
 
-  jump(){
-    this.jumpVelcolity = 0.4;
-    /*if(this.gear > -1 && !this.falling){
-      this.jumpVelcolity = 0.4;
-    }else{
-      this.jumpVelcolity = 0;
-    }*/
+  /** Jumping is off until a script sets a jump speed (TSL SWMG_SetJumpSpeed). */
+  jump(): boolean {
+    if(!this.alive || !(this.jumpSpeed > 0) || this.isAirborne()){ return false; }
+    this.jumpVelocity = this.jumpSpeed;
+    return true;
+  }
+
+  applyForce(force: {x: number, y: number, z: number}){
+    this.externalForce.x += force?.x || 0;
+    this.externalForce.y += force?.y || 0;
+    this.externalForce.z += force?.z || 0;
   }
 
   fire(){
-    if(this.gunBanks.length){
-      for(let i = 0; i < this.gunBanks.length; i++){
-        this.gunBanks[i].fire();
-      }
+    if(!this.alive){ return; }
+    for(let i = 0; i < this.gunBanks.length; i++){
+      this.gunBanks[i].fire();
     }
-    this.onFire();
   }
 
   rotate(axis = 'x', amount = 0){
@@ -732,6 +832,7 @@ export class ModuleMGPlayer extends ModuleObject {
         }
         this.models.push(model);
         model.name = item.model;
+        this.listenForAnimEvents(model);
 
         if(this.camera && model.name == this.camera.name)
           model.visible = false;
@@ -756,62 +857,53 @@ export class ModuleMGPlayer extends ModuleObject {
     }
   }
 
-  onAnimEvent(){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnAnimEvent];
-    if(!instance){ return; }
-    instance.run(this, 0);
+  onAnimEvent(event: string = '', modelName: string = this.getEventModelName()){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnAnimEvent, { event, modelName });
   }
 
   onCreate(){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnCreate];
-    if(!instance){ return; }
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnCreate);
   }
 
   onDamaged(): boolean{
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnDamage];
-    if(!instance){ return true; }
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnDamage, {}, () => this.defaultOnDamage());
     return true;
   }
 
-  onFire(){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnFire];
-    if(!instance){ return; }
-    instance.run(this, 0);
+  onFire(bullet?: ModuleMGGunBullet){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnFire, bullet ? {
+      bulletFiredDamage: bullet.damage_amt,
+      bulletFiredTarget: bullet.target_type,
+    } : {});
   }
 
   onAccelerate(){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnAccelerate];
-    if(!instance){ return; }
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnAccelerate);
+  }
+
+  onBrake(){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnBrake);
   }
 
   onHitBullet( bullet: ModuleMGGunBullet ){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnHitBullet];
-    if(!instance){ return; }
-    instance.mgBullet = bullet;
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitBullet, bullet.getHitContext(this), () => this.damage(bullet.damage_amt));
   }
 
   onHitFollower( follower: ModuleMGEnemy ){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnHitFollower];
-    if(!instance){ return; }
-    instance.mgFollower = follower;
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitFollower, { followerHit: follower }, () => this.defaultObstacleHit(follower));
   }
 
   onHitObstacle( obstacle: ModuleMGObstacle ){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnHitObstacle];
-    if(!instance){ return; }
-    instance.mgObstacle = obstacle;
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitObstacle, { obstacleHit: obstacle }, () => this.defaultObstacleHit(obstacle));
   }
 
   onTrackLoop(){
-    const instance = this.scripts[ModuleObjectScript.MGPlayerOnTrackLoop];
-    if(!instance){ return; }
-    instance.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnTrackLoop);
+  }
+
+  /** Model animation events (MDL event keys) raise OnAnimEvent with the event and model name. */
+  listenForAnimEvents(model: THREE.Object3D){
+    model?.addEventListener?.('playEvent', (e: any) => this.onAnimEvent(e?.event || '', model.name || ''));
   }
 
   loadScripts (){
@@ -924,6 +1016,13 @@ export class ModuleMGPlayer extends ModuleObject {
 
     if(this.template.RootNode.hasField('TunnelZPos'))
       this.tunnel.pos.z = THREE.MathUtils.degToRad(this.template.getFieldByLabel('TunnelZPos').getValue());
+
+    // Some retail templates spell the label with a lowercase L ("Tunnellnfinite").
+    const infiniteLabel = ['TunnelInfinite', 'Tunnellnfinite'].find((label) => this.template.RootNode.hasField(label));
+    if(infiniteLabel){
+      const infinite = this.template.getFieldByLabel(infiniteLabel).getVector();
+      this.tunnelInfinite = { x: infinite?.x || 0, y: infinite?.y || 0, z: infinite?.z || 0 };
+    }
 
     if(this.template.RootNode.hasField('Models')){
       let models = this.template.getFieldByLabel('Models').getChildStructs();

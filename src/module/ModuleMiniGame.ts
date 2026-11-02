@@ -1,29 +1,68 @@
+import * as THREE from "three";
 import { GameState } from "@/GameState";
 import { MiniGameType } from "@/enums/engine/MiniGameType";
 import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
-import { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { GFFObject } from "@/resource/GFFObject";
 import { GFFStruct } from "@/resource/GFFStruct";
 import { ModuleMGEnemy } from "@/module/ModuleMGEnemy";
 import type { ModuleMGObstacle } from "@/module/ModuleMGObstacle";
 import { ModuleMGPlayer } from "@/module/ModuleMGPlayer";
 import type { ModuleMGTrack } from "@/module/ModuleMGTrack";
+import type { ModuleMGGunBullet } from "@/module/ModuleMGGunBullet";
+import type { ModuleObject } from "@/module/ModuleObject";
+
+/** Minigame objects that can take damage, die and run the shared default handlers. */
+export interface IMiniGameCombatant extends ModuleObject {
+  hit_points: number;
+  max_hps: number;
+  invince: number;
+  alive: boolean;
+  defaultOnDamage(): void;
+  defaultOnDeath(): void;
+}
+
+/**
+ * Values the SWMG_GetLast* routines read. They describe the event currently being
+ * handled; a nested dispatch (e.g. OnDamage raised from inside OnHitBullet) gets
+ * its own values and the outer handler's values are restored when it returns.
+ */
+export interface IMiniGameEventContext {
+  event: string;
+  modelName: string;
+  followerHit?: ModuleObject;
+  obstacleHit?: ModuleObject;
+  bullet?: ModuleMGGunBullet;
+  bulletHitDamage: number;
+  bulletHitTarget: number;
+  bulletHitShooter?: ModuleObject;
+  bulletHitPart: string;
+  bulletFiredDamage: number;
+  bulletFiredTarget: number;
+  hpChange: number;
+}
 
 /**
 * ModuleMiniGame class.
-* 
+*
 * Class representing the minigame instance in a minigame module.
-* 
+*
 * KotOR JS - A remake of the Odyssey Game Engine that powered KotOR I & II
-* 
+*
 * @file ModuleMiniGame.ts
 * @author KobaltBlu <https://github.com/KobaltBlu>
 * @license {@link https://www.gnu.org/licenses/gpl-3.0.txt|GPLv3}
 * @memberof KotOR
 */
 export class ModuleMiniGame {
+  /** Seconds between OnHeartbeat events, matching the engine's 3s object heartbeat. */
+  static readonly HEARTBEAT_INTERVAL = 3;
+
   type: MiniGameType;
 
+  /**
+   * Mid-minigame save/load is unsupported: SaveGame.CanSaveCurrentGame() refuses to
+   * save while an area has a minigame, so no save ever contains minigame runtime state.
+   */
   readonly supportsRuntimeStatePersistence: boolean = false;
 
   bumpPlane: number = 0;
@@ -43,7 +82,14 @@ export class ModuleMiniGame {
   obstacles: ModuleMGObstacle[] = [];
   tracks: ModuleMGTrack[] = [];
 
+  /** Seconds the minigame has been ticking (unpaused). */
+  elapsed: number = 0;
+
+  context: IMiniGameEventContext = ModuleMiniGame.EmptyContext();
+
   private obstacleTemplates: GFFObject[] = [];
+  private heartbeatTimers: Map<ModuleObject, number> = new Map();
+  private created: Set<ModuleObject> = new Set();
 
   constructor(struct: GFFStruct){
     this.bumpPlane = struct.getFieldByLabel('Bump_Plane').getValue();
@@ -61,14 +107,15 @@ export class ModuleMiniGame {
     this.player = new ModuleMGPlayer(
       GFFObject.FromStruct(struct.getFieldByLabel('Player').getChildStructs()[0])
     );
+    this.player.miniGame = this;
 
     const enemies = struct.getFieldByLabel('Enemies').getChildStructs();
     for(let i = 0; i < enemies.length; i++){
-      this.enemies.push(
-        new ModuleMGEnemy(
-          GFFObject.FromStruct(enemies[i])
-        )
+      const enemy = new ModuleMGEnemy(
+        GFFObject.FromStruct(enemies[i])
       );
+      enemy.miniGame = this;
+      this.enemies.push(enemy);
     }
 
     if(struct.hasField('Obstacles')){
@@ -81,27 +128,178 @@ export class ModuleMiniGame {
     }
   }
 
+  static EmptyContext(): IMiniGameEventContext {
+    return {
+      event: '',
+      modelName: '',
+      followerHit: undefined,
+      obstacleHit: undefined,
+      bullet: undefined,
+      bulletHitDamage: 0,
+      bulletHitTarget: 0,
+      bulletHitShooter: undefined,
+      bulletHitPart: '',
+      bulletFiredDamage: 0,
+      bulletFiredTarget: 0,
+      hpChange: 0,
+    };
+  }
+
   tick(delta: number = 0){
+    this.elapsed += delta;
+
     this.player.update(delta);
 
-    for(let i = 0; i < this.enemies.length; i++){
-      this.enemies[i].update(delta);
+    for(const enemy of this.enemies.slice()){
+      enemy.update(delta);
     }
-    
-    for(let i = 0; i < this.obstacles.length; i++){
-      this.obstacles[i].update(delta);
+
+    for(const obstacle of this.obstacles.slice()){
+      obstacle.update(delta);
     }
+
+    if(this.type == MiniGameType.SWOOPRACE){
+      this.updatePlayerCollisions();
+    }
+
+    this.updateHeartbeats(delta);
   }
 
   tickPaused(delta: number = 0){
     this.player.updatePaused(delta);
-    
+
     for(let i = 0; i < this.enemies.length; i++){
       this.enemies[i].updatePaused(delta);
     }
 
     for(let i = 0; i < this.obstacles.length; i++){
       this.obstacles[i].updatePaused(delta);
+    }
+  }
+
+  /**
+   * Run an object's minigame script with the event context SWMG_GetLast* reads.
+   * When the object has no script for the event, `fallback` (the engine default,
+   * also reachable from scripts through SWMG_OnBulletHit/OnObstacleHit/OnDamage/OnDeath)
+   * runs instead.
+   */
+  dispatchEvent(
+    object: ModuleObject,
+    scriptKey: string,
+    context: Partial<IMiniGameEventContext> = {},
+    fallback?: () => void
+  ): boolean {
+    if(!object){ return false; }
+    const previous = this.context;
+    // Hit events name the model that was hit into (or the bullet); other events name the object's own model.
+    const other: any = context.obstacleHit ?? context.followerHit;
+    const modelName = context.bullet ? (context.bullet.model_name || '').toLowerCase()
+      : other ? (other.getEventModelName?.() ?? '')
+      : ((object as any).getEventModelName?.() ?? '');
+    this.context = {
+      ...previous,
+      event: scriptKey,
+      modelName,
+      ...context,
+    };
+    try{
+      const instance = object.scripts?.[scriptKey];
+      if(!instance){
+        fallback?.();
+        return false;
+      }
+      instance.mgFollower = this.context.followerHit;
+      instance.mgObstacle = this.context.obstacleHit;
+      instance.mgBullet = this.context.bullet;
+      instance.run(object, 0);
+      return true;
+    }finally{
+      this.context = previous;
+    }
+  }
+
+  /** Shared damage path for bullets, obstacle bumps and scripts. Returns true if damage was applied. */
+  applyDamage(target: IMiniGameCombatant, amount: number = 0): boolean {
+    if(!target || !target.alive || !(amount > 0)){ return false; }
+    if(target.invince > 0){ return false; }
+    target.hit_points -= amount;
+    this.dispatchEvent(target, ModuleObjectScript.MGPlayerOnDamage, { hpChange: -amount }, () => target.defaultOnDamage());
+    if(target.hit_points <= 0){
+      this.kill(target);
+    }
+    return true;
+  }
+
+  /** Set or adjust hit points from script. Death fires once if the result is <= 0. */
+  adjustHitPoints(target: IMiniGameCombatant, amount: number = 0, absolute: boolean = false): number {
+    if(!target){ return 0; }
+    const before = target.hit_points || 0;
+    target.hit_points = absolute ? amount : before + amount;
+    this.context.hpChange = target.hit_points - before;
+    if(target.hit_points <= 0 && target.alive && (target.max_hps > 0 || before > 0)){
+      this.kill(target);
+    }
+    return target.hit_points;
+  }
+
+  kill(target: IMiniGameCombatant){
+    if(!target || !target.alive){ return; }
+    target.alive = false;
+    this.dispatchEvent(target, ModuleObjectScript.MGPlayerOnDeath, {}, () => target.defaultOnDeath());
+  }
+
+  /**
+   * Swoop collisions: entering a follower's or obstacle's sphere fires the player's
+   * OnHitFollower/OnHitObstacle, then the other object's OnHitFollower. Each contact
+   * fires once until the spheres separate again. Airborne players clear obstacles.
+   */
+  updatePlayerCollisions(){
+    const player = this.player;
+    if(!player || !player.alive){ return; }
+    const center = player.getWorldSphere().center;
+    const radius = player.getCollisionRadius();
+
+    for(const enemy of this.enemies.slice()){
+      const enemySphere = enemy.getWorldSphere();
+      const touching = enemy.alive && !player.isAirborne() &&
+        center.distanceTo(enemySphere.center) <= (radius + enemySphere.radius);
+      if(touching && !enemy.collided){
+        enemy.collided = true;
+        player.onHitFollower(enemy);
+        if(this.enemies.includes(enemy)){
+          enemy.onHitFollower(player);
+        }
+      }else if(!touching){
+        enemy.collided = false;
+      }
+    }
+
+    for(const obstacle of this.obstacles.slice()){
+      const obstacleSphere = obstacle.getWorldSphere();
+      const touching = !player.isAirborne() &&
+        center.distanceTo(obstacleSphere.center) <= (radius + obstacleSphere.radius);
+      if(touching && !obstacle.collided){
+        obstacle.collided = true;
+        player.onHitObstacle(obstacle);
+        if(this.obstacles.includes(obstacle)){
+          obstacle.onHitFollower(player);
+        }
+      }else if(!touching){
+        obstacle.collided = false;
+      }
+    }
+  }
+
+  updateHeartbeats(delta: number = 0){
+    const objects: ModuleObject[] = [this.player, ...this.enemies, ...this.obstacles];
+    for(const object of objects){
+      if(!object || !this.created.has(object)){ continue; }
+      let timer = (this.heartbeatTimers.get(object) || 0) + delta;
+      while(timer >= ModuleMiniGame.HEARTBEAT_INTERVAL){
+        timer -= ModuleMiniGame.HEARTBEAT_INTERVAL;
+        this.dispatchEvent(object, ModuleObjectScript.MGPlayerOnHeartbeat);
+      }
+      this.heartbeatTimers.set(object, timer);
     }
   }
 
@@ -112,21 +310,15 @@ export class ModuleMiniGame {
     try { await this.loadMGObstacles(); } catch(e){ console.error(e); }
   }
 
+  /** Runs OnCreate once per object (enemies, obstacles, then player) and starts its heartbeat. */
   initMiniGameObjects(){
-    for(let i = 0; i < this.enemies.length; i++){
-      if(this.enemies[i]){
-        this.enemies[i].onCreate();
-      }
-    }
-
-    for(let i = 0; i < this.obstacles.length; i++){
-      if(this.obstacles[i]){
-        this.obstacles[i].onCreate();
-      }
-    }
-
-    if(this.player){
-      this.player.onCreate();
+    const objects: ModuleObject[] = [...this.enemies, ...this.obstacles, this.player];
+    for(const object of objects){
+      if(!object || this.created.has(object)){ continue; }
+      (object as any).miniGame = this;
+      this.created.add(object);
+      this.heartbeatTimers.set(object, 0);
+      this.dispatchEvent(object, ModuleObjectScript.MGPlayerOnCreate);
     }
   }
 
@@ -140,6 +332,9 @@ export class ModuleMiniGame {
       const track = this.tracks.find(o => o.track === player.trackName);
       if(track?.model){
         player.setTrack(track.model);
+        if(this.type == MiniGameType.SWOOPRACE){
+          player.initTrackLength(GameState.module?.area?.rooms || []);
+        }
       }else{
         console.warn(`ModuleMiniGame.loadMGPlayer: Failed to resolve track [${player.trackName}]`);
       }
@@ -184,6 +379,7 @@ export class ModuleMiniGame {
   async loadMGObstacles(): Promise<void> {
     for(let i = 0; i < this.obstacles.length; i++){
       const obstacle = this.obstacles[i];
+      obstacle.miniGame = this;
       const template = this.getObstacleTemplate(i, obstacle);
       if(template && obstacle.template !== template){
         obstacle.setTemplate(template);
@@ -213,12 +409,56 @@ export class ModuleMiniGame {
     return value.replace(/\0[\s\S]*$/g,'').toLowerCase().trim();
   }
 
+  /**
+   * Called from ModuleArea.runStartScripts after initMiniGameObjects. OnCreate is
+   * idempotent per object, so this only covers objects that were not created yet
+   * (previously it re-ran every enemy's OnCreate a second time).
+   */
   runMiniGameScripts(){
-    for(let i = 0; i < this.enemies.length; i++){
-      const enemy = this.enemies[i];
-      const onCreate = enemy.scripts[ModuleObjectScript.MGEnemyOnCreate];
-      if(!onCreate){ continue; }
-      onCreate.run(enemy, 0);
+    this.initMiniGameObjects();
+  }
+
+  getObjectByName(name: string = ''): ModuleObject | undefined {
+    const wanted = this.normalizeResRef(name);
+    if(!wanted.length){ return undefined; }
+    const objects: ModuleObject[] = [this.player, ...this.enemies, ...this.obstacles];
+    return objects.find((object) => object && this.normalizeResRef(object.name || '') === wanted);
+  }
+
+  /** SWMG_DestroyMiniGameObject: removes a follower/obstacle (and its bullets) from play. */
+  destroyObject(object: ModuleObject): boolean {
+    let removed = false;
+    const enemyIndex = this.enemies.indexOf(object as ModuleMGEnemy);
+    if(enemyIndex >= 0){
+      this.enemies.splice(enemyIndex, 1);
+      removed = true;
+    }
+    const obstacleIndex = this.obstacles.indexOf(object as ModuleMGObstacle);
+    if(obstacleIndex >= 0){
+      this.obstacles.splice(obstacleIndex, 1);
+      removed = true;
+    }
+    if(!removed){ return false; }
+    const banks: any[] = (object as any).gunBanks || [];
+    for(const bank of banks){
+      bank.clearBullets?.();
+    }
+    this.created.delete(object);
+    this.heartbeatTimers.delete(object);
+    (object as any).alive = false;
+    object.container?.removeFromParent();
+    (object as any).sphere_geom?.removeFromParent?.();
+    return true;
+  }
+
+  setCameraClip(near: number, far: number){
+    this.nearClip = near;
+    this.farClip = far;
+    const camera = GameState.camera as THREE.PerspectiveCamera | undefined;
+    if(camera && typeof camera.updateProjectionMatrix === 'function'){
+      camera.near = near;
+      camera.far = far;
+      camera.updateProjectionMatrix();
     }
   }
 

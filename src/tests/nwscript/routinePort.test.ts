@@ -16,8 +16,14 @@ const preservation = fixture("upstreamPreservedBodies.json");
  * by a behavioral test below instead. GetFortitude/Will/ReflexSavingThrow: saves
  * are derived at runtime (ModuleCreature.getTotal*Save()), so the stored
  * *SaveThrow field upstream returns is only the miscellaneous bonus.
+ * SWMG_OnBulletHit/OnObstacleHit/OnDeath/OnDamage (591/592/598/605): upstream bodies
+ * were commented-out no-ops; they now run the engine default handlers.
+ * SWMG_SetFollowerHitPoints (604): upstream ran the caller's OnDamage instead of
+ * setting the follower's hit points. SWMG_Get/SetGunBankBulletModel (625/632):
+ * upstream returned/overwrote the bullet GFF template instead of the model name.
+ * Pinned by src/tests/minigames/swoop-turret-routines.test.ts.
  */
-const DELIBERATE_DIVERGENCES = new Set([491, 492, 493]);
+const DELIBERATE_DIVERGENCES = new Set([491, 492, 493, 591, 592, 598, 604, 605, 625, 632]);
 
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });

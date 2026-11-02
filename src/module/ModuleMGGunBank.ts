@@ -1,19 +1,19 @@
+import * as THREE from "three";
 import { ModuleObject } from "@/module/ModuleObject";
 import { GameState } from "@/GameState";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { MDLLoader } from "@/loaders";
-import { OdysseyModel } from "@/odyssey";
 import { GFFObject } from "@/resource/GFFObject";
 import { OdysseyModel3D } from "@/three/odyssey";
 import { ModuleMGGunBullet } from "@/module/ModuleMGGunBullet";
 
 /**
 * ModuleMGGunBank class.
-* 
+*
 * Class representing a gunbank attached to players and enemy objects found in minigame modules.
-* 
+*
 * KotOR JS - A remake of the Odyssey Game Engine that powered KotOR I & II
-* 
+*
 * @file ModuleMGGunBank.ts
 * @author KobaltBlu <https://github.com/KobaltBlu>
 * @license {@link https://www.gnu.org/licenses/gpl-3.0.txt|GPLv3}
@@ -24,17 +24,20 @@ export class ModuleMGGunBank extends ModuleObject {
   owner: ModuleObject;
   isPlayer: boolean = false;
   fireTimer: number = 0;
-  proto_bullet: any;
+  /** Bullet stats for this bank; every fired bullet copies them (scripts edit them via SWMG_SetGunBank*). */
+  proto_bullet: ModuleMGGunBullet;
   fire_sound: any;
-  bulletTemplate: any;
-  bullet_hook: any;
-  gunModel: any;
-  bankID: any;
-  fireSound: any;
-  horizSpread: any;
-  inaccuracy: any;
-  sensingRadius: any;
-  vertSpread: any;
+  bulletTemplate: GFFObject;
+  bullet_hook: THREE.Object3D;
+  gunModel: string;
+  bankID: number;
+  fireSound: string;
+  horizSpread: number;
+  inaccuracy: number;
+  sensingRadius: number;
+  vertSpread: number;
+  /** Whether the bank currently has the player in its line of fire (SWMG_IsGunBankTargetting). */
+  targetting: boolean = false;
 
   constructor( template: GFFObject, owner: ModuleObject, isPlayer: boolean = false ){
     super();
@@ -45,7 +48,7 @@ export class ModuleMGGunBank extends ModuleObject {
     this.isPlayer = isPlayer;
 
     this.proto_bullet = undefined;
-    
+
   }
 
   update(delta = 0){
@@ -59,80 +62,109 @@ export class ModuleMGGunBank extends ModuleObject {
       this.fireTimer = 0;
     }
 
-    if(this.model) this.model.update(delta);
+    if(this.model instanceof OdysseyModel3D) this.model.update(delta);
 
-    let old_bullet_indexes = [];
-
-    for(let i = 0, len = this.bullets.length; i < len; i++){
-      if(!this.bullets[i].update(delta)){
-        old_bullet_indexes.push(i);
+    for(const bullet of this.bullets.slice()){
+      if(!bullet.update(delta)){
+        const index = this.bullets.indexOf(bullet);
+        if(index >= 0){
+          this.bullets.splice(index, 1);
+        }
       }
-    }
-
-    let old_bullets_index = old_bullet_indexes.length;
-    while(old_bullets_index--){
-      this.bullets.splice(old_bullet_indexes[old_bullets_index], 1);
     }
   }
 
   updatePaused(delta: number = 0){
-    
+
   }
 
-  fire(){
-    if(!this.proto_bullet || !this.bulletTemplate || !this.bullet_hook){
-      return;
+  /** World-space muzzle position and firing direction (bullets travel along the owner's local +Y). */
+  getMuzzle(position: THREE.Vector3, direction: THREE.Vector3, quaternion: THREE.Quaternion = new THREE.Quaternion()){
+    const origin = this.bullet_hook || this.owner?.container;
+    if(origin){
+      origin.getWorldPosition(position);
+    }else{
+      position.set(0, 0, 0);
     }
-
-    if(!this.fireTimer){
-      this.fireTimer = this.proto_bullet.rate_of_fire || 0;
-
-      if(this.fireSound){
-        GameState.guiAudioEmitter.playSoundFireAndForget(this.fireSound);
-      }
-
-      if(this.model instanceof OdysseyModel3D){
-        this.model.playAnimation('fire', false);
-      }
-
-      const bullet = new ModuleMGGunBullet( this.bulletTemplate, this );
-      bullet.load().then( () => {
-        this.bullet_hook.getWorldPosition(bullet.position);
-        //this.bullet_hook.getWorldQuaternion(bullet.quaternion);
-        this.owner.model.getWorldQuaternion(bullet.quaternion);
-        this.bullet_hook.getWorldDirection(bullet.direction);
-
-        GameState.group.placeables.add(bullet.model);
-        this.bullets.push(bullet);
-      });
+    if(this.owner?.container){
+      this.owner.container.getWorldQuaternion(quaternion);
+    }else{
+      quaternion.identity();
     }
+    direction.set(0, 1, 0).applyQuaternion(quaternion);
   }
 
-  load(){
+  /** True when a bullet fired now would travel through the target's collision sphere within sensing range. */
+  canSee(target: ModuleObject & { getWorldSphere(): THREE.Sphere }): boolean {
+    if(!target){ return false; }
+    const sphere = target.getWorldSphere();
+    if(!(sphere.radius > 0)){ return false; }
+    const position = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    this.getMuzzle(position, direction);
+    if(this.sensingRadius > 0 && position.distanceTo(sphere.center) - sphere.radius > this.sensingRadius){
+      return false;
+    }
+    return new THREE.Ray(position, direction).intersectsSphere(sphere);
+  }
+
+  /** Fire one bullet if the bank is ready. Returns the spawned bullet. */
+  fire(): ModuleMGGunBullet | undefined {
+    if(!this.proto_bullet || this.fireTimer > 0){
+      return undefined;
+    }
+
+    this.fireTimer = this.proto_bullet.rate_of_fire || 0;
+
+    if(this.fireSound){
+      GameState.guiAudioEmitter?.playSoundFireAndForget(this.fireSound);
+    }
+
+    if(this.model instanceof OdysseyModel3D){
+      this.model.playAnimation('fire', false);
+    }
+
+    const bullet = new ModuleMGGunBullet( this.bulletTemplate, this );
+    bullet.copyStats(this.proto_bullet);
+    this.getMuzzle(bullet.position, bullet.direction, bullet.quaternion);
+    this.bullets.push(bullet);
+    bullet.loadModel().then((model) => {
+      if(model && bullet.life < bullet.lifespan){
+        GameState.group?.placeables?.add(model);
+      }
+    }).catch((e) => console.warn(`ModuleMGGunBank.fire: bullet model [${bullet.model_name}] failed to load`, e));
+
+    (this.owner as any)?.onFire?.(bullet);
+    return bullet;
+  }
+
+  clearBullets(){
+    for(const bullet of this.bullets){
+      bullet.destroyBullet();
+    }
+    this.bullets = [];
+  }
+
+  async load(){
     this.initProperties();
-    return new Promise<void>( (resolve, reject) => {
-      this.loadModel().then( () => {
-        resolve();
-      });
-    });
+    await this.loadModel();
   }
 
-  loadModel(){
-    return new Promise<void>( (resolve, reject) => {
-      const resref = this.gunModel.replace(/\0[\s\S]*$/g,'').toLowerCase();
-      MDLLoader.loader.load(resref).then( (mdl: OdysseyModel) => {
-        OdysseyModel3D.FromMDL(mdl, {
-          onComplete: (model: OdysseyModel3D) => {
-            this.model = model;
-            this.bullet_hook = this.model.getObjectByName('bullethook0');
-            resolve();
-          },
-          context: this.context,
-          castShadow: true,
-          receiveShadow: true
-        });
+  async loadModel(){
+    const resref = (this.gunModel || '').replace(/\0[\s\S]*$/g,'').toLowerCase();
+    if(!resref){ return; }
+    try{
+      const mdl = await MDLLoader.loader.load(resref);
+      const model = await OdysseyModel3D.FromMDL(mdl, {
+        context: this.context,
+        castShadow: true,
+        receiveShadow: true
       });
-    });
+      this.model = model;
+      this.bullet_hook = this.model.getObjectByName('bullethook0');
+    }catch(e){
+      console.warn(`ModuleMGGunBank.loadModel: gun model [${resref}] failed to load`, e);
+    }
   }
 
   initProperties(){

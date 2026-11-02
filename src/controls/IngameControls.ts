@@ -646,7 +646,7 @@ export class IngameControls {
       if(GameState.State != EngineState.RUNNING) return;
       switch(GameState.module.area.miniGame.type){
         case MiniGameType.SWOOPRACE:
-
+          GameState.module.area.miniGame.player.jump();
         break;
         case MiniGameType.TURRET:
           GameState.module.area.miniGame.player.rotate('x', 1 * delta);
@@ -699,14 +699,16 @@ export class IngameControls {
     });
 
     KeyMapper.Actions[KeyMapAction.MGshoot].setProcessor( (keymap) => {
-      if(!keymap.keyboardInput?.pressed && !keymap.gamepadInput?.pressed) return;
       if(GameState.State != EngineState.RUNNING) return;
       switch(GameState.module.area.miniGame.type){
         case MiniGameType.TURRET:
+          // Held fire; the gun banks' time between shots sets the rate.
+          if(!keymap.keyboardInput?.down && !keymap.gamepadInput?.pressed) return;
           GameState.module.area.miniGame.player.fire();
         break;
         case MiniGameType.SWOOPRACE:
-          GameState.module.area.miniGame.player.jump();
+          if(!keymap.keyboardInput?.pressed && !keymap.gamepadInput?.pressed) return;
+          GameState.module.area.miniGame.player.shiftGear();
         break;
       }
     });
