@@ -45,6 +45,22 @@ export interface PartyNPCList {
 export interface PartyPuppet {
   available: boolean;
   select: boolean;
+  /** NPC_* slot that owns the puppet (AssignPUP); NPC_PLAYER is -1, undefined when unassigned */
+  owner?: number;
+  template?: GFFObject;
+  moduleObject?: ModuleCreature;
+}
+
+/** nwscript FORMATION_* constants (SetFormation, routine 729) */
+export enum PartyFormationPattern {
+  WEDGE = 0,
+  LINE = 1,
+}
+
+export interface PartyFormation {
+  anchor: ModuleCreature;
+  pattern: PartyFormationPattern;
+  position: number;
 }
 
 export interface PartyPuppetList {
@@ -103,6 +119,25 @@ export class PartyManager {
   static SwoopUpgrade2: number = -1;
   static SwoopUpgrade3: number = -1;
 
+  static readonly NPC_PLAYER = -1;
+  static readonly INFLUENCE_MIN = 0;
+  static readonly INFLUENCE_MAX = 100;
+  static readonly INFLUENCE_DEFAULT = 50;
+
+  /** PUP_* ids of the puppets currently in the party (PT_PUPPETS) */
+  static PuppetMembers: number[] = [];
+
+  /** NPC_* id of the companion in control, -1 for the protagonist (PT_CONTROLLED_NP) */
+  static ControlledNPC: number = -1;
+  static XPPool: number = 0;
+  static FollowState: number = 0;
+  static CheatUsed: number = 0;
+  static LastGUIPanel: number = 0;
+
+  static readonly FORMATION_SPACING = 1.5;
+  static readonly FORMATION_MAX_POSITION = 10;
+  static Formations: WeakMap<ModuleCreature, PartyFormation> = new WeakMap();
+
   static #eventListeners: Map<PartyManagerEvent, Function[]> = new Map();
 
   static SyncPlayerStateTemplates(){
@@ -125,11 +160,18 @@ export class PartyManager {
    * @returns void
    */
   static Initialize(){
+    PartyManager.ResetPartyTableState();
+  }
+
+  /**
+   * Reset everything PARTYTABLE persists, so a load never inherits the previous session's values
+   */
+  static ResetPartyTableState(){
     PartyManager.MaxPartyCount = GameState.GameKey == GameEngineType.TSL ? 12 : 9;
     PartyManager.MaxPuppetCount = GameState.GameKey == GameEngineType.TSL ? 3 : 0;
 
     for(let i = 0; i < PartyManager.MaxPartyCount; i++){
-      GameState.PartyManager.InfluenceMap.set(i, -1);
+      GameState.PartyManager.InfluenceMap.set(i, PartyManager.INFLUENCE_DEFAULT);
       GameState.PartyManager.NPCS[i] = {
         available: false,
         canSelect: false,
@@ -143,6 +185,22 @@ export class PartyManager {
         select: true
       };
     }
+
+    PartyManager.PuppetMembers = [];
+    PartyManager.Formations = new WeakMap();
+    PartyManager.ChemicalCount = 0;
+    PartyManager.ComponentCount = 0;
+    PartyManager.ControlledNPC = -1;
+    PartyManager.XPPool = 0;
+    PartyManager.FollowState = 0;
+    PartyManager.CheatUsed = 0;
+    PartyManager.LastGUIPanel = 0;
+    PartyManager.aiStyle = 0;
+    PartyManager.SwoopUpgrade1 = -1;
+    PartyManager.SwoopUpgrade2 = -1;
+    PartyManager.SwoopUpgrade3 = -1;
+    GameState.SOLOMODE = false;
+    GameState.disableHealthRegen = false;
   }
 
   /**
@@ -158,24 +216,7 @@ export class PartyManager {
 
     PartyManager.partyTableTemplate = gff;
 
-    PartyManager.MaxPartyCount = GameState.GameKey == GameEngineType.TSL ? 12 : 9;
-    PartyManager.MaxPuppetCount = GameState.GameKey == GameEngineType.TSL ? 3 : 0;
-    
-    for(let i = 0; i < PartyManager.MaxPartyCount; i++){
-      GameState.PartyManager.InfluenceMap.set(i, -1);
-      GameState.PartyManager.NPCS[i] = {
-        available: false,
-        canSelect: false,
-        spawned: false
-      };
-    }
-
-    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
-      GameState.PartyManager.Puppets[i] = {
-        available: false,
-        select: true
-      };
-    }
+    PartyManager.ResetPartyTableState();
 
     if(gff.RootNode.hasField('GlxyMap')){
       GameState.Planetary.LoadStruct(gff.getFieldByLabel('GlxyMap').getChildStructs()[0]);
@@ -215,8 +256,14 @@ export class PartyManager {
     if(gff.RootNode.hasField('PT_AVAIL_PUPS')){
       let avail = gff.getFieldByLabel('PT_AVAIL_PUPS').getChildStructs();
       for(let i = 0; i < avail.length; i++){
-        GameState.PartyManager.Puppets[i].available = !!avail[i].getFieldByLabel('PT_PUP_AVAIL').getValue();
-        GameState.PartyManager.Puppets[i].select = !!avail[i].getFieldByLabel('PT_PUP_SELECT').getValue();
+        const puppet = GameState.PartyManager.Puppets[i];
+        if(!puppet){ continue; }
+        puppet.available = !!avail[i].getFieldByLabel('PT_PUP_AVAIL').getValue();
+        puppet.select = !!avail[i].getFieldByLabel('PT_PUP_SELECT').getValue();
+        if(avail[i].hasField('PT_PUP_OWNER')){
+          const owner = avail[i].getFieldByLabel('PT_PUP_OWNER').getValue();
+          puppet.owner = owner < PartyManager.NPC_PLAYER ? undefined : owner;
+        }
       }
     }
 
@@ -230,23 +277,53 @@ export class PartyManager {
       GameState.PartyManager.ComponentCount = gff.RootNode.getFieldByLabel('PT_ITEM_COMPONEN').getValue();
     }
   
-    //TSL: PT_AVAIL_PUPS
+    //TSL: PT_INFLUENCE
     if(gff.RootNode.hasField('PT_INFLUENCE')){
       const list = gff.getFieldByLabel('PT_INFLUENCE').getChildStructs();
-      for(let i = 0; i < list.length; i++){
-        GameState.PartyManager.InfluenceMap.set(i, list[i].getFieldByLabel('PT_NPC_INFLUENCE').getValue());
+      for(let i = 0; i < list.length && i < PartyManager.MaxPartyCount; i++){
+        const influence = list[i].getFieldByLabel('PT_NPC_INFLUENCE').getValue();
+        GameState.PartyManager.InfluenceMap.set(i, PartyManager.ClampInfluence(influence));
       }
     }
-  
-    //TSL: PT_AVAIL_PUPS
+
+    //TSL: PT_PUPPETS
     if(gff.RootNode.hasField('PT_PUPPETS')){
       const list = gff.getFieldByLabel('PT_PUPPETS').getChildStructs();
       for(let i = 0; i < list.length; i++){
-        //todo
+        const struct = list[i];
+        // Element label is unverified against retail: accept ours, else the struct's only field.
+        const field = struct.hasField('PT_PUPPET_ID') ? struct.getFieldByLabel('PT_PUPPET_ID') : struct.getFields()[0];
+        const pupId = field ? field.getValue() : -1;
+        if(PartyManager.Puppets[pupId] && !PartyManager.PuppetMembers.includes(pupId)){
+          PartyManager.PuppetMembers.push(pupId);
+        }
+      }
+    }
+
+    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+      try{
+        const buffer = await GameFileSystem.readFile( path.join( CurrentGame.gameinprogress_dir, 'availpup'+i+'.utc') );
+        PartyManager.Puppets[i].template = buffer?.length ? new GFFObject(buffer) : undefined;
+      }catch(e){
+        PartyManager.Puppets[i].template = undefined;
       }
     }
 
     GameState.PartyManager.Gold = gff.RootNode.getFieldByLabel('PT_GOLD').getValue();
+
+    const scalar = (label: string, fallback: number): number =>
+      gff.RootNode.hasField(label) ? gff.RootNode.getFieldByLabel(label).getValue() : fallback;
+    PartyManager.ControlledNPC = scalar('PT_CONTROLLED_NP', -1);
+    PartyManager.XPPool = scalar('PT_XP_POOL', 0);
+    PartyManager.aiStyle = scalar('PT_AISTATE', 0);
+    PartyManager.FollowState = scalar('PT_FOLLOWSTATE', 0);
+    PartyManager.CheatUsed = scalar('PT_CHEAT_USED', 0);
+    PartyManager.LastGUIPanel = scalar('PT_LAST_GUI_PNL', 0);
+    GameState.SOLOMODE = !!scalar('PT_SOLOMODE', 0);
+    PartyManager.SwoopUpgrade1 = scalar('PT_SWOOP1', -1);
+    PartyManager.SwoopUpgrade2 = scalar('PT_SWOOP2', -1);
+    PartyManager.SwoopUpgrade3 = scalar('PT_SWOOP3', -1);
+    GameState.disableHealthRegen = !!scalar('PT_DISABLEREGEN', 0);
 
     if(gff.RootNode.hasField('PT_CONTROLLED_NP')){
       console.log('PT_CONTROLLED_NP', gff.RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue());
@@ -365,7 +442,7 @@ export class PartyManager {
       }
 
       partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'JNL_SortOrder')).setValue(GameState.JournalManager.SortOrder ?? 0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_AISTATE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_AISTATE')).setValue(PartyManager.aiStyle | 0);
       let availNPCSList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_AVAIL_NPCS'));
 
       //TODO: Party Available NPCS
@@ -385,8 +462,22 @@ export class PartyManager {
           const puppetStruct = new GFFStruct();
           puppetStruct.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_AVAIL')).setValue(puppet?.available ? 1 : 0);
           puppetStruct.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_SELECT')).setValue(puppet?.select ? 1 : 0);
+          // -2: unassigned, since -1 is NPC_PLAYER
+          puppetStruct.addField(new GFFField(GFFDataType.INT, 'PT_PUP_OWNER')).setValue(puppet?.owner ?? -2);
           availPuppetsList.addChildStruct(puppetStruct);
         }
+
+        const puppetsList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_PUPPETS'));
+        for(const pupId of PartyManager.PuppetMembers){
+          const puppetStruct = new GFFStruct();
+          puppetStruct.addField(new GFFField(GFFDataType.DWORD, 'PT_PUPPET_ID')).setValue(pupId);
+          puppetsList.addChildStruct(puppetStruct);
+        }
+
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP1')).setValue(PartyManager.SwoopUpgrade1);
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP2')).setValue(PartyManager.SwoopUpgrade2);
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP3')).setValue(PartyManager.SwoopUpgrade3);
+        partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_DISABLEREGEN')).setValue(GameState.disableHealthRegen ? 1 : 0);
 
         partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_ITEM_CHEMICAL')).setValue(GameState.PartyManager.ChemicalCount);
         partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_ITEM_COMPONEN')).setValue(GameState.PartyManager.ComponentCount);
@@ -394,13 +485,13 @@ export class PartyManager {
         const influenceList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_INFLUENCE'));
         for(let i = 0; i < PartyManager.MaxPartyCount; i++){
           const influenceStruct = new GFFStruct();
-          influenceStruct.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(GameState.PartyManager.InfluenceMap.get(i) ?? -1);
+          influenceStruct.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(GameState.PartyManager.InfluenceMap.get(i) ?? PartyManager.INFLUENCE_DEFAULT);
           influenceList.addChildStruct(influenceStruct);
         }
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CHEAT_USED')).setValue(0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CONTROLLED_NP')).setValue( GameState.getCurrentPlayer() == GameState.PartyManager.Player ? -1 : GameState.PartyManager.party.indexOf(GameState.getCurrentPlayer()) );
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CHEAT_USED')).setValue(PartyManager.CheatUsed | 0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CONTROLLED_NP')).setValue(PartyManager.GetControlledNPC());
       partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_COST_MULT_LIS'));
 
       //TODO: COST MULT LIST
@@ -421,9 +512,9 @@ export class PartyManager {
         );
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_FOLLOWSTATE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_FOLLOWSTATE')).setValue(PartyManager.FollowState | 0);
       partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(GameState.PartyManager.Gold);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_LAST_GUI_PNL')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_LAST_GUI_PNL')).setValue(PartyManager.LastGUIPanel | 0);
       let ptMembersList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_MEMBERS'));
 
       let numMembers = 0;
@@ -471,7 +562,7 @@ export class PartyManager {
       }
 
       partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_PLAYEDSECONDS')).setValue(GameState.time | 0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_SOLOMODE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_SOLOMODE')).setValue(GameState.SOLOMODE ? 1 : 0);
 
       const tutorial2DA = GameState.TwoDAManager.datatables.get('tutorial');
       if(tutorial2DA){
@@ -493,7 +584,7 @@ export class PartyManager {
         partytable.RootNode.addField(new GFFField(GFFDataType.VOID, 'PT_TUT_WND_SHOWN')).setData(new Uint8Array(0));
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_XP_POOL'));
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_XP_POOL')).setValue(PartyManager.XPPool | 0);
 
       partytable.FileType = 'PT  ';
       partytable.export(path.join(directory, 'PARTYTABLE.res'), () => {
@@ -804,6 +895,177 @@ export class PartyManager {
     PartyManager.NPCS[npcId].canSelect = true;
     PartyManager.NPCS[npcId].template = object.save();
     return true;
+  }
+
+  static IsValidNPCSlot(npcId: number){
+    return Number.isInteger(npcId) && npcId >= 0 && npcId < PartyManager.MaxPartyCount;
+  }
+
+  static ClampInfluence(value: number){
+    return Math.max(PartyManager.INFLUENCE_MIN, Math.min(PartyManager.INFLUENCE_MAX, value | 0));
+  }
+
+  /**
+   * TSL GetInfluence (795): 0 when nNPC is not a CNPC slot
+   */
+  static GetInfluence(npcId: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return 0; }
+    return PartyManager.InfluenceMap.get(npcId) ?? PartyManager.INFLUENCE_DEFAULT;
+  }
+
+  /**
+   * TSL SetInfluence (796): ignored when nNPC is not a CNPC slot or the value is outside 0-100
+   */
+  static SetInfluence(npcId: number, influence: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return; }
+    if(!Number.isFinite(influence) || influence < PartyManager.INFLUENCE_MIN || influence > PartyManager.INFLUENCE_MAX){ return; }
+    PartyManager.InfluenceMap.set(npcId, influence | 0);
+  }
+
+  /**
+   * TSL ModifyInfluence (797): result clamped to 0-100
+   */
+  static ModifyInfluence(npcId: number, modifier: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return; }
+    PartyManager.InfluenceMap.set(npcId, PartyManager.ClampInfluence(PartyManager.GetInfluence(npcId) + (modifier | 0)));
+  }
+
+  /**
+   * NPC_* id of the companion the player controls, -1 for the protagonist
+   */
+  static GetControlledNPC(){
+    const leader = PartyManager.party[0];
+    if(leader instanceof ModuleCreature){
+      return (leader instanceof ModulePlayer || !(leader.npcId >= 0)) ? -1 : leader.npcId;
+    }
+    return PartyManager.ControlledNPC;
+  }
+
+  static IsValidPuppetSlot(pupId: number){
+    return Number.isInteger(pupId) && pupId >= 0 && pupId < PartyManager.MaxPuppetCount && !!PartyManager.Puppets[pupId];
+  }
+
+  /**
+   * TSL AddAvailablePUPByTemplate (836)
+   */
+  static AddAvailablePUPByTemplate(pupId: number, template: string|GFFObject): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    let gff: GFFObject;
+    if(template instanceof GFFObject){
+      gff = template;
+    }else if(typeof template === 'string' && template.length){
+      const buffer = ResourceLoader.loadCachedResource(ResourceTypes['utc'], template);
+      if(buffer){ gff = new GFFObject(buffer); }
+    }
+    if(!gff){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    puppet.available = true;
+    puppet.template = gff;
+    return true;
+  }
+
+  /**
+   * TSL AddAvailablePUPByObject (837)
+   */
+  static AddAvailablePUPByObject(pupId: number, object: ModuleCreature): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    puppet.available = true;
+    puppet.template = object.save();
+    return true;
+  }
+
+  /**
+   * TSL AssignPUP (838): make NPC slot nNPC (or NPC_PLAYER) the puppet's owner
+   */
+  static AssignPUP(pupId: number, npcId: number): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(npcId != PartyManager.NPC_PLAYER && !PartyManager.IsValidNPCSlot(npcId)){ return false; }
+    PartyManager.Puppets[pupId].owner = npcId;
+    return true;
+  }
+
+  /**
+   * TSL AddPartyPuppet (840): the puppet must already be available
+   */
+  static AddPartyPuppet(pupId: number, object: ModuleCreature): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    if(!puppet.available){ return false; }
+    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+      if(i != pupId && PartyManager.Puppets[i]?.moduleObject === object){ return false; }
+    }
+    puppet.moduleObject = object;
+    if(!PartyManager.PuppetMembers.includes(pupId)){
+      PartyManager.PuppetMembers.push(pupId);
+    }
+    return true;
+  }
+
+  /**
+   * PUP_* id of a puppet in the party, -1 if the object is not one
+   */
+  static GetPuppetId(object: ModuleCreature): number {
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return -1; }
+    for(const pupId of PartyManager.PuppetMembers){
+      if(PartyManager.Puppets[pupId]?.moduleObject === object){ return pupId; }
+    }
+    // After a reload the creature comes back from the area save, not from PARTYTABLE; relink it by its template tag.
+    const tag = object.getTag?.()?.toLowerCase();
+    if(!tag){ return -1; }
+    for(const pupId of PartyManager.PuppetMembers){
+      const puppet = PartyManager.Puppets[pupId];
+      if(!puppet || puppet.moduleObject || !puppet.template?.RootNode.hasField('Tag')){ continue; }
+      if(String(puppet.template.RootNode.getFieldByLabel('Tag').getValue()).toLowerCase() == tag){
+        puppet.moduleObject = object;
+        return pupId;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * TSL GetPUPOwner (841): the owner's creature, if it is in the party
+   */
+  static GetPuppetOwner(object: ModuleCreature): ModuleCreature | undefined {
+    const pupId = PartyManager.GetPuppetId(object);
+    if(pupId < 0){ return undefined; }
+    const owner = PartyManager.Puppets[pupId].owner;
+    if(owner == undefined){ return undefined; }
+    if(owner == PartyManager.NPC_PLAYER){
+      return PartyManager.party.find((pm) => pm instanceof ModulePlayer || pm?.npcId == PartyManager.NPC_PLAYER) ?? PartyManager.Player;
+    }
+    return PartyManager.party.find((pm) => pm?.npcId == owner);
+  }
+
+  /**
+   * SetFormation (729): place oCreature at nPosition (1-10) of the pattern around oAnchor
+   */
+  static SetFormation(anchor: ModuleCreature, creature: ModuleCreature, pattern: number, position: number): boolean {
+    if(!BitWise.InstanceOfObject(anchor, ModuleObjectType.ModuleCreature)){ return false; }
+    if(!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) || creature === anchor){ return false; }
+    if(pattern !== PartyFormationPattern.WEDGE && pattern !== PartyFormationPattern.LINE){ return false; }
+    if(!Number.isInteger(position) || position < 1 || position > PartyManager.FORMATION_MAX_POSITION){ return false; }
+    PartyManager.Formations.set(creature, { anchor, pattern, position });
+    return true;
+  }
+
+  /**
+   * Formation slot offset in the anchor's frame: +right is the anchor's right hand, +forward is where it faces
+   */
+  static GetFormationOffset(pattern: PartyFormationPattern, position: number){
+    const rank = Math.ceil(position / 2);
+    const side = (position % 2) ? -1 : 1;
+    const spacing = PartyManager.FORMATION_SPACING;
+    switch(pattern){
+      case PartyFormationPattern.WEDGE:
+        return { right: side * spacing * rank, forward: -spacing * rank };
+      case PartyFormationPattern.LINE:
+      default:
+        return { right: side * spacing * rank, forward: 0 };
+    }
   }
 
   /**
@@ -1231,7 +1493,6 @@ export class PartyManager {
 
   }
 
-  static #tmpFollowPositionTarget = new THREE.Vector3();
   static #tmpFollowPosition = new THREE.Vector3();
   /**
    * Get the follow position of the creature
@@ -1239,7 +1500,27 @@ export class PartyManager {
    * @returns THREE.Vector3
    */
   static GetFollowPosition(creature: ModuleCreature){
+    const formation = PartyManager.Formations.get(creature);
+    if(formation && BitWise.InstanceOfObject(formation.anchor, ModuleObjectType.ModuleCreature) && !formation.anchor.destroyed){
+      return this.GetFormationPosition(creature, formation.anchor, formation.pattern, formation.position);
+    }
     return this.GetFollowPositionAtIndex(PartyManager.party.indexOf(creature));
+  }
+
+  /**
+   * World position of a formation slot around the anchor, snapped to the creature's walkmesh
+   */
+  static GetFormationPosition(creature: ModuleCreature, anchor: ModuleCreature, pattern: PartyFormationPattern, position: number){
+    const offset = PartyManager.GetFormationOffset(pattern, position);
+    const facing = anchor.rotation.z;
+    this.#tmpFollowPosition.set(
+      anchor.position.x + offset.right * Math.cos(facing) - offset.forward * Math.sin(facing),
+      anchor.position.y + offset.right * Math.sin(facing) + offset.forward * Math.cos(facing),
+      anchor.position.z
+    );
+
+    return (creature.area.isPointWalkable(this.#tmpFollowPosition)) ?
+      this.#tmpFollowPosition : creature.area.getNearestWalkablePoint(this.#tmpFollowPosition, creature.getHitDistance());
   }
 
   /**
@@ -1254,17 +1535,8 @@ export class PartyManager {
     if(!creature)
       return new THREE.Vector3();
 
-    const targetOffset = (idx == 2) ? -1.5 :1.5;
-
-    this.#tmpFollowPositionTarget.set(
-      targetOffset * Math.cos(leader.rotation.z), 
-      targetOffset * Math.sin(leader.rotation.z), 
-      0
-    );
-    this.#tmpFollowPosition.copy(leader.position).sub(this.#tmpFollowPositionTarget);
-
-    return (creature.area.isPointWalkable(this.#tmpFollowPosition)) ?
-      this.#tmpFollowPosition : creature.area.getNearestWalkablePoint(this.#tmpFollowPosition, creature.getHitDistance());
+    // Party members without an explicit SetFormation stand abreast of the leader: slot 1 left, slot 2 right.
+    return this.GetFormationPosition(creature, leader, PartyFormationPattern.LINE, idx);
   }
 
   /**
@@ -1311,6 +1583,15 @@ export class PartyManager {
         }
 
         await PartyManager.ExportPartyMemberTemplate(i, pm.template);
+      }
+      for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+        const puppet = PartyManager.Puppets[i];
+        if(BitWise.InstanceOfObject(puppet?.moduleObject, ModuleObjectType.ModuleCreature) && !puppet.moduleObject.destroyed){
+          puppet.template = puppet.moduleObject.save();
+        }
+        if(puppet?.template instanceof GFFObject){
+          await puppet.template.export( path.join( CurrentGame.gameinprogress_dir, 'AVAILPUP'+i+'.utc'));
+        }
       }
       await PartyManager.ExportPlayerCharacter();
       resolve();
