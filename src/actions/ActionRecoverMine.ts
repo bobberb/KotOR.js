@@ -4,15 +4,13 @@ import { ActionStatus } from "@/enums/actions/ActionStatus";
 import { ActionType } from "@/enums/actions/ActionType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { ModuleTriggerType } from "@/enums/module/ModuleTriggerType";
-import { ResourceLoader } from "@/loaders/ResourceLoader";
 import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleTrigger } from "@/module/ModuleTrigger";
-import { GFFObject } from "@/resource/GFFObject";
-import { ResourceTypes } from "@/resource/ResourceTypes";
 import { BitWise } from "@/utility/BitWise";
 import { Utility } from "@/utility/Utility";
 import { Action } from "@/actions/Action";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
+import { SWTrapRules, TrapAttemptResult } from "@/engine/rules/SWTrapRules";
 
 /**
  * ActionRecoverMine class.
@@ -25,6 +23,7 @@ import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
  */
 
 export class ActionRecoverMine extends Action {
+  result: TrapAttemptResult;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -67,17 +66,11 @@ export class ActionRecoverMine extends Action {
           return ActionStatus.FAILED;
         }
 
-        //todo: recover skill check
-
-        trap.destroy();
-        const buffer = ResourceLoader.loadCachedResource(ResourceTypes['utp'], trap.trapResRef);
-        if(buffer){
-          const item = new GameState.Module.ModuleArea.ModuleItem(new GFFObject(buffer));
-          this.owner.addItem(item);
-        }
+        this.result = SWTrapRules.attemptRecover(this.owner, trap);
+        return this.result.outcome == 'success' ? ActionStatus.COMPLETE : ActionStatus.FAILED;
       }
 
-      return ActionStatus.COMPLETE;
+      return ActionStatus.FAILED;
     }
     
     return ActionStatus.FAILED;

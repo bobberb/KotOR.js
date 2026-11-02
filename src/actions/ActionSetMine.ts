@@ -11,6 +11,9 @@ import { BitWise } from "@/utility/BitWise";
 import { Utility } from "@/utility/Utility";
 import { Action } from "@/actions/Action";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
+import type { ModuleTrigger } from "@/module/ModuleTrigger";
+import * as THREE from "three";
 
 /**
  * ActionSetMine class.
@@ -27,6 +30,8 @@ export class ActionSetMine extends Action {
   bAnimQueued = false;
   oItem: ModuleItem;
   usedItem: boolean = false;
+  /** The mine trigger laid on the ground, when the target was not a door/placeable. */
+  laidMine: ModuleTrigger;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -46,15 +51,17 @@ export class ActionSetMine extends Action {
     this.target = this.getParameter<ModuleObject>(1);
 
     if(BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
-      const distance = Utility.Distance2D(this.owner.position, this.target.position);
-            
-      if(distance > 2 && !this.target.box.intersectsBox(this.owner.box)){
+      const blastTarget = BitWise.InstanceOfObject(this.target, ModuleObjectType.ModuleDoor) || BitWise.InstanceOfObject(this.target, ModuleObjectType.ModulePlaceable);
+      const point = blastTarget ? this.target.position : this.getMinePoint();
+      const distance = Utility.Distance2D(this.owner.position, point);
+
+      if(distance > 2 && !(blastTarget && this.target.box?.intersectsBox(this.owner.box))){
         enqueueMoveToPoint(this.owner, {
-          x: this.target.position.x,
-          y: this.target.position.y,
-          z: this.target.position.z,
+          x: point.x,
+          y: point.y,
+          z: point.z,
           area: GameState.module.area.id,
-          target: this.target.id,
+          target: blastTarget ? this.target.id : undefined,
           run: true,
           range: 2,
           timeout: 30.0,
@@ -82,8 +89,10 @@ export class ActionSetMine extends Action {
           // if(!property.isUseable()){ continue; }
     
           if(property.is(ModuleItemProperty.Trap)){
-            if(BitWise.InstanceOfObject(this.target, ModuleObjectType.ModuleDoor) || BitWise.InstanceOfObject(this.target, ModuleObjectType.ModulePlaceable)){
+            if(blastTarget){
               this.target.addTrap(property.subType, this.getOwner());
+            }else if(!this.laidMine){
+              this.laidMine = SWTrapRules.layMine(this.owner, property.subType, point);
             }
           }
         }
@@ -91,15 +100,20 @@ export class ActionSetMine extends Action {
         this.usedItem = true;
         console.log('ActionSetMine', 'ITEM_USED');
 
-        const futureTime = GameState.module.timeManager.getFutureTimeFromSeconds(3);
+        if(blastTarget){
+          const futureTime = GameState.module.timeManager.getFutureTimeFromSeconds(3);
 
-        const event = new GameState.GameEventFactory.EventSignalEvent();
-        event.setCaller(this.getOwner());
-        event.setObject(this.getTarget());
-        event.setDay(futureTime.pauseDay);
-        event.setTime(futureTime.pauseTime);
-        event.eventType = SignalEventType.OnTrapTriggered;
-        GameState.module.addEvent(event);
+          const event = new GameState.GameEventFactory.EventSignalEvent();
+          event.setCaller(this.getOwner());
+          event.setObject(this.getTarget());
+          event.setDay(futureTime.pauseDay);
+          event.setTime(futureTime.pauseTime);
+          event.eventType = SignalEventType.OnTrapTriggered;
+          GameState.module.addEvent(event);
+        }else if(!this.laidMine){
+          console.log('ActionSetMine', 'FAILED');
+          return ActionStatus.FAILED;
+        }
         
         //If we have more charges, reduce the charges count by 1
         if(this.oItem.charges > 1){
@@ -118,6 +132,20 @@ export class ActionSetMine extends Action {
     
     console.log('ActionSetMine', 'FAILED');
     return ActionStatus.FAILED;
+  }
+
+  /** Ground point to lay the mine on: params 2-4, else a non-blastable target's position, else the owner's feet. */
+  getMinePoint(): THREE.Vector3 {
+    const x = this.getParameter<number>(2);
+    const y = this.getParameter<number>(3);
+    const z = this.getParameter<number>(4);
+    if([x, y, z].every((v) => typeof v === 'number' && !isNaN(v))){
+      return new THREE.Vector3(x, y, z);
+    }
+    if(this.target?.position){
+      return this.target.position.clone();
+    }
+    return this.owner.position.clone();
   }
 
 }

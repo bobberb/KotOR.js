@@ -37,7 +37,7 @@ export class ActionFlagMine extends Action {
         return ActionStatus.FAILED;
       }
 
-      trap.detectTrap();
+      trap.detectTrap(this.owner);
 
       return ActionStatus.COMPLETE;
     }

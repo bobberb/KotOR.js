@@ -3,6 +3,7 @@ import type { ModuleRoom } from "@/module/ModuleRoom";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { GameState } from "@/GameState";
 import { SSFType } from "@/enums/resource/SSFType";
+import { SWSecurityRules, UnlockResult } from "@/engine/rules/SWTrapRules";
 import { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { CExoLocString } from "@/resource/CExoLocString";
 import { GFFObject } from "@/resource/GFFObject";
@@ -74,6 +75,7 @@ export class ModuleDoor extends ModuleObject {
   lockable: boolean;
   locked: boolean;
   openLockDC: number;
+  lastUnlockAttempt: UnlockResult;
   paletteID: number;
   ref: number;
   static: boolean;
@@ -422,6 +424,7 @@ export class ModuleDoor extends ModuleObject {
   lock(object: ModuleObject){
     if(this.locked){ return; }
     this.locked = true;
+    this.lastLocked = object;
     
     const onLock = this.scripts[ModuleObjectScript.DoorOnLock];
     if(onLock){
@@ -432,6 +435,7 @@ export class ModuleDoor extends ModuleObject {
   unlock(object: ModuleObject){
     if(!this.locked){ return; }
     this.locked = false;
+    this.lastUnlocked = object;
     
     const onUnlock = this.scripts[ModuleObjectScript.DoorOnUnlock];
     if(onUnlock){
@@ -439,27 +443,36 @@ export class ModuleDoor extends ModuleObject {
     }
   }
 
+  /**
+   * Pick the lock with the Security skill (SWSecurityRules.attemptPick), then use the object.
+   * @returns false when the object stays locked
+   */
   attemptUnlock(object: ModuleObject){
     if(!BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleObject)){
       return false;
     }
-    
-    const nSecuritySkill = object.getSkillLevel(SkillType.SECURITY);
-    if(this.isLocked() && !this.keyRequired && nSecuritySkill >= 1){
-      let d20 = 20;//d20 rolls are auto 20's outside of combat
-      let skillCheck = (((object.getWIS()/2) + nSecuritySkill) + d20) - this.openLockDC;
-      if(skillCheck >= 1 && nSecuritySkill >= 1){
-        this.unlock(object);
-        if(BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature)){
-          object.playSoundSet(SSFType.UNLOCK_SUCCESS);
-        }
-      }else{
-        if(BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature)){
+
+    if(this.isLocked()){
+      const result = SWSecurityRules.attemptPick(object, this);
+      this.lastUnlockAttempt = result;
+      const isCreature = BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature);
+      if(result.outcome == 'key-required' && this.keyName && object.hasItemByTag?.(this.keyName)){
+        // A KeyRequired lock can't be picked, but the key still opens it (use() does the key unlock).
+        this.use(object);
+        return !this.isLocked();
+      }
+      if(result.outcome != 'unlocked'){
+        if(isCreature){
           object.playSoundSet(SSFType.UNLOCK_FAIL);
         }
+        return false;
+      }
+      this.unlock(object);
+      if(isCreature){
+        object.playSoundSet(SSFType.UNLOCK_SUCCESS);
       }
     }
-        
+
     this.use(object);
     return true;
   }

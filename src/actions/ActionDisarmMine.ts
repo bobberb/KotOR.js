@@ -13,6 +13,7 @@ import { BitWise } from "@/utility/BitWise";
 import { Utility } from "@/utility/Utility";
 import { Action } from "@/actions/Action";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
+import { SWTrapRules, TrapAttemptResult } from "@/engine/rules/SWTrapRules";
 
 /**
  * ActionDisarmMine class.
@@ -25,6 +26,7 @@ import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
  */
 
 export class ActionDisarmMine extends Action {
+  result: TrapAttemptResult;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -67,12 +69,11 @@ export class ActionDisarmMine extends Action {
           return ActionStatus.FAILED;
         }
 
-        //todo: disarm skill check
-
-        trap.destroy();
+        this.result = SWTrapRules.attemptDisarm(this.owner, trap);
+        return this.result.outcome == 'success' ? ActionStatus.COMPLETE : ActionStatus.FAILED;
       }
 
-      return ActionStatus.COMPLETE;
+      return ActionStatus.FAILED;
     }
     
     return ActionStatus.FAILED;

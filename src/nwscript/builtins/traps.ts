@@ -1,10 +1,13 @@
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { NWScriptDataType } from "@/enums/nwscript/NWScriptDataType";
 import type { ModuleObject } from "@/module";
+import type { ModuleTrigger } from "@/module/ModuleTrigger";
+import type EngineLocation from "@/engine/EngineLocation";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 import { BitWise } from "@/utility/BitWise";
 import { NW_FALSE, NW_TRUE } from "@/nwscript/NWScriptConstants";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
-import { defineAction, objectParam } from "@/nwscript/builtins/actionBuilder";
+import { defineAction, intParam, locationParam, objectParam } from "@/nwscript/builtins/actionBuilder";
 
 export const GetTrapDisarmable = defineAction({
   id: 527,
@@ -122,7 +125,143 @@ export const GetIsTrapped = defineAction({
   },
 });
 
+const isTrappable = (object: any): boolean =>
+  BitWise.InstanceOfObject(object, ModuleObjectType.ModuleTrigger) ||
+  BitWise.InstanceOfObject(object, ModuleObjectType.ModuleDoor) ||
+  BitWise.InstanceOfObject(object, ModuleObjectType.ModulePlaceable);
+
+const isLockable = (object: any): boolean =>
+  BitWise.InstanceOfObject(object, ModuleObjectType.ModuleDoor) ||
+  BitWise.InstanceOfObject(object, ModuleObjectType.ModulePlaceable);
+
+export const GetLastLocked = defineAction({
+  id: 349,
+  name: "GetLastLocked",
+  comment: "349: Get the last object that locked the caller (door or placeable).",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return isLockable(this.caller) ? this.caller.lastLocked : undefined;
+  },
+});
+
+export const GetLastUnlocked = defineAction({
+  id: 350,
+  name: "GetLastUnlocked",
+  comment: "350: Get the last object that unlocked the caller (door or placeable).",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return isLockable(this.caller) ? this.caller.lastUnlocked : undefined;
+  },
+});
+
+export const GetLastTrapDetected = defineAction({
+  id: 486,
+  name: "GetLastTrapDetected",
+  comment: "486: Get the last trap detected by oTarget.\n* Return value on error: OBJECT_INVALID",
+  returnType: NWScriptDataType.OBJECT,
+  params: [objectParam<ModuleObject>("oTarget", { optional: true, default: undefined })] as const,
+  kotor(this: NWScriptInstance, oTarget) {
+    const target = oTarget ?? this.caller;
+    if (!BitWise.InstanceOfObject(target, ModuleObjectType.ModuleObject)) return undefined;
+    const trap = target.lastTrapDetected;
+    return trap && !trap.destroyed ? trap : undefined;
+  },
+});
+
+export const GetTrapDetectedBy = defineAction({
+  id: 529,
+  name: "GetTrapDetectedBy",
+  comment: "529: Return TRUE if oCreature has detected oTrapObject (detection is shared by the creature's faction).",
+  returnType: NWScriptDataType.INTEGER,
+  params: [objectParam<ModuleObject>("oTrapObject"), objectParam<ModuleObject>("oCreature")] as const,
+  kotor(this: NWScriptInstance, oTrapObject, oCreature) {
+    if (!isTrappable(oTrapObject) || !BitWise.InstanceOfObject(oCreature, ModuleObjectType.ModuleObject)) return NW_FALSE;
+    return oTrapObject.isTrapDetectedBy(oCreature) ? NW_TRUE : NW_FALSE;
+  },
+});
+
+export const GetTrapCreator = defineAction({
+  id: 533,
+  name: "GetTrapCreator",
+  comment: "533: Get the creator of oTrapObject, the creature that set the trap.\n* Returns OBJECT_INVALID if oTrapObject was created in the toolset.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [objectParam<ModuleObject>("oTrapObject")] as const,
+  kotor(this: NWScriptInstance, oTrapObject) {
+    if (!isTrappable(oTrapObject)) return undefined;
+    return oTrapObject.getTrapCreator();
+  },
+});
+
+export const GetTrapKeyTag = defineAction({
+  id: 534,
+  name: "GetTrapKeyTag",
+  comment: "534: Get the tag of the key that will disarm oTrapObject.",
+  returnType: NWScriptDataType.STRING,
+  params: [objectParam<ModuleObject>("oTrapObject")] as const,
+  kotor(this: NWScriptInstance, oTrapObject) {
+    // Only trap triggers carry a trap key (UTT KeyName); a door/placeable KeyName is its lock key.
+    if (!BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleTrigger)) return '';
+    return oTrapObject.keyName || '';
+  },
+});
+
+export const SetTrapDetectedBy = defineAction({
+  id: 550,
+  name: "SetTrapDetectedBy",
+  comment: "550: Set oDetector (and its faction) as having detected oTrap.\n* Returns TRUE on success.",
+  returnType: NWScriptDataType.INTEGER,
+  params: [objectParam<ModuleObject>("oTrap"), objectParam<ModuleObject>("oDetector")] as const,
+  kotor(this: NWScriptInstance, oTrap, oDetector) {
+    if (!isTrappable(oTrap) || !BitWise.InstanceOfObject(oDetector, ModuleObjectType.ModuleObject)) return NW_FALSE;
+    if (BitWise.InstanceOfObject(oTrap, ModuleObjectType.ModuleTrigger)) {
+      (oTrap as unknown as ModuleTrigger).detectTrap(oDetector);
+    } else {
+      oTrap.setTrapDetectedBy(oDetector, true);
+    }
+    return NW_TRUE;
+  },
+});
+
+export const SpawnMine = defineAction({
+  availability: "tsl",
+  id: 788,
+  name: "SpawnMine",
+  comment: "788: Spawn a mine of nMineType (traps.2da row) at lPoint. DCs are the given bases plus the traps.2da DC modifiers; oCreator's faction owns it.",
+  returnType: NWScriptDataType.VOID,
+  params: [
+    intParam("nMineType"),
+    locationParam<EngineLocation>("lPoint"),
+    intParam("nDetectDCBase"),
+    intParam("nDisarmDCBase"),
+    objectParam<ModuleObject>("oCreator"),
+  ] as const,
+  tsl(this: NWScriptInstance, nMineType, lPoint, nDetectDCBase, nDisarmDCBase, oCreator) {
+    if (!lPoint?.position) return;
+    const row = SWTrapRules.trapRow(nMineType);
+    if (!row) return;
+    const creator = BitWise.InstanceOfObject(oCreator, ModuleObjectType.ModuleObject) ? oCreator : undefined;
+    SWTrapRules.spawnMine(
+      nMineType,
+      lPoint.position,
+      (nDetectDCBase | 0) + SWTrapRules.dcMod(row.detectdcmod),
+      (nDisarmDCBase | 0) + SWTrapRules.dcMod(row.disarmdcmod),
+      creator,
+      lPoint.area ?? creator?.area,
+    );
+  },
+});
+
 export const trapsActions = [
+  GetLastLocked,
+  GetLastUnlocked,
+  GetLastTrapDetected,
+  GetTrapDetectedBy,
+  GetTrapCreator,
+  GetTrapKeyTag,
+  SetTrapDetectedBy,
+  SpawnMine,
   GetTrapDisarmable,
   GetTrapDetectable,
   GetTrapFlagged,

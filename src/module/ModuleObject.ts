@@ -265,6 +265,12 @@ export class ModuleObject {
   trapType: number;
   trapFlag: boolean;
   ownerDemolitions: number = -1;
+  /** Factions that have detected this trap; detection is shared by a faction (the party is one). */
+  trapDetectedByFactions: Set<number> = new Set();
+  trapCreatorId: number = ModuleObjectConstant.OBJECT_INVALID;
+  lastTrapDetected: ModuleObject;
+  lastLocked: ModuleObject;
+  lastUnlocked: ModuleObject;
 
   notBlastable: boolean = false;
 
@@ -1962,12 +1968,38 @@ export class ModuleObject {
     //Trigger Geomerty
     trigger.vertices[0] = new THREE.Vector3(-2,  2, 0);
     trigger.vertices[1] = new THREE.Vector3(-2, -2, 0);
-    trigger.vertices[2] = new THREE.Vector3( 2,  2, 0);
+    trigger.vertices[2] = new THREE.Vector3( 2, -2, 0);
     trigger.vertices[3] = new THREE.Vector3( 2,  2, 0);
 
     trigger.load();
 
     this.area.triggers.push(trigger);
+  }
+
+  getTrapDetectorFactionId(detector: ModuleObject): number {
+    const id = detector?.faction?.id ?? detector?.factionId;
+    return typeof id === 'number' && !isNaN(id) ? id : -1;
+  }
+
+  isTrapDetectedBy(detector: ModuleObject): boolean {
+    if(!detector) return false;
+    return this.trapDetectedByFactions.has(this.getTrapDetectorFactionId(detector));
+  }
+
+  setTrapDetectedBy(detector: ModuleObject, detected = true){
+    if(!detector) return;
+    const factionId = this.getTrapDetectorFactionId(detector);
+    if(detected){
+      this.trapDetectedByFactions.add(factionId);
+      detector.lastTrapDetected = this;
+    }else{
+      this.trapDetectedByFactions.delete(factionId);
+    }
+  }
+
+  getTrapCreator(): ModuleObject {
+    if(this.trapCreatorId == undefined || this.trapCreatorId == ModuleObjectConstant.OBJECT_INVALID) return undefined;
+    return GameState.ModuleObjectManager?.GetObjectById?.(this.trapCreatorId);
   }
 
   //---------------//

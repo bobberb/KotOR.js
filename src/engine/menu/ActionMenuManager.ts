@@ -309,6 +309,25 @@ export class ActionMenuManager {
       }));
     }
 
+    /**
+     * Set Mine: lay a mine at the PC's feet
+     */
+    const groundMines = ActionMenuManager.oPC.getInventory().filter((item) => item.baseItemId == 58);
+    for(let i = 0, len = groundMines.length; i < len; i++){
+      const item = groundMines[i];
+      const setMine = new GameState.ActionFactory.ActionSetMine();
+      setMine.setOwner(ActionMenuManager.oPC as ModuleObject);
+      setMine.setParameter(0, ActionParameterType.DWORD, item);
+      setMine.setParameter(1, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
+      setMine.setParameter(2, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.x);
+      setMine.setParameter(3, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.y);
+      setMine.setParameter(4, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.z);
+      ActionMenuManager.ActionPanels.selfPanels[2].addAction(new GameState.ActionMenuManager.ActionMenuItem({
+        action: setMine,
+        icon: item.getIcon()
+      }));
+    }
+
     return ActionMenuManager.ActionPanels;
   }
 
@@ -364,6 +383,8 @@ export class ActionMenuManager {
     if(action.talent instanceof TalentObject){
       //GameState.getCurrentPlayer().useTalent(action.talent, action.target);
       action.talent.useTalentOnObject(ActionMenuManager.oPC, ActionMenuManager.oPC);
+    }else if(action.action){
+      ActionMenuManager.oPC.actionQueue.addFront(action.action);
     }
   }
 
