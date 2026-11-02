@@ -8,6 +8,21 @@ import { BitWise } from "@/utility/BitWise";
 import { NW_FALSE, NW_TRUE } from "@/nwscript/NWScriptConstants";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { defineAction, intParam, locationParam, objectParam } from "@/nwscript/builtins/actionBuilder";
+import { ModuleTriggerType } from "@/enums/module/ModuleTriggerType";
+
+/**
+ * Whether oObject is an armed trap. A trap trigger is armed unless disabled
+ * (TrapFlag 0), spent or destroyed (ModuleTrigger.isTrapArmed: an unset TrapFlag
+ * counts as armed); a door/placeable by its TrapFlag.
+ */
+export function isObjectTrapped(object: any): boolean {
+  if (!object) return false;
+  if (BitWise.InstanceOfObject(object, ModuleObjectType.ModuleTrigger) && object.type == ModuleTriggerType.TRAP &&
+      typeof object.isTrapArmed === 'function') {
+    return !object.destroyed && !object.trapSpent && object.isTrapArmed();
+  }
+  return !!object.trapFlag;
+}
 
 export const GetTrapDisarmable = defineAction({
   id: 527,
@@ -45,7 +60,7 @@ export const GetTrapFlagged = defineAction({
   params: [objectParam<ModuleObject>("oTrapObject")] as const,
   kotor(this: NWScriptInstance, oTrapObject) {
     if (BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleObject)) {
-      return oTrapObject.trapFlag ? NW_TRUE : NW_FALSE;
+      return isObjectTrapped(oTrapObject) ? NW_TRUE : NW_FALSE;
     }
     return NW_FALSE;
   },
@@ -119,7 +134,7 @@ export const GetIsTrapped = defineAction({
       BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleDoor) ||
       BitWise.InstanceOfObject(oObject, ModuleObjectType.ModulePlaceable)
     ) {
-      return oObject.trapFlag ? NW_TRUE : NW_FALSE;
+      return isObjectTrapped(oObject) ? NW_TRUE : NW_FALSE;
     }
     return NW_FALSE;
   },

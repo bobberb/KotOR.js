@@ -117,7 +117,9 @@ export const SetTrapDisabled: INWScriptDefAction = {
     args: [NWScriptDataType.OBJECT],
     action: function(this: NWScriptInstance, args: [ModuleObject]){
       if(BitWise.InstanceOfObject(args[0], ModuleObjectType.ModuleObject)){
-        (args[0] as any).trapFlag = false;
+        const trap = args[0] as any;
+        if(typeof trap.disableTrap === 'function') trap.disableTrap();
+        else trap.trapFlag = false;
       }
       return;
     }

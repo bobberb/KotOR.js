@@ -281,9 +281,8 @@ export class ModuleTrigger extends ModuleObject {
   fireTrap(victim?: ModuleObject): boolean {
     if(this.type != ModuleTriggerType.TRAP || this.trapSpent || this.destroyed || !this.isTrapArmed()){ return false; }
     if(victim && victim !== this && !this.isHostile(victim)){ return false; }
-    // A party-set mine never goes off on the party, whatever their factions' standing.
-    if(victim && this.setByPlayerParty && SWTrapRules.isPartyMember(victim)){ return false; }
-    const oneShot = this.trapOneShot === undefined || !!this.trapOneShot;
+    if(victim && this.isExemptFromTrap(victim)){ return false; }
+    const oneShot = this.isTrapOneShot();
     if(oneShot){
       this.trapSpent = true;
       this.trapSpentTimer = SPENT_TRAP_REMOVE_DELAY;
@@ -379,7 +378,25 @@ export class ModuleTrigger extends ModuleObject {
 
   canTrigger(object: ModuleObject): boolean {
     if(!this.isTrapArmed() || this.trapSpent){ return false; }
+    if(this.isExemptFromTrap(object)){ return false; }
     return this.isHostile(object) && (!this.triggered || !this.trapOneShot);
+  }
+
+  /** A party-set mine never goes off on (or even notices) a party member, whatever their faction's standing. */
+  isExemptFromTrap(object: ModuleObject): boolean {
+    return !!object && !!this.setByPlayerParty && SWTrapRules.isPartyMember(object);
+  }
+
+  /** One-shot unless TrapOneShot says otherwise (an unset field counts as one-shot). */
+  isTrapOneShot(): boolean {
+    return this.trapOneShot === undefined || this.trapOneShot === null || !!this.trapOneShot;
+  }
+
+  /** SetTrapDisabled: disarm the trap in place; nobody can see or target it any more. */
+  disableTrap(){
+    this.trapFlag = false;
+    this.trapDetected = false;
+    this.trapDetectedByFactions.clear();
   }
 
   /** Counts down a spent one-shot trap and removes it. @returns true once removed */
@@ -469,6 +486,8 @@ export class ModuleTrigger extends ModuleObject {
       this.lastObjectEntered = object;
 
       if(this.type == ModuleTriggerType.TRAP){
+        // canTrigger applies every refusal fireTrap does (disabled, spent, party
+        // exemption, hostility), so past it the trap really goes off.
         if(!this.canTrigger(object)){ return; }
         this.onEnter(object);
         this.triggered = true;
@@ -866,8 +885,10 @@ export class ModuleTrigger extends ModuleObject {
     }
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmDC') ).setValue(this.trapDisarmDC || 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmable') ).setValue(this.trapDisarmable);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue(this.trapFlag);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue(this.trapOneShot);
+    // Write the effective values: an unset TrapFlag/TrapOneShot on a trap means armed/one-shot, not 0.
+    const isTrap = this.type == ModuleTriggerType.TRAP;
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue((isTrap ? this.isTrapArmed() : !!this.trapFlag) ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue((isTrap ? this.isTrapOneShot() : !!this.trapOneShot) ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapType') ).setValue(this.trapType);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Type') ).setValue(this.type);
     gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'VarTable') );

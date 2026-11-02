@@ -162,13 +162,13 @@ function creature(opts: {
 /** A GIT-style mine trigger, placed in the area. */
 function trapTrigger(opts: {
   at?: [number, number], detectDC?: number, disarmDC?: number, detectable?: number, disarmable?: number,
-  faction?: number, keyName?: string, oneShot?: number,
+  faction?: number, keyName?: string, oneShot?: number, flag?: number,
 } = {}): ModuleTrigger {
   const gff = new GFFObject();
   const add = (type: GFFDataType, label: string, value: any) => gff.RootNode.addField(new GFFField(type, label)).setValue(value);
   add(GFFDataType.BYTE, 'Type', ModuleTriggerType.TRAP);
   add(GFFDataType.BYTE, 'TrapType', TRAP_FRAG);
-  add(GFFDataType.BYTE, 'TrapFlag', 1);
+  add(GFFDataType.BYTE, 'TrapFlag', opts.flag ?? 1);
   add(GFFDataType.BYTE, 'TrapDetectable', opts.detectable ?? 1);
   add(GFFDataType.BYTE, 'TrapDisarmable', opts.disarmable ?? 1);
   add(GFFDataType.BYTE, 'TrapOneShot', opts.oneShot ?? 1);
@@ -1204,5 +1204,163 @@ describe('round 2 survivors', () => {
     expect(sound).toHaveBeenLastCalledWith(SSFType.UNLOCK_FAIL);
     expect(lockedDoor(1).attemptUnlock(pc)).toBe(true);
     expect(sound).toHaveBeenLastCalledWith(SSFType.UNLOCK_SUCCESS);
+  });
+});
+
+/*
+ * Round 4 (critic of 2ecf704): a party member never uses up a party mine,
+ * effective TrapFlag/TrapOneShot survive save/load, disabling hides the trap,
+ * and party membership comes from PartyManager.party rather than isPM.
+ */
+
+/** A TRAP trigger built without TrapFlag/TrapOneShot fields. */
+function bareTrapTrigger(): ModuleTrigger {
+  const gff = new GFFObject();
+  gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Type')).setValue(ModuleTriggerType.TRAP);
+  gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'TrapType')).setValue(TRAP_FRAG);
+  gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'Faction')).setValue(FACTION_HOSTILE);
+  const geometry = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'Geometry'));
+  for (const [x, y] of [[-1, 1], [-1, -1], [1, -1], [1, 1]]) {
+    const v = new GFFStruct();
+    v.addField(new GFFField(GFFDataType.FLOAT, 'PointX')).setValue(x);
+    v.addField(new GFFField(GFFDataType.FLOAT, 'PointY')).setValue(y);
+    v.addField(new GFFField(GFFDataType.FLOAT, 'PointZ')).setValue(0);
+    geometry.addChildStruct(v);
+  }
+  const t = register(new ModuleTrigger(gff));
+  t.load();
+  area.attachObject(t);
+  return t;
+}
+
+function reload(trap: ModuleTrigger): ModuleTrigger {
+  const t = register(new ModuleTrigger(new GFFObject(trap.save().getExportBuffer())));
+  t.load();
+  area.attachObject(t);
+  return t;
+}
+
+describe('a party member never uses up a party mine', () => {
+  test('a hostile-faction companion walks over the PC\'s mine: no OnObjectEnter, still armed for the real enemy', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, demolitions: 1 });
+    const { mine } = layAt(pc, 0, 0);
+    const companion = creature({ party: true, faction: FACTION_HOSTILE, at: [0.5, 0.5] });
+    expect(mine.canTrigger(companion)).toBe(false);
+    mine.updateObjectInside(companion);
+    companion.position.set(20, 20, 0);
+    mine.updateObjectInside(companion);
+    expect(ofType(SignalEventType.OnObjectEnter)).toHaveLength(0);
+    expect(mine.triggered).toBe(false);
+
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE, at: [0.5, -0.5] });
+    mine.updateObjectInside(enemy);
+    expect(trapEvents()).toHaveLength(1);
+    expect(trapEvents()[0].caller).toBe(enemy);
+    expect(mine.triggered).toBe(true);
+  });
+});
+
+describe('effective TrapFlag / TrapOneShot', () => {
+  test('a trap with no TrapFlag/TrapOneShot fields reloads armed and one-shot', () => {
+    const trap = bareTrapTrigger();
+    expect(trap.isTrapArmed()).toBe(true);
+    const reloaded = reload(trap);
+    expect(reloaded.isTrapArmed()).toBe(true);
+    expect(reloaded.isTrapOneShot()).toBe(true);
+    const pc = creature({ party: true });
+    expect(reloaded.fireTrap(pc)).toBe(true);
+    expect(reloaded.fireTrap(pc)).toBe(false);
+  });
+
+  test('a generic trigger still saves TrapFlag/TrapOneShot as 0', () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Type')).setValue(ModuleTriggerType.GENERIC);
+    const generic = new ModuleTrigger(gff);
+    const saved = generic.save().RootNode;
+    expect(saved.getFieldByLabel('TrapFlag').getValue()).toBe(0);
+    expect(saved.getFieldByLabel('TrapOneShot').getValue()).toBe(0);
+  });
+
+  test('a TrapFlag 0 trap loaded from a GFF is inert', () => {
+    const pc = creature({ party: true, awareness: 40, demolitions: 40, at: [0.5, 0.5] });
+    const trap = trapTrigger({ at: [0, 0], flag: 0, detectDC: 1, disarmDC: 1 });
+    expect(trap.isTrapArmed()).toBe(false);
+    trap.updateObjectInside(pc);
+    expect(trap.fireTrap(pc)).toBe(false);
+    expect(trapEvents()).toHaveLength(0);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
+    expect(SWTrapRules.attemptDisarm(pc, trap).outcome).toBe('invalid');
+  });
+
+  test('GetIsTrapped / GetTrapFlagged / GetNearestTrapToObject agree with the engine', () => {
+    const { GetNearestTrapToObject } = require('@/nwscript/builtins/upstream/perception');
+    const pc = creature({ party: true });
+    const bare = bareTrapTrigger();
+    const disabled = trapTrigger({ flag: 0 });
+    const spent = trapTrigger();
+    spent.fireTrap(pc);
+    let nearest: any;
+    state.ModuleObjectManager.GetNearestObject = () => nearest;
+    const nearestTrap = (t: any) => { nearest = t; return GetNearestTrapToObject.action.call({ caller: pc }, [0, pc, 1]); };
+
+    expect(routines.GetIsTrapped.kotor.call({}, bare)).toBe(1);
+    expect(routines.GetTrapFlagged.kotor.call({}, bare)).toBe(1);
+    expect(nearestTrap(bare)).toBe(bare);
+    for (const t of [disabled, spent]) {
+      expect(routines.GetIsTrapped.kotor.call({}, t)).toBe(0);
+      expect(routines.GetTrapFlagged.kotor.call({}, t)).toBe(0);
+      expect(nearestTrap(t)).toBeUndefined();
+    }
+  });
+});
+
+describe('SetTrapDisabled hides the trap', () => {
+  test('detection is cleared and the target menu offers nothing on it', () => {
+    const { SetTrapDisabled } = require('@/nwscript/builtins/upstream/world');
+    state.GameKey = GameEngineType.KOTOR;
+    state.ActionMenuManager = { ActionMenuPanel, ActionMenuItem };
+    state.ActionFactory.ActionDisarmMine = ActionDisarmMine;
+    state.ActionFactory.ActionRecoverMine = ActionRecoverMine;
+    state.ActionFactory.ActionSetMine = ActionSetMine;
+    const pc = creature({ party: true, demolitions: 3 });
+    jest.spyOn(pc, 'getInventory').mockReturnValue([] as any);
+    jest.spyOn(pc, 'getSpells').mockReturnValue([] as any);
+    const trap = trapTrigger({ at: [1, 0] });
+    trap.detectTrap(pc);
+
+    const targetActions = () => {
+      ActionMenuManager.InitActionMenuPanels();
+      ActionMenuManager.SetPC(pc);
+      ActionMenuManager.oTarget = trap;
+      ActionMenuManager.UpdateMenuActions();
+      return ActionMenuManager.ActionPanels.targetPanels.flatMap((p: any) => p.actions.map((a: any) => a.action?.type));
+    };
+    expect(targetActions()).toEqual([ActionType.ActionDisarmMine, ActionType.ActionRecoverMine]);
+
+    SetTrapDisabled.action.call({}, [trap]);
+    expect(trap.trapDetected).toBe(false);
+    expect(trap.isTrapDetectedBy(pc)).toBe(false);
+    expect(targetActions()).toEqual([]);
+  });
+});
+
+describe('party membership is PartyManager.party, not isPM', () => {
+  test('a creature that left the party (isPM still set) is not the party', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, demolitions: 1 });
+    const { mine } = layAt(pc, 1, 0);
+    const former = creature({ party: false, faction: FACTION_PARTY });
+    former.isPM = true; // RemovePartyMemberByNPCId splices party without clearing isPM
+    expect(SWTrapRules.isOwnMine(former, mine)).toBe(false);
+    expect(mine.isTrapDetectedBy(former)).toBe(false);
+  });
+
+  test('a party-array member whose isPM is unset is the party', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, demolitions: 1 });
+    const { mine } = layAt(pc, 1, 0);
+    const member = creature({ party: false, faction: FACTION_PARTY });
+    state.PartyManager.party.push(member);
+    expect(member.isPM).toBe(false);
+    expect(SWTrapRules.isOwnMine(member, mine)).toBe(true);
+    expect(mine.isTrapDetectedBy(member)).toBe(true);
   });
 });

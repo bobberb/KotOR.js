@@ -1985,7 +1985,8 @@ export class ModuleObject {
    * else their faction id.
    */
   getTrapDetectorFactionId(detector: ModuleObject): number {
-    if(detector && (detector.isPartyMember?.() || (GameState.PartyManager?.party || []).indexOf(detector as any) >= 0)){
+    // PartyManager.party, not isPM: isPM can be stale after a member leaves.
+    if(detector && (GameState.PartyManager?.party || []).indexOf(detector as any) >= 0){
       return TRAP_DETECTOR_PARTY;
     }
     const id = detector?.faction?.id ?? detector?.factionId;

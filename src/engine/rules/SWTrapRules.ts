@@ -205,9 +205,12 @@ export class SWTrapRules {
     return BitWise.InstanceOfObject(object, ModuleObjectType.ModuleTrigger) && (object as any).type == ModuleTriggerType.TRAP;
   }
 
+  /**
+   * Current party membership. PartyManager.party is the truth: the isPM flag
+   * can be stale (RemovePartyMemberByNPCId splices the array without clearing it).
+   */
   static isPartyMember(object: ModuleObject): boolean {
     if(!object) return false;
-    if(typeof (object as any).isPartyMember === 'function' && (object as any).isPartyMember()) return true;
     return (GameState.PartyManager?.party || []).indexOf(object as any) >= 0;
   }
 

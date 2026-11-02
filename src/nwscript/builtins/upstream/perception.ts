@@ -11,6 +11,7 @@ import { NWScriptDataType } from "@/enums/nwscript/NWScriptDataType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { BitWise } from "@/utility/BitWise";
 import type { INWScriptDefAction } from "@/interface/nwscript/INWScriptDefAction";
+import { isObjectTrapped } from "@/nwscript/builtins/traps";
 
 /** Upstream 002dfe03, action #198: upstream-body-changed. */
 export const GetTransitionTarget: INWScriptDefAction = {
@@ -95,6 +96,6 @@ export const GetNearestTrapToObject: INWScriptDefAction = {
       const target: any = args[1] ? args[1] : this.caller;
       if(!target) return undefined;
       const nearest = GameState.ModuleObjectManager.GetNearestObject(args[0], target, args[2]);
-      return (nearest as any)?.trapFlag ? nearest : undefined;
+      return isObjectTrapped(nearest) ? nearest : undefined;
     }
   };

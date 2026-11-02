@@ -9,6 +9,7 @@ import { ActionType } from "@/enums/actions/ActionType";
 import { SkillType } from "@/enums/nwscript/SkillType";
 import { ActionParameterType, ModuleObjectConstant, ModuleTriggerType } from "@/enums";
 import { TalentObject } from "@/talents/TalentObject";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 
 /**
  * ActionMenuManager class.
@@ -266,7 +267,8 @@ export class ActionMenuManager {
         }
 
       }else if(ActionMenuManager.oTarget instanceof GameState.Module.ModuleArea.ModuleTrigger){
-        if(ActionMenuManager.oTarget.type == ModuleTriggerType.TRAP){
+        // Disabled, spent or removed traps offer nothing (every action on them would fail).
+        if(ActionMenuManager.oTarget.type == ModuleTriggerType.TRAP && SWTrapRules.isLive(ActionMenuManager.oTarget)){
           /**
            * Disarm Mine
            */
