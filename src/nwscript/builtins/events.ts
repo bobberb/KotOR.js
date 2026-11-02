@@ -19,6 +19,15 @@ export const SignalEvent = defineAction({
     eventParam<GameEvent | undefined>("evToRun", { optional: true, default: undefined }),
   ] as const,
   kotor(this: NWScriptInstance, oObject, evToRun) {
+    if (oObject && (oObject as unknown) === GameState.module) {
+      if (evToRun instanceof NWScriptEvent) {
+        GameState.module.scriptEventHandler(evToRun);
+      } else {
+        console.warn("SignalEvent", "Invalid event argument", [oObject, evToRun]);
+      }
+      return;
+    }
+
     let target = oObject;
     if (!(BitWise.InstanceOfObject(target, ModuleObjectType.ModuleObject))) {
       target = GameState.module.area;

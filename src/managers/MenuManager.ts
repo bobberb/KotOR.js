@@ -55,7 +55,9 @@ export class MenuManager {
   static MenuCharacter: KOTOR.MenuCharacter;
   static MenuChemicals: TSL.MenuChemicals;
   static MenuContainer: KOTOR.MenuContainer;
+  static MenuCredits: KOTOR.MenuCredits;
   static MenuEquipment: KOTOR.MenuEquipment;
+  static MenuGameOver: KOTOR.MenuGameOver;
   static MenuFeedback: KOTOR.MenuFeedback;
   static MenuGalaxyMap: KOTOR.MenuGalaxyMap;
   static MenuGameplay: KOTOR.MenuGameplay;
@@ -253,7 +255,30 @@ export class MenuManager {
     await menu.load();
     PerformanceMonitor.stop(menuConstructor.name+'.GameMenuLoader');
     return menu;
-  }  
+  }
+
+  /*
+   * Built on first use rather than with the in-game menus: a GUI resource
+   * missing from one game's data must not take the whole in-game menu set
+   * down with it (LoadInGameMenus loads them through one Promise.all).
+   */
+  static async GetMenuGameOver(): Promise<KOTOR.MenuGameOver> {
+    if(!MenuManager.MenuGameOver){
+      MenuManager.MenuGameOver = await MenuManager.GameMenuLoader(
+        GameState.GameKey == GameEngineType.TSL ? TSL.MenuGameOver : KOTOR.MenuGameOver
+      ) as KOTOR.MenuGameOver;
+    }
+    return MenuManager.MenuGameOver;
+  }
+
+  static async GetMenuCredits(): Promise<KOTOR.MenuCredits> {
+    if(!MenuManager.MenuCredits){
+      MenuManager.MenuCredits = await MenuManager.GameMenuLoader(
+        GameState.GameKey == GameEngineType.TSL ? TSL.MenuCredits : KOTOR.MenuCredits
+      ) as KOTOR.MenuCredits;
+    }
+    return MenuManager.MenuCredits;
+  }
   
   static async LoadMainGameMenus(){
     try{

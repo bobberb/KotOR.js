@@ -30,6 +30,7 @@ export * from "@/game/kotor/menu/InGameDialog";
 export * from "@/game/kotor/menu/MenuEquipment";
 export * from "@/game/kotor/menu/MenuFeedback";
 export * from "@/game/kotor/menu/MenuGalaxyMap";
+export * from "@/game/kotor/menu/MenuGameOver";
 export * from "@/game/kotor/menu/MenuGameplay";
 export * from "@/game/kotor/menu/MenuGraphics";
 export * from "@/game/kotor/menu/MenuGraphicsAdvanced";

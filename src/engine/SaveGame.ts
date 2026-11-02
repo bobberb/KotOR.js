@@ -600,7 +600,7 @@ export class SaveGame {
       this.inventory = new GFFObject(buffer);
       let invArr = this.inventory.RootNode.getFieldByLabel('ItemList').getChildStructs();
       for(let i = 0; i < invArr.length; i++){
-        GameState.InventoryManager.addItem(GFFObject.FromStruct(invArr[i]));
+        GameState.InventoryManager.addItem(GFFObject.FromStruct(invArr[i]), false, { silent: true });
       }
     }catch(e){
       console.error(e);

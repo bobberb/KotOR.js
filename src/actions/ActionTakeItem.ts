@@ -57,7 +57,7 @@ export class ActionTakeItem extends Action {
     }
 
     if(GameState.PartyManager.party.indexOf(this.owner as any) >= 0){
-      GameState.InventoryManager.addItem(removed);
+      GameState.InventoryManager.addItem(removed, false, { acquiredFrom: oTarget });
     }else{
       this.owner.addItem(removed);
     }

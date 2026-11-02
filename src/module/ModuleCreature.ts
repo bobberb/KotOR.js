@@ -824,6 +824,8 @@ export class ModuleCreature extends ModuleObject {
   }
 
   updateRegen(delta = 0) {
+    // The dead do not heal back up; party revival is PartyDeathMonitor's call.
+    if (this.isDead()) return;
     this.regenTimer -= delta;
     if (this.regenTimer <= 0) {
       this.regenTimer = this.regenTimerMax;

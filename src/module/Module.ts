@@ -27,6 +27,11 @@ import { ModuleTimeManager } from "@/module/ModuleTimeManager";
 import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { GameEngineType } from "@/enums/engine/GameEngineType";
+import { NWScriptEventType } from "@/enums/nwscript/NWScriptEventType";
+import type { ModuleObject } from "@/module/ModuleObject";
+import type { ModuleCreature } from "@/module/ModuleCreature";
+import type { ModuleItem } from "@/module/ModuleItem";
+import { PartyDeathMonitor } from "@/module/PartyDeathMonitor";
 
 type ModuleScriptKeys = 'Mod_OnAcquirItem'|'Mod_OnActvtItem'|'Mod_OnClientEntr'|'Mod_OnClientLeav'|'Mod_OnHeartbeat'|'Mod_OnModLoad'|'Mod_OnModStart'|'Mod_OnPlrDeath'|'Mod_OnPlrDying'|'Mod_OnPlrLvlUp'|'Mod_OnPlrRest'|'Mod_OnSpawnBtnDn'|'Mod_OnUnAqreItem'|'Mod_OnUsrDefined';
 
@@ -69,6 +74,29 @@ export class Module {
   transition: any;
   transWP: string;
   lastItemAcquired: any = undefined;
+  lastItemAcquiredFrom: ModuleObject = undefined;
+  lastItemAcquiredStackSize: number = 0;
+  lastItemLost: ModuleItem = undefined;
+  lastItemLostBy: ModuleObject = undefined;
+  itemActivated: ModuleItem = undefined;
+  itemActivator: ModuleObject = undefined;
+  itemActivatedTarget: ModuleObject = undefined;
+  itemActivatedTargetLocation: EngineLocation = undefined;
+  pcLevellingUp: ModuleCreature = undefined;
+  lastPCRested: ModuleCreature = undefined;
+  lastPlayerDying: ModuleCreature = undefined;
+  lastPlayerDied: ModuleCreature = undefined;
+
+  /**
+   * Module-level locals (SetLocalBoolean/SetLocalNumber on GetModule()),
+   * persisted in the IFO SWVarTable.
+   */
+  _locals: { Booleans: boolean[]; Numbers: { [index: number]: number } } = { Booleans: [], Numbers: {} };
+
+  static readonly HEARTBEAT_INTERVAL = 6;
+  heartbeatElapsed: number = 0;
+
+  partyDeath: PartyDeathMonitor = new PartyDeathMonitor();
 
   /**
    * List of Areas in the module
@@ -292,6 +320,11 @@ export class Module {
       }
     }
 
+    this._locals = { Booleans: [], Numbers: {} };
+    if(ifo.RootNode.hasField('SWVarTable')){
+      this.setLocalsFromSWVarTable(ifo.getFieldByLabel('SWVarTable').getChildStructs()[0]);
+    }
+
     if(ifo.RootNode.hasField('Mod_PlayerList') && isLoadingSave){
       const playerList = ifo.getFieldByLabel('Mod_PlayerList').getChildStructs();
       if(playerList.length){
@@ -472,8 +505,160 @@ export class Module {
 
       this.timeManager.update(delta);
 
+      this.updateHeartbeat(delta);
+      this.partyDeath.update(delta);
+
     }
 
+  }
+
+  updateHeartbeat(delta = 0){
+    this.heartbeatElapsed += delta;
+    if(this.heartbeatElapsed < Module.HEARTBEAT_INTERVAL){ return; }
+    // One beat per tick: a long frame hitch must not replay a burst of heartbeats.
+    this.heartbeatElapsed %= Module.HEARTBEAT_INTERVAL;
+    this.runScript(ModuleObjectScript.ModuleOnHeartbeat);
+  }
+
+  /**
+   * Run one of the module's event scripts on a fresh instance: module scripts can
+   * re-enter (an OnAcquireItem script that creates another item).
+   * The module area stands in for OBJECT_SELF, as initScripts() already does.
+   */
+  runScript(key: ModuleObjectScript, configure?: (instance: NWScriptInstance) => void, scriptVar = 0): boolean {
+    const script = this.scripts[key];
+    if(!script){ return false; }
+    const instance = (typeof script.newInstance === 'function' && script.newInstance()) || script;
+    configure?.(instance);
+    try{
+      instance.run(this.area, scriptVar);
+    }catch(error){
+      console.error(`Module.runScript: ${key} failed`, error);
+    }
+    return true;
+  }
+
+  onItemAcquired(item: ModuleItem, acquiredFrom?: ModuleObject, stackSize = 1){
+    this.lastItemAcquired = item;
+    this.lastItemAcquiredFrom = acquiredFrom;
+    this.lastItemAcquiredStackSize = stackSize;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerAcquireItem);
+  }
+
+  onItemLost(item: ModuleItem, lostBy?: ModuleObject){
+    this.lastItemLost = item;
+    this.lastItemLostBy = lostBy;
+    return this.runScript(ModuleObjectScript.ModuleOnUnAcquireItem);
+  }
+
+  onItemActivated(item: ModuleItem, activator?: ModuleObject, target?: ModuleObject, targetLocation?: EngineLocation){
+    this.itemActivated = item;
+    this.itemActivator = activator;
+    this.itemActivatedTarget = target;
+    this.itemActivatedTargetLocation = targetLocation;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerActivateItem);
+  }
+
+  onPlayerLevelUp(creature: ModuleCreature){
+    this.pcLevellingUp = creature;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerLevelUp);
+  }
+
+  onPlayerRest(creature: ModuleCreature){
+    this.lastPCRested = creature;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerRest);
+  }
+
+  onPlayerDying(creature: ModuleCreature){
+    this.lastPlayerDying = creature;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerDying, (instance) => {
+      instance.enteringObject = creature;
+    });
+  }
+
+  onPlayerDeath(creature: ModuleCreature){
+    this.lastPlayerDied = creature;
+    return this.runScript(ModuleObjectScript.ModuleOnPlayerDeath, (instance) => {
+      instance.enteringObject = creature;
+    });
+  }
+
+  /**
+   * Receives SignalEvent(GetModule(), ...).
+   */
+  scriptEventHandler(event: any){
+    if(!event || typeof event.type !== 'number'){ return; }
+    switch(event.type){
+      case NWScriptEventType.EventUserDefined:
+        this.runScript(ModuleObjectScript.ModuleOnUserDefined, undefined, parseInt(event.getInt(0)) || 0);
+      break;
+      case NWScriptEventType.EventActivateItem: {
+        const location = new EngineLocation(event.getFloat(0) || 0, event.getFloat(1) || 0, event.getFloat(2) || 0);
+        this.onItemActivated(event.getObject(0), event.getObject(1), event.getObject(3), location);
+      } break;
+      default:
+        console.warn('Module.scriptEventHandler: unhandled event', event);
+      break;
+    }
+  }
+
+  getLocalBoolean(index: number){
+    return !!this._locals.Booleans[index];
+  }
+
+  setLocalBoolean(index: number, value: boolean){
+    this._locals.Booleans[index] = !!value;
+  }
+
+  getLocalNumber(index: number){
+    return this._locals.Numbers[index] ? this._locals.Numbers[index] : 0;
+  }
+
+  setLocalNumber(index: number, value: number){
+    this._locals.Numbers[index] = value;
+  }
+
+  setLocalsFromSWVarTable(struct?: GFFStruct){
+    if(!struct){ return; }
+    if(struct.hasField('BitArray')){
+      const words = struct.getFieldByLabel('BitArray').getChildStructs();
+      for(let i = 0; i < words.length; i++){
+        const data = words[i].getFieldByLabel('Variable').getValue() >>> 0;
+        for(let bit = 0; bit < 32; bit++){
+          this._locals.Booleans[bit + (i * 32)] = ((data >>> bit) & 1) == 1;
+        }
+      }
+    }
+    if(struct.hasField('ByteArray')){
+      const bytes = struct.getFieldByLabel('ByteArray').getChildStructs();
+      for(let i = 0; i < bytes.length; i++){
+        this.setLocalNumber(i, bytes[i].getFieldByLabel('Variable').getValue());
+      }
+    }
+  }
+
+  /** Same layout ModuleObject.getSWVarTableSaveStruct() writes for objects. */
+  getSWVarTableSaveStruct(){
+    const struct = new GFFStruct();
+    const bitArray = struct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
+    for(let i = 0; i < 3; i++){
+      let value = 0;
+      for(let j = 0; j < 32; j++){
+        if(this.getLocalBoolean((32 * i) + j)){
+          value |= 1 << j;
+        }
+      }
+      const varStruct = new GFFStruct();
+      varStruct.addField( new GFFField(GFFDataType.DWORD, 'Variable') ).setValue( value >>> 0 );
+      bitArray.addChildStruct(varStruct);
+    }
+    const byteArray = struct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
+    for(let i = 0; i < 8; i++){
+      const varStruct = new GFFStruct();
+      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) );
+      byteArray.addChildStruct(varStruct);
+    }
+    return struct;
   }
 
   tickPaused(delta = 0){
@@ -701,11 +886,17 @@ export class Module {
     ifo.RootNode.addField( new GFFField(GFFDataType.WORD, 'Mod_StartSecond') ).setValue(this.timeManager.second);
     ifo.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Mod_StartYear') ).setValue(this.timeManager.year);
     ifo.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Mod_Tag') ).setValue(this.tag);
-    ifo.RootNode.addField( new GFFField(GFFDataType.LIST, 'Mod_Tokens') );
+    const tokenList = ifo.RootNode.addField( new GFFField(GFFDataType.LIST, 'Mod_Tokens') );
+    for(const [tokenNumber, tokenValue] of this.customTokens){
+      const tokenStruct = new GFFStruct();
+      tokenStruct.addField( new GFFField(GFFDataType.DWORD, 'Mod_TokensNumber') ).setValue(tokenNumber);
+      tokenStruct.addField( new GFFField(GFFDataType.CEXOSTRING, 'Mod_TokensValue') ).setValue(tokenValue);
+      tokenList.addChildStruct(tokenStruct);
+    }
     ifo.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Mod_Transition') ).setValue(this.transition);
     ifo.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Mod_Version') ).setValue(this.version);
     ifo.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Mod_XPScale') .setValue(this.xpScale));
-    ifo.RootNode.addField( new GFFField(GFFDataType.STRUCT, 'SWVarTable') );
+    ifo.RootNode.addField( new GFFField(GFFDataType.STRUCT, 'SWVarTable') ).addChildStruct( this.getSWVarTableSaveStruct() );
     ifo.RootNode.addField( new GFFField(GFFDataType.LIST, 'VarTable') );
     
     this.ifo = ifo;

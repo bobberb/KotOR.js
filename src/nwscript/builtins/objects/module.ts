@@ -23,6 +23,135 @@ import { Utility } from "@/utility/Utility";
 import { NW_FALSE, NW_TRUE } from "@/nwscript/NWScriptConstants";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { defineAction, floatParam, intParam, locationParam, objectParam, stringParam, vectorParam } from "@/nwscript/builtins/actionBuilder";
+import { GameOver } from "@/engine/GameOver";
+
+export const GetModuleItemAcquiredFrom = defineAction({
+  id: 283,
+  name: "GetModuleItemAcquiredFrom",
+  comment: "283: Use this in an OnItemAcquired script to get the creature that previously possessed the item.\n* Returns OBJECT_INVALID if the item was picked up from the ground.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.lastItemAcquiredFrom;
+  },
+});
+
+export const GetLastPlayerDied = defineAction({
+  id: 291,
+  name: "GetLastPlayerDied",
+  comment: "291: Use this in an OnPlayerDeath module script to get the last player that died.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.lastPlayerDied;
+  },
+});
+
+export const GetModuleItemLost = defineAction({
+  id: 292,
+  name: "GetModuleItemLost",
+  comment: "292: Use this in an OnItemLost script to get the item that was lost/dropped.\n* Returns OBJECT_INVALID if the module is not valid.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.lastItemLost;
+  },
+});
+
+export const GetModuleItemLostBy = defineAction({
+  id: 293,
+  name: "GetModuleItemLostBy",
+  comment: "293: Use this in an OnItemLost script to get the creature that lost the item.\n* Returns OBJECT_INVALID if the module is not valid.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.lastItemLostBy;
+  },
+});
+
+export const GetLastPlayerDying = defineAction({
+  id: 410,
+  name: "GetLastPlayerDying",
+  comment: "410: Use this in an OnPlayerDying module script to get the last player who is dying.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.lastPlayerDying;
+  },
+});
+
+export const GetItemActivatedTargetLocation = defineAction({
+  id: 441,
+  name: "GetItemActivatedTargetLocation",
+  comment: "441: Use this in an OnItemActivated module script to get the location of the item's target.",
+  returnType: NWScriptDataType.LOCATION,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivatedTargetLocation || new EngineLocation();
+  },
+});
+
+export const GetItemActivatedTarget = defineAction({
+  id: 442,
+  name: "GetItemActivatedTarget",
+  comment: "442: Use this in an OnItemActivated module script to get the item's target.",
+  returnType: NWScriptDataType.OBJECT,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivatedTarget;
+  },
+});
+
+export const StartCreditSequence = defineAction({
+  id: 518,
+  name: "StartCreditSequence",
+  comment: "518: Starts the credits sequence.\n- bTransparentBackground: TRUE if the credits should be displayed with a transparent background.",
+  returnType: NWScriptDataType.VOID,
+  params: [intParam("bTransparentBackground")] as const,
+  kotor(this: NWScriptInstance, bTransparentBackground) {
+    void GameOver.StartCreditSequence(!!bTransparentBackground);
+  },
+});
+
+export const IsCreditSequenceInProgress = defineAction({
+  id: 519,
+  name: "IsCreditSequenceInProgress",
+  comment: "519: Returns TRUE if the credits sequence is currently in progress, FALSE otherwise.",
+  returnType: NWScriptDataType.INTEGER,
+  params: [] as const,
+  kotor(this: NWScriptInstance) {
+    return GameOver.IsCreditSequenceInProgress() ? NW_TRUE : NW_FALSE;
+  },
+});
+
+export const PopUpDeathGUIPanel = defineAction({
+  id: 554,
+  name: "PopUpDeathGUIPanel",
+  comment: "554: Displays the death GUI panel (Load Game / Quit).\nThe respawn / wait-for-help options are NWN-only and ignored.",
+  returnType: NWScriptDataType.VOID,
+  params: [
+    objectParam<ModuleObject | undefined>("oPC"),
+    intParam("bRespawnButtonEnabled", { optional: true, default: 1 }),
+    intParam("bWaitForHelpButtonEnabled", { optional: true, default: 0 }),
+    intParam("nHelpStringReference", { optional: true, default: 0 }),
+    stringParam("sHelpString", { optional: true, default: "" }),
+  ] as const,
+  kotor(this: NWScriptInstance, oPC, bRespawnButtonEnabled, bWaitForHelpButtonEnabled, nHelpStringReference, sHelpString) {
+    void GameOver.OpenDeathScreen();
+  },
+});
+
+export const EndGame = defineAction({
+  id: 564,
+  name: "EndGame",
+  comment: "564: Ends the game and returns to the main menu.",
+  returnType: NWScriptDataType.VOID,
+  params: [intParam("nShowEndGameGui", { optional: true, default: 1 })] as const,
+  kotor(this: NWScriptInstance, nShowEndGameGui) {
+    GameOver.EndGame(!!nShowEndGameGui);
+  },
+});
+
 export const GetModuleFileName = defineAction({
   id: 210,
   name: "GetModuleFileName",
@@ -177,6 +306,17 @@ export const ShipBuild = defineAction({
 });
 
 export const moduleObjectActions = [
+  GetModuleItemAcquiredFrom,
+  GetLastPlayerDied,
+  GetModuleItemLost,
+  GetModuleItemLostBy,
+  GetLastPlayerDying,
+  GetItemActivatedTargetLocation,
+  GetItemActivatedTarget,
+  StartCreditSequence,
+  IsCreditSequenceInProgress,
+  PopUpDeathGUIPanel,
+  EndGame,
   GetModuleFileName,
   GetModule,
   GetModuleName,

@@ -407,11 +407,9 @@ export class ModulePlaceable extends ModuleObject {
 
   retrieveInventory(){
     while(this.inventory.length){
-      const item = this.inventory.pop();
-      const stackSize = item.getStackSize();
-      for(let i = 0; i < stackSize; i++){
-        GameState.InventoryManager.addItem(item);
-      }
+      // addItem moves the whole stack; adding the same instance once per unit
+      // merged it into itself (3 became 12) and fired OnAcquireItem per unit.
+      GameState.InventoryManager.addItem(this.inventory.pop(), false, { acquiredFrom: this });
     }
     const instance = this.scripts[ModuleObjectScript.PlaceableOnInvDisturbed];
     if(!instance){ return; }
