@@ -11,7 +11,7 @@ import { BitWise } from "@/utility/BitWise";
 import { Utility } from "@/utility/Utility";
 import { Action } from "@/actions/Action";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
-import { SWTrapRules } from "@/engine/rules/SWTrapRules";
+import { SWTrapRules, LayMineResult } from "@/engine/rules/SWTrapRules";
 import type { ModuleTrigger } from "@/module/ModuleTrigger";
 import * as THREE from "three";
 
@@ -32,6 +32,7 @@ export class ActionSetMine extends Action {
   usedItem: boolean = false;
   /** The mine trigger laid on the ground, when the target was not a door/placeable. */
   laidMine: ModuleTrigger;
+  layResult: LayMineResult;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -92,7 +93,8 @@ export class ActionSetMine extends Action {
             if(blastTarget){
               this.target.addTrap(property.subType, this.getOwner());
             }else if(!this.laidMine){
-              this.laidMine = SWTrapRules.layMine(this.owner, property.subType, point);
+              this.layResult = SWTrapRules.layMine(this.owner, property.subType, point);
+              this.laidMine = this.layResult.trigger;
             }
           }
         }
@@ -111,6 +113,7 @@ export class ActionSetMine extends Action {
           event.eventType = SignalEventType.OnTrapTriggered;
           GameState.module.addEvent(event);
         }else if(!this.laidMine){
+          // Failed the Demolitions check vs SetDC: nothing is placed and the mine item is kept.
           console.log('ActionSetMine', 'FAILED');
           return ActionStatus.FAILED;
         }

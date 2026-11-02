@@ -484,7 +484,8 @@ export class ModulePlaceable extends ModuleObject {
   }
 
   attemptUnlockWithKey(object: ModuleObject){
-    if(this.keyRequired){
+    // Already open: don't replay the unlock sound or consume an AutoRemoveKey key again.
+    if(this.keyRequired && this.isLocked()){
       let unlockedWithKey = false;
       if(this.keyName.length){
         const keyItem = GameState.InventoryManager.getItemByTag(this.keyName);
@@ -525,8 +526,9 @@ export class ModulePlaceable extends ModuleObject {
   }
 
   /**
-   * Pick the lock with the Security skill (SWSecurityRules.attemptPick), then use the object.
-   * @returns false when the object stays locked
+   * Unlock with the key (KeyRequired) or a Security check (SWSecurityRules.unlockAttempt),
+   * then use the placeable. On failure OnFailToOpen is signalled once.
+   * @returns false when the placeable stays locked
    */
   attemptUnlock(object: ModuleObject){
     if(!BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature)){
@@ -534,19 +536,10 @@ export class ModulePlaceable extends ModuleObject {
     }
 
     if(this.isLocked()){
-      const result = SWSecurityRules.attemptPick(object, this);
-      this.lastUnlockAttempt = result;
-      if(result.outcome == 'key-required' && this.keyName && object.hasItemByTag?.(this.keyName)){
-        // A KeyRequired lock can't be picked, but the key still opens it (use() does the key unlock).
-        this.use(object);
-        return !this.isLocked();
-      }
-      if(result.outcome != 'unlocked'){
-        object.playSoundSet(SSFType.UNLOCK_FAIL);
+      const result = SWSecurityRules.unlockAttempt(this, object);
+      if(result.outcome != 'unlocked' && result.outcome != 'key'){
         return false;
       }
-      this.unlock(object);
-      object.playSoundSet(SSFType.UNLOCK_SUCCESS);
     }
 
     this.use(object);

@@ -322,7 +322,7 @@ export class ActionMenuManager {
       setMine.setParameter(2, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.x);
       setMine.setParameter(3, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.y);
       setMine.setParameter(4, ActionParameterType.FLOAT, ActionMenuManager.oPC.position.z);
-      ActionMenuManager.ActionPanels.selfPanels[2].addAction(new GameState.ActionMenuManager.ActionMenuItem({
+      ActionMenuManager.ActionPanels.selfPanels[3].addAction(new GameState.ActionMenuManager.ActionMenuItem({
         action: setMine,
         icon: item.getIcon()
       }));

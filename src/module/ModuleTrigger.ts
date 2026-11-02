@@ -18,6 +18,8 @@ import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 
 
 const OBJECTS_INSIDE_UPDATE_THRESHOLD = 15; // 15 frame ticks
+/** Seconds a spent one-shot trap lingers so its queued OnTrapTriggered script can run. */
+export const SPENT_TRAP_REMOVE_DELAY = 2;
 
 /**
 * ModuleTrigger class.
@@ -48,6 +50,9 @@ export class ModuleTrigger extends ModuleObject {
   trapResRef: string;
   trapDetected: boolean = false;
   trapDisarmedBy: ModuleObject;
+  /** A one-shot trap that has gone off; removed once trapSpentTimer runs out. */
+  trapSpent: boolean = false;
+  trapSpentTimer: number = 0;
   declare type: ModuleTriggerType;
 
   constructor ( gff = new GFFObject() ) {
@@ -200,11 +205,8 @@ export class ModuleTrigger extends ModuleObject {
         }).then( (model: OdysseyModel3D) => {
           this.trapModel = model;
           this.container.add(model);
-          if(this.trapDetected){
-            this.model.playAnimation('detect', false);
-          }else{
-            this.model.playAnimation('default', false);
-          }
+          // Triggers have no this.model; animate the trap model itself.
+          model?.playAnimation?.(this.trapDetected ? 'detect' : 'default', false);
         });
       });
     }
@@ -269,13 +271,25 @@ export class ModuleTrigger extends ModuleObject {
   }
 
   /**
-   * Set the trap off on victim. One-shot traps fire once.
+   * Set the trap off on victim. Only a creature hostile to the trap's faction
+   * sets it off (a party mine never fires on the party). A one-shot trap is
+   * spent afterwards: no longer detectable/disarmable/recoverable, and removed
+   * from the area after SPENT_TRAP_REMOVE_DELAY so its OnTrapTriggered script
+   * still runs with the trap as OBJECT_SELF.
    * @returns true when the OnTrapTriggered event was queued
    */
   fireTrap(victim?: ModuleObject): boolean {
-    if(this.type != ModuleTriggerType.TRAP){ return false; }
+    if(this.type != ModuleTriggerType.TRAP || this.trapSpent || this.destroyed){ return false; }
+    if(victim && victim !== this && !this.isHostile(victim)){ return false; }
     const oneShot = this.trapOneShot === undefined || !!this.trapOneShot;
-    if(this.trapTriggered && oneShot){ return false; }
+    if(oneShot){
+      this.trapSpent = true;
+      this.trapSpentTimer = SPENT_TRAP_REMOVE_DELAY;
+      this.trapFlag = false;
+      this.trapDetectable = false;
+      this.trapDisarmable = false;
+      this.trapDetected = false;
+    }
     this.trapTriggered = true;
     this.triggered = true;
     if(victim){
@@ -360,9 +374,20 @@ export class ModuleTrigger extends ModuleObject {
     return this.isHostile(object) && (!this.triggered || !this.trapOneShot);
   }
 
+  /** Counts down a spent one-shot trap and removes it. @returns true once removed */
+  updateSpentTrap(delta = 0): boolean {
+    if(!this.trapSpent || this.destroyed){ return false; }
+    this.trapSpentTimer -= delta;
+    if(this.trapSpentTimer > 0){ return false; }
+    this.destroy();
+    return true;
+  }
+
   update(delta = 0){
     
     super.update(delta);
+
+    if(this.updateSpentTrap(delta)){ return; }
     
     if(!this.room) this.getCurrentRoom();
     try{
@@ -493,9 +518,7 @@ export class ModuleTrigger extends ModuleObject {
   onEnter(object?: ModuleObject){
     if(!object){ return; }
     if(this.type == ModuleTriggerType.TRAP){
-      if(object.isHostile(this)){
-        this.fireTrap(object);
-      }
+      this.fireTrap(object);
     }else if(this.linkedToModule && (GameState.Mode != EngineMode.DIALOG)){
       if(object == GameState.getCurrentPlayer()){
         GameState.LoadModule(this.linkedToModule.toLowerCase(), this.linkedTo.toLowerCase());
@@ -740,6 +763,10 @@ export class ModuleTrigger extends ModuleObject {
         this.trapModelResRef = trap.model;
         this.trapExplosionSound = trap.explosionsound;
         this.trapResRef = trap.resref;
+        // Saves made before TrapDisarmDC/TrapDetectDC were written: fall back to the 2DA row.
+        const dcs = SWTrapRules.rowDCs(trap);
+        if(this.trapDisarmDC === undefined || this.trapDisarmDC === null) this.trapDisarmDC = dcs.disarmDC;
+        if(this.trapDetectDC === undefined || this.trapDetectDC === null) this.trapDetectDC = dcs.detectDC;
       }
     }
 

@@ -69,11 +69,25 @@ import { ModuleTrigger } from '@/module/ModuleTrigger';
 import { ModuleDoor } from '@/module/ModuleDoor';
 import { ModulePlaceable } from '@/module/ModulePlaceable';
 import { ModuleItem } from '@/module/ModuleItem';
+import { ModuleObject } from '@/module/ModuleObject';
 import { ActionDisarmMine } from '@/actions/ActionDisarmMine';
 import { ActionRecoverMine } from '@/actions/ActionRecoverMine';
 import { ActionFlagMine } from '@/actions/ActionFlagMine';
 import { ActionSetMine } from '@/actions/ActionSetMine';
 import * as trapRoutines from '@/nwscript/builtins/traps';
+import { ActionExamineMine } from '@/actions/ActionExamineMine';
+import { ActionUnlockObject } from '@/actions/ActionUnlockObject';
+import { ActionMenuManager } from '@/engine/menu/ActionMenuManager';
+import { ActionMenuPanel } from '@/engine/menu/ActionMenuPanel';
+import { ActionMenuItem } from '@/engine/menu/ActionMenuItem';
+import { ModuleObjectScript } from '@/enums/module/ModuleObjectScript';
+import { GameEngineType } from '@/enums/engine/GameEngineType';
+import { NWScript } from '@/nwscript/NWScript';
+import { MDLLoader } from '@/loaders';
+import { OdysseyModel3D } from '@/three/odyssey';
+import { SWSkillCheck, SWTrapRules } from '@/engine/rules/SWTrapRules';
+import { SPENT_TRAP_REMOVE_DELAY } from '@/module/ModuleTrigger';
+import * as doorRoutines from '@/nwscript/builtins/doorsplaceables';
 import { harness } from './nwscript/routineHarness';
 
 const state = GameState as any;
@@ -87,7 +101,7 @@ const FACTION_NEUTRAL = 5;
 const TRAP_FRAG = 0;
 const TRAPS_2DA_ROWS: Record<number, any> = {
   [TRAP_FRAG]: {
-    label: 'FragMineMinor', name: '1', trapscript: 'k_trp_frag',
+    label: 'FragMineMinor', name: '1', trapscript: 'k_trp_frag', setdc: '15',
     detectdcmod: '5', disarmdcmod: '10', resref: 'g_i_trapkit001', model: '', explosionsound: 'exp_frag',
   },
 };
@@ -253,7 +267,7 @@ beforeEach(() => {
     timeManager: { pauseDay: 0, pauseTime: 0, getFutureTimeFromSeconds: () => ({ pauseDay: 0, pauseTime: 0 }) },
     addEvent: (e: any) => events.push(e),
   };
-  state.Module = { ModuleArea: { ModuleTrigger, ModuleItem } };
+  state.Module = { ModuleArea: { ModuleTrigger, ModuleItem, ModuleObject, ModuleDoor, ModulePlaceable, ModuleCreature } };
 });
 
 afterEach(() => jest.restoreAllMocks());
@@ -265,6 +279,57 @@ function BitWise_isTrigger(o: any){
 function queuedFlagMines(c: ModuleCreature){
   const queue: any[] = Array.from(c.actionQueue as any);
   return queue.filter(a => a?.type == ActionType.ActionFlagMine).length;
+}
+
+function mineItem(){
+  return register({
+    id: 0,
+    objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem,
+    charges: 1,
+    properties: [{ subType: TRAP_FRAG, is: (type: number) => type == ModuleItemProperty.Trap }],
+    getStackSize: () => 1,
+    setStackSize(){},
+    clone(){ return { ...this }; },
+  } as any);
+}
+
+function layAt(pc: ModuleCreature, x: number, y: number){
+  const item = mineItem();
+  const action = new ActionSetMine();
+  action.setParameter(0, ActionParameterType.DWORD, item.id);
+  action.setParameter(1, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
+  action.setParameter(2, ActionParameterType.FLOAT, x);
+  action.setParameter(3, ActionParameterType.FLOAT, y);
+  action.setParameter(4, ActionParameterType.FLOAT, 0);
+  const before = area.triggers.length;
+  const status = runAction(action, pc);
+  const mine = (area.triggers.length > before ? area.triggers[area.triggers.length - 1] : undefined) as ModuleTrigger;
+  // Make the new mine resolvable by id, as ModuleObjectManager would.
+  if(mine) register(mine);
+  return { status, item, mine };
+}
+
+function lockedDoor(openLockDC: number, keyRequired = 0){
+  const gff = new GFFObject();
+  gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Locked')).setValue(1);
+  gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'OpenLockDC')).setValue(openLockDC);
+  gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'KeyRequired')).setValue(keyRequired);
+  gff.RootNode.addField(new GFFField(GFFDataType.CEXOSTRING, 'KeyName')).setValue(keyRequired ? 'door_key' : '');
+  const door = register(new ModuleDoor(gff));
+  door.initProperties();
+  door.locked = true;
+  jest.spyOn(door, 'use').mockImplementation(() => {});
+  return door;
+}
+
+function lockedPlaceable(openLockDC: number, keyRequired = 0){
+  const plc = register(new ModulePlaceable(new GFFObject()));
+  plc.locked = true;
+  plc.openLockDC = openLockDC;
+  plc.keyRequired = !!keyRequired;
+  plc.keyName = keyRequired ? 'door_key' : '';
+  jest.spyOn(plc, 'use').mockImplementation(() => {});
+  return plc;
 }
 
 describe('passive mine detection (Awareness + d20 vs TrapDetectDC)', () => {
@@ -448,30 +513,6 @@ describe('recover (Demolitions vs disarm DC + 5) gives the mine item', () => {
 });
 
 describe('laying a mine', () => {
-  function mineItem(){
-    return register({
-      id: 0,
-      objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem,
-      charges: 1,
-      properties: [{ subType: TRAP_FRAG, is: (type: number) => type == ModuleItemProperty.Trap }],
-      getStackSize: () => 1,
-      setStackSize(){},
-      clone(){ return { ...this }; },
-    } as any);
-  }
-
-  function layAt(pc: ModuleCreature, x: number, y: number){
-    const item = mineItem();
-    const action = new ActionSetMine();
-    action.setParameter(0, ActionParameterType.DWORD, item.id);
-    action.setParameter(1, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
-    action.setParameter(2, ActionParameterType.FLOAT, x);
-    action.setParameter(3, ActionParameterType.FLOAT, y);
-    action.setParameter(4, ActionParameterType.FLOAT, 0);
-    const status = runAction(action, pc);
-    return { status, item, mine: area.triggers[area.triggers.length - 1] as ModuleTrigger };
-  }
-
   test('creates a party-owned mine trigger on the ground and uses up the item', () => {
     const pc = creature({ party: true, demolitions: 4, int: 12 });
     const { status, item, mine } = layAt(pc, 1, 1);
@@ -481,9 +522,9 @@ describe('laying a mine', () => {
     expect(mine.trapType).toBe(TRAP_FRAG);
     expect(mine.position.toArray()).toEqual([1, 1, 0]);
     expect(factionOf(mine)).toBe(FACTION_PARTY);
-    // 2DA mod + Demolitions (4 + 1) + take-20
-    expect(mine.trapDetectDC).toBe(5 + 5 + 20);
-    expect(mine.trapDisarmDC).toBe(10 + 5 + 20);
+    // traps.2da setdc + *dcmod, independent of the layer's skill
+    expect(mine.trapDetectDC).toBe(15 + 5);
+    expect(mine.trapDisarmDC).toBe(15 + 10);
     expect(mine.trapDetected).toBe(true);
     expect(routines.GetTrapCreator.kotor.call({}, mine)).toBe(pc);
     expect(routines.GetIsTrapped.kotor.call({}, mine)).toBe(1);
@@ -514,28 +555,6 @@ describe('laying a mine', () => {
 });
 
 describe('Security (Security + d20 vs OpenLockDC)', () => {
-  function lockedDoor(openLockDC: number, keyRequired = 0){
-    const gff = new GFFObject();
-    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Locked')).setValue(1);
-    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'OpenLockDC')).setValue(openLockDC);
-    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'KeyRequired')).setValue(keyRequired);
-    gff.RootNode.addField(new GFFField(GFFDataType.CEXOSTRING, 'KeyName')).setValue(keyRequired ? 'door_key' : '');
-    const door = register(new ModuleDoor(gff));
-    door.initProperties();
-    door.locked = true;
-    jest.spyOn(door, 'use').mockImplementation(() => {});
-    return door;
-  }
-
-  function lockedPlaceable(openLockDC: number, keyRequired = 0){
-    const plc = register(new ModulePlaceable(new GFFObject()));
-    plc.locked = true;
-    plc.openLockDC = openLockDC;
-    plc.keyRequired = !!keyRequired;
-    jest.spyOn(plc, 'use').mockImplementation(() => {});
-    return plc;
-  }
-
   test.each([
     ['door', lockedDoor],
     ['placeable', lockedPlaceable],
@@ -675,5 +694,357 @@ describe('trap state persists through save/load', () => {
     expect(reloaded.trapDetectedByFactions.size).toBe(0);
     expect(reloaded.getTrapCreator()).toBeUndefined();
     expect(reloaded.trapDisarmDC).toBe(11);
+  });
+});
+
+/*
+ * Round 2 (critic of 044e0be): own mines, spent one-shots, the HUD mines slot,
+ * OnFailToOpen ownership, old saves, the trap model load, item skill bonuses,
+ * and tests for behaviour the first round left unpinned.
+ */
+
+function ofType(type: number){
+  return events.filter(e => e.eventType == type);
+}
+
+describe('own mines are safe to handle', () => {
+  test('the layer recovers its own mine with ordinary skill and gets the item back', () => {
+    loadCachedResource.mockReturnValue(undefined);
+    jest.spyOn(SWTrapRules, 'createMineItem').mockReturnValue({ tag: 'g_i_trapkit001' } as any);
+    const pc = creature({ party: true, demolitions: 1, int: 10 }); // 1 + 20 = 21 >= setdc 15
+    const { mine } = layAt(pc, 1, 0);
+    const action = new ActionRecoverMine();
+    action.setParameter(0, ActionParameterType.DWORD, mine);
+    expect(runAction(action, pc)).toBe(ActionStatus.COMPLETE);
+    expect(trapEvents()).toHaveLength(0);
+    expect(mine.destroyed).toBe(true);
+    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' });
+    expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
+  });
+
+  test('a companion disarms the party mine without a check and without XP', () => {
+    const pc = creature({ party: true, demolitions: 1 });
+    const { mine } = layAt(pc, 1, 0);
+    const companion = creature({ party: true, demolitions: 0, int: 3, inCombat: true });
+    d20(1);
+    const action = new ActionDisarmMine();
+    action.setParameter(0, ActionParameterType.DWORD, mine);
+    expect(runAction(action, companion)).toBe(ActionStatus.COMPLETE);
+    expect(trapEvents()).toHaveLength(0);
+    expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
+  });
+
+  test('a party member walking onto a party mine does not set it off, even via fireTrap', () => {
+    const pc = creature({ party: true, demolitions: 1 });
+    const { mine } = layAt(pc, 0, 0);
+    const companion = creature({ party: true, at: [0.5, 0.5] });
+    mine.onEnter(companion);
+    expect(mine.fireTrap(companion)).toBe(false);
+    expect(trapEvents()).toHaveLength(0);
+    expect(mine.trapSpent).toBe(false);
+  });
+
+  test('laying fails below the 2DA set DC: no mine, item kept, action FAILED', () => {
+    const pc = creature({ party: true, demolitions: 0, int: 6, inCombat: true }); // -2 + 16 = 14 < 15
+    d20(16);
+    const before = area.triggers.length;
+    const { status } = layAt(pc, 1, 1);
+    expect(status).toBe(ActionStatus.FAILED);
+    expect(area.triggers.length).toBe(before);
+    expect(state.InventoryManager.removeItem).not.toHaveBeenCalled();
+  });
+
+  test('a mine laid by an enemy is not the party\'s: SetByPlayerParty 0, party-laid 1', () => {
+    const pc = creature({ party: true, demolitions: 1 });
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE, demolitions: 1 });
+    const own = SWTrapRules.layMine(pc, TRAP_FRAG, new THREE.Vector3(0, 0, 0)).trigger!;
+    const theirs = SWTrapRules.layMine(enemy, TRAP_FRAG, new THREE.Vector3(5, 0, 0)).trigger!;
+    expect(own.save().RootNode.getFieldByLabel('SetByPlayerParty').getValue()).toBe(1);
+    expect(theirs.save().RootNode.getFieldByLabel('SetByPlayerParty').getValue()).toBe(0);
+    expect(theirs.trapDetected).toBe(false);
+  });
+});
+
+describe('a one-shot mine is spent once it goes off', () => {
+  test('it cannot be detected, disarmed or recovered afterwards, and leaves the area', () => {
+    const pc = creature({ party: true, demolitions: 40, awareness: 40 });
+    const trap = trapTrigger({ at: [1, 0], detectDC: 1, disarmDC: 1 });
+    expect(trap.fireTrap(pc)).toBe(true);
+    expect(trap.fireTrap(pc)).toBe(false);
+    expect(trapEvents()).toHaveLength(1);
+
+    expect(SWTrapRules.attemptDisarm(pc, trap).outcome).toBe('invalid');
+    expect(SWTrapRules.attemptRecover(pc, trap).outcome).toBe('invalid');
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
+    expect(trap.trapDetected).toBe(false);
+    expect(routines.GetIsTrapped.kotor.call({}, trap)).toBe(0);
+    expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
+    expect(state.InventoryManager.addItem).not.toHaveBeenCalled();
+
+    // Kept until its OnTrapTriggered script has had time to run, then removed.
+    expect(trap.updateSpentTrap(SPENT_TRAP_REMOVE_DELAY / 2)).toBe(false);
+    expect(area.triggers).toContain(trap);
+    expect(trap.updateSpentTrap(SPENT_TRAP_REMOVE_DELAY)).toBe(true);
+    expect(trap.destroyed).toBe(true);
+    expect(area.triggers).not.toContain(trap);
+  });
+
+  test('a non-one-shot trap fires again and stays armed', () => {
+    const pc = creature({ party: true });
+    const trap = trapTrigger({ oneShot: 0 });
+    expect(trap.fireTrap(pc)).toBe(true);
+    expect(trap.fireTrap(pc)).toBe(true);
+    expect(trap.trapSpent).toBe(false);
+    expect(trap.updateSpentTrap(100)).toBe(false);
+  });
+});
+
+describe('HUD self menu', () => {
+  test('mines go in self slot 3 (PersonalMinesAct) and selecting one queues ActionSetMine at the PC', () => {
+    state.GameKey = GameEngineType.KOTOR;
+    state.ActionMenuManager = { ActionMenuPanel, ActionMenuItem };
+    state.ActionFactory.ActionSetMine = ActionSetMine;
+    const pc = creature({ party: true, at: [3, 4] });
+    const item = mineItem();
+    (item as any).baseItemId = 58;
+    (item as any).getIcon = () => 'i_mine';
+    jest.spyOn(pc, 'getInventory').mockReturnValue([item] as any);
+    jest.spyOn(pc, 'getSpells').mockReturnValue([] as any);
+    ActionMenuManager.InitActionMenuPanels();
+    ActionMenuManager.SetPC(pc);
+    ActionMenuManager.oTarget = undefined;
+    ActionMenuManager.UpdateMenuActions();
+
+    const panels = ActionMenuManager.ActionPanels.selfPanels;
+    expect(panels[2].actions).toHaveLength(0);
+    expect(panels[3].actions).toHaveLength(1);
+    const setMine = panels[3].actions[0].action;
+    expect(setMine).toBeInstanceOf(ActionSetMine);
+    expect([setMine.getParameter(2), setMine.getParameter(3)]).toEqual([3, 4]);
+
+    ActionMenuManager.onSelfMenuAction(3);
+    expect(pc.actionQueue[0]).toBe(setMine);
+  });
+});
+
+describe('OnFailToOpen is signalled exactly once per failed unlock', () => {
+  test('DoDoorAction(DOOR_ACTION_UNLOCK) failure signals OnFailToOpen', () => {
+    const pc = creature({ party: true, security: 1 });
+    const door = lockedDoor(30);
+    (doorRoutines as any).DoDoorAction.kotor.call({ caller: pc }, door, 1);
+    expect(door.isLocked()).toBe(true);
+    expect(ofType(SignalEventType.OnFailToOpen)).toHaveLength(1);
+  });
+
+  test('ActionUnlockObject failure signals OnFailToOpen once', () => {
+    const pc = creature({ party: true, security: 1 });
+    jest.spyOn(pc, 'setAnimationState').mockImplementation(() => {});
+    jest.spyOn(pc, 'setFacingObject').mockImplementation(() => {});
+    const door = lockedDoor(30);
+    door.position.set(1, 0, 0);
+    const action = new ActionUnlockObject();
+    action.setParameter(0, ActionParameterType.DWORD, door);
+    action.setParameter(1, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
+    action.setOwner(pc);
+    expect(action.update(5)).toBe(ActionStatus.COMPLETE);
+    expect(ofType(SignalEventType.OnFailToOpen)).toHaveLength(1);
+  });
+
+  test('an NPC holding the key in its own inventory opens a KeyRequired door; one without fails once', () => {
+    const npc = creature({ party: false, faction: FACTION_NEUTRAL });
+    const door = lockedDoor(1, 1);
+    expect(door.attemptUnlock(npc)).toBe(false);
+    expect(ofType(SignalEventType.OnFailToOpen)).toHaveLength(1);
+    npc.inventory.push({ tag: 'DOOR_KEY' } as any);
+    expect(door.attemptUnlock(npc)).toBe(true);
+    expect(door.isLocked()).toBe(false);
+    expect(ofType(SignalEventType.OnFailToOpen)).toHaveLength(1);
+  });
+
+  test.each([
+    ['door', lockedDoor],
+    ['placeable', lockedPlaceable],
+  ] as const)('%s: the party key opens a KeyRequired lock; AutoRemoveKey takes it', (_, make) => {
+    const pc = creature({ party: true, security: 0 });
+    const key = { tag: 'door_key' };
+    state.InventoryManager.getItemByTag = jest.fn((tag: string) => tag == 'door_key' ? key : undefined);
+    const removeItem = jest.spyOn(pc, 'removeItem').mockImplementation(() => undefined as any);
+    const lock: any = make(99, 1);
+    lock.autoRemoveKey = true;
+    expect(lock.attemptUnlock(pc)).toBe(true);
+    expect(lock.isLocked()).toBe(false);
+    expect(lock.use).toHaveBeenCalledWith(pc);
+    expect(removeItem).toHaveBeenCalledWith(key as any);
+    expect(ofType(SignalEventType.OnFailToOpen)).toHaveLength(0);
+  });
+
+  test('an unlocked KeyRequired placeable does not consume its key again on use', () => {
+    const pc = creature({ party: true });
+    const key = { tag: 'door_key', objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem };
+    state.InventoryManager.getItemByTag = jest.fn(() => key);
+    const removeItem = jest.spyOn(pc, 'removeItem').mockImplementation(() => undefined as any);
+    const plc = register(new ModulePlaceable(new GFFObject()));
+    plc.keyRequired = true; plc.keyName = 'door_key'; plc.autoRemoveKey = true; plc.locked = false;
+    plc.attemptUnlockWithKey(pc);
+    expect(removeItem).not.toHaveBeenCalled();
+  });
+});
+
+describe('older saves and models', () => {
+  test('a saved trap without TrapDisarmDC/TrapDetectDC takes them from its traps.2da row', () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Type')).setValue(ModuleTriggerType.TRAP);
+    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'TrapType')).setValue(TRAP_FRAG);
+    const trap = new ModuleTrigger(gff);
+    expect(trap.trapDisarmDC).toBe(25);
+    expect(trap.trapDetectDC).toBe(20);
+  });
+
+  test('loading a trap model animates the trap model (triggers have no this.model)', async () => {
+    const model: any = Object.assign(new THREE.Object3D(), { playAnimation: jest.fn() });
+    const load = (MDLLoader as any).loader.load;
+    (MDLLoader as any).loader.load = jest.fn(() => Promise.resolve({}));
+    (OdysseyModel3D as any).FromMDL = jest.fn(() => Promise.resolve(model));
+    try{
+      TRAPS_2DA_ROWS[TRAP_FRAG].model = 'mine_frag';
+      const trap = trapTrigger();
+      await new Promise((r) => setImmediate(r));
+      expect(trap.trapModel).toBe(model);
+      expect(model.playAnimation).toHaveBeenCalledWith('default', false);
+    }finally{
+      TRAPS_2DA_ROWS[TRAP_FRAG].model = '';
+      (MDLLoader as any).loader.load = load;
+    }
+  });
+});
+
+describe('skill totals', () => {
+  function withProperty(type: number, subType: number, value: number){
+    return {
+      getINTBonus: () => 0,
+      properties: [{ isUseable: () => true, is: (t: number, st?: number) => t == type && (st === undefined || st == subType), getValue: () => value }],
+    };
+  }
+
+  test('equipped item Skill / DecreasedSkill properties count', () => {
+    const pc = creature({ party: true, security: 2 });
+    (pc as any).equipment.HEAD = withProperty(ModuleItemProperty.Skill, SkillType.SECURITY, 3);
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(5);
+    (pc as any).equipment.ARMS = withProperty(ModuleItemProperty.DecreasedSkill, SkillType.SECURITY, 1);
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(4);
+    (pc as any).equipment.BELT = withProperty(ModuleItemProperty.Skill, SkillType.AWARENESS, 9);
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(4);
+  });
+
+  test('SKILL_ALL_SKILLS (255) effects and EffectSkillDecrease count', () => {
+    const pc = creature({ party: true, security: 2 });
+    pc.effects.push({ type: GameEffectType.EffectSkillIncrease, getInt: (i: number) => [255, 4][i] } as any);
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(6);
+    pc.effects.push({ type: GameEffectType.EffectSkillDecrease, getInt: (i: number) => [SkillType.SECURITY, 1][i] } as any);
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(5);
+  });
+
+  test('a skill flagged usable untrained may be used at rank 0', () => {
+    const pc = creature({ party: true, security: 0 });
+    const door = lockedDoor(20);
+    expect(door.attemptUnlock(pc)).toBe(false);
+    (pc.skills as any)[SkillType.SECURITY].untrained = true;
+    expect(door.attemptUnlock(pc)).toBe(true);
+  });
+
+  test('a low ability gives a negative modifier rounded down (INT 9 is -1)', () => {
+    const pc = creature({ party: true, security: 5, int: 9 }); // 5 - 1 + 20 = 24
+    expect(lockedDoor(25).attemptUnlock(pc)).toBe(false);
+    expect(lockedDoor(24).attemptUnlock(pc)).toBe(true);
+  });
+});
+
+describe('remaining first-round behaviour', () => {
+  test('recover refuses a mine that is not disarmable', () => {
+    const pc = creature({ party: true, demolitions: 40 });
+    const trap = trapTrigger({ at: [1, 0], disarmDC: 1, disarmable: 0 });
+    const action = new ActionRecoverMine();
+    action.setParameter(0, ActionParameterType.DWORD, trap);
+    expect(runAction(action, pc)).toBe(ActionStatus.FAILED);
+    expect(trap.destroyed).toBeFalsy();
+  });
+
+  test('disarming runs the trap OnDisarm script', () => {
+    const pc = creature({ party: true, demolitions: 40 });
+    const trap = trapTrigger({ at: [1, 0], disarmDC: 1 });
+    const run = jest.fn();
+    trap.scripts[ModuleObjectScript.TriggerOnDisarm] = { run } as any;
+    expect(SWTrapRules.attemptDisarm(pc, trap).outcome).toBe('success');
+    expect(run).toHaveBeenCalledWith(trap);
+  });
+
+  test('addTrap builds a proper square (no duplicated vertex)', () => {
+    (NWScript as any).Load = jest.fn(() => ({}));
+    const pc = creature({ party: true, demolitions: 2 });
+    jest.spyOn(pc, 'getSkillLevel').mockReturnValue(2);
+    const door = lockedDoor(1);
+    door.area = area;
+    door.addTrap(TRAP_FRAG, pc);
+    const trigger = door.linkedToObject as ModuleTrigger;
+    const keys = new Set(trigger.vertices.map((v: THREE.Vector3) => v.toArray().join(',')));
+    expect(keys.size).toBe(4);
+    expect(keys.has('2,-2,0')).toBe(true);
+  });
+
+  test('placeable lock records GetLastLocked', () => {
+    const pc = creature({ party: true });
+    const plc = lockedPlaceable(1);
+    plc.locked = false;
+    plc.lock(pc);
+    expect(routines.GetLastLocked.kotor.call({ caller: plc })).toBe(pc);
+  });
+
+  test('ActionExamineMine with no target fails instead of throwing', () => {
+    const pc = creature({ party: true });
+    const action = new ActionExamineMine();
+    action.setParameter(0, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
+    action.setOwner(pc);
+    expect(action.update(0)).toBe(ActionStatus.FAILED);
+  });
+
+  test('un-detecting a trap for the party hides it again', () => {
+    const pc = creature({ party: true });
+    const trap = trapTrigger();
+    trap.detectTrap(pc);
+    expect(trap.trapDetected).toBe(true);
+    trap.setTrapDetectedBy(pc, false);
+    expect(trap.trapDetected).toBe(false);
+    expect(trap.isTrapDetectedBy(pc)).toBe(false);
+  });
+
+  test('GetTrapKeyTag ignores a door lock key; GetLastTrapDetected drops removed traps', () => {
+    const pc = creature({ party: true });
+    const door = lockedDoor(1, 1);
+    expect(routines.GetTrapKeyTag.kotor.call({}, door)).toBe('');
+    const trap = trapTrigger();
+    trap.detectTrap(pc);
+    expect(routines.GetLastTrapDetected.kotor.call({ caller: pc }, pc)).toBe(trap);
+    trap.destroy();
+    expect(routines.GetLastTrapDetected.kotor.call({ caller: pc }, pc)).toBeUndefined();
+  });
+
+  test('SetTrapDetectedBy works on a trapped door', () => {
+    const pc = creature({ party: true });
+    const door = lockedDoor(1);
+    door.trapFlag = true;
+    expect(routines.SetTrapDetectedBy.kotor.call({}, door, pc)).toBe(1);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, door, pc)).toBe(1);
+  });
+
+  test('dead party members and already-known traps are not re-rolled', () => {
+    const pc = creature({ party: true, awareness: 40, inCombat: true });
+    const trap = trapTrigger({ at: [1, 0], detectDC: 1 });
+    const roll = d20(10, 10, 10);
+    (pc.isDead as jest.Mock).mockReturnValue(true);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
+    (pc.isDead as jest.Mock).mockReturnValue(false);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(1);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
+    expect(roll).toHaveBeenCalledTimes(1);
   });
 });

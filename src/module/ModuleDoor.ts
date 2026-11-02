@@ -444,8 +444,9 @@ export class ModuleDoor extends ModuleObject {
   }
 
   /**
-   * Pick the lock with the Security skill (SWSecurityRules.attemptPick), then use the object.
-   * @returns false when the object stays locked
+   * Unlock with the key (KeyRequired) or a Security check (SWSecurityRules.unlockAttempt),
+   * then use the door. On failure OnFailToOpen is signalled once.
+   * @returns false when the door stays locked
    */
   attemptUnlock(object: ModuleObject){
     if(!BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleObject)){
@@ -453,23 +454,9 @@ export class ModuleDoor extends ModuleObject {
     }
 
     if(this.isLocked()){
-      const result = SWSecurityRules.attemptPick(object, this);
-      this.lastUnlockAttempt = result;
-      const isCreature = BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature);
-      if(result.outcome == 'key-required' && this.keyName && object.hasItemByTag?.(this.keyName)){
-        // A KeyRequired lock can't be picked, but the key still opens it (use() does the key unlock).
-        this.use(object);
-        return !this.isLocked();
-      }
-      if(result.outcome != 'unlocked'){
-        if(isCreature){
-          object.playSoundSet(SSFType.UNLOCK_FAIL);
-        }
+      const result = SWSecurityRules.unlockAttempt(this, object);
+      if(result.outcome != 'unlocked' && result.outcome != 'key'){
         return false;
-      }
-      this.unlock(object);
-      if(isCreature){
-        object.playSoundSet(SSFType.UNLOCK_SUCCESS);
       }
     }
 
