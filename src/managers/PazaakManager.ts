@@ -720,6 +720,13 @@ export class PazaakManager {
     };
   }
 
+  /**
+   * Card back texture of the active config (K1 lbl_cardback, TSL pcards_back_p).
+   */
+  static GetCardBackTexture(): string {
+    return this.Config.textures.find((t) => t.name == 'Card Back')?.file ?? 'lbl_cardback';
+  }
+
   //-----------------//
   // Turn Management //
   //-----------------//

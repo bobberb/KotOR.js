@@ -422,7 +422,7 @@ export class MenuPazaakGame extends GameMenu {
           handCardLabel.setText(card.modifierLabel);
           handCardButton.disableSelection = this.noClicks() || table.handCardPlayed;
         }else{
-          handCardButton.setFillTextureName('lbl_cardback', false);
+          handCardButton.setFillTextureName(GameState.PazaakManager.GetCardBackTexture(), false);
           handCardLabel.hide();
           handCardLabel.setText('');
           handCardButton.disableSelection = true;

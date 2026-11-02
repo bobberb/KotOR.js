@@ -197,6 +197,33 @@ describe('table card labels show resolved values', () => {
   });
 });
 
+describe('opponent hand card backs', () => {
+  function rebuildWithOpponentCard(Menu: any, config: any){
+    PM.Config = config;
+    PM.ClearActions();
+    PM.TurnMode = 0;
+    for(let t = 0; t < 2; t++){
+      for(let i = 0; i < 9; i++) PM.Tables[t].cardArea.set(i, undefined);
+      for(let i = 0; i < 4; i++) PM.Tables[t].handCards.set(i, PazaakCards.INVALID);
+    }
+    PM.Tables[1].handCards.set(0, PazaakCards.PLUS_1);
+    state.PartyManager = {};
+    const menu = withControls(new Menu()) as any;
+    menu.rebuild();
+    return lastArg(menu.BTN_NPCSIDE0.setFillTextureName);
+  }
+
+  test('K1 uses lbl_cardback', () => {
+    state.GameKey = 'KOTOR';
+    expect(rebuildWithOpponentCard(K1Game, K1Config)).toBe('lbl_cardback');
+  });
+
+  test('TSL uses its own pcards_back_p', () => {
+    state.GameKey = 'TSL';
+    expect(rebuildWithOpponentCard(TSLGame, TSLConfig)).toBe('pcards_back_p');
+  });
+});
+
 describe('MenuPazaakWager', () => {
   test('a player with 0 credits cannot bet: wager is 0', () => {
     PM.MinWager = 1;

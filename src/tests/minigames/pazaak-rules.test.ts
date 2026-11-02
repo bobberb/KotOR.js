@@ -236,7 +236,13 @@ describe('table card display', () => {
     expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_DOUBLE, 5), tslTex)).toEqual({ label: '+5', texture: 'pcards_gold_p' });
     expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_DOUBLE, -3), tslTex).label).toBe('-3');
     expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_FLIP_2_4, 0), tslTex)).toEqual({ label: '2&4', texture: 'pcards_gold_p' });
-    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_TIEBREAKER, -1, true), tslTex).label).toBe('-1');
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_TIEBREAKER, -1, true), tslTex).label).toBe('-1T');
+  });
+
+  test('a played tiebreaker keeps its T; a played 1±2 of the same value does not', () => {
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_TIEBREAKER, 1), tslTex).label).toBe('+1T');
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_PLUS_MINUS_1_OR_2, 1), tslTex).label).toBe('+1');
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_PLUS_MINUS_1_OR_2, -1, true), tslTex).label).toBe('-1');
   });
 });
 
@@ -250,5 +256,11 @@ describe('wager clamp', () => {
     expect(clampWager(100, 1, 40, 1000)).toBe(40);
     expect(clampWager(0, 1, 100, 1000)).toBe(1);
     expect(clampWager(5, 1, 0, 1000)).toBe(0);
+  });
+  test('gold exactly at the minimum still allows the minimum bet (cap < min, not <=)', () => {
+    expect(clampWager(5, 1, 100, 1)).toBe(1);
+    expect(clampWager(5, 5, 100, 5)).toBe(5);
+    expect(clampWager(5, 5, 100, 4)).toBe(0);
+    expect(clampWager(5, 5, 5, 1000)).toBe(5);
   });
 });

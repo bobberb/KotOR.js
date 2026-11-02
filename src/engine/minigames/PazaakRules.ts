@@ -153,7 +153,9 @@ export function getTableCardDisplay(card: IPazaakCard, textures: IPazaakCardText
   }
   const value = card.value ?? card.modifier[0];
   const isMain = card.type == PAZAAK_MAIN_CARD_TYPE;
-  const label = (value > 0 && !isMain) ? `+${value}` : `${value}`;
+  const signed = (value > 0 && !isMain) ? `+${value}` : `${value}`;
+  // Keep the T so a played tiebreaker is distinguishable from a played 1±2
+  const label = card.effect == 'tiebreaker' ? `${signed}T` : signed;
   let texture: string;
   if(card.effect){
     texture = card.textures[0];
