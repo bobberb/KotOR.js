@@ -23,8 +23,8 @@ jest.mock("@/apps/forge/KotOR", () => ({
 }));
 
 jest.mock("@/apps/forge/ForgeFileSystem", () => ({
-  supportedFileDialogTypes: [],
-  supportedFilePickerTypes: [],
+  supportedFileDialogTypes: [] as unknown[],
+  supportedFilePickerTypes: [] as unknown[],
 }));
 
 import { TabState } from "@/apps/forge/states/tabs/TabState";

@@ -1,7 +1,14 @@
 import { EventListenerModel } from "@/apps/forge/EventListenerModel";
 import * as KotOR from "@/apps/forge/KotOR";
 import * as THREE from 'three';
-import { ProjectFileSystem } from "@/apps/forge/ProjectFileSystem";
+
+/**
+ * ProjectFileSystem imports EditorFile -> ForgeState -> every editor tab, so a
+ * static import made this data model drag the whole Forge UI (and its SCSS)
+ * into anything that touches a blueprint. Only the async template lookup needs
+ * it, so it is loaded there.
+ */
+const loadProjectFileSystem = async () => (await import("@/apps/forge/ProjectFileSystem")).ProjectFileSystem;
 
 /** TabState.tsx is not type-checkable under Jest (`JSX` types). */
 interface BlueprintEditorTab {
@@ -82,7 +89,7 @@ export class ForgeGameObject extends EventListenerModel {
       return undefined;
     }
     const ext = String(KotOR.ResourceTypes.getKeyByValue?.(this.templateResType) || "").toLowerCase();
-    if(ext && ProjectFileSystem.hasRoot()){
+    if(ext && (await loadProjectFileSystem()).hasRoot()){
       const fromProject = await ForgeGameObject.readProjectTemplate(this.templateResRef, ext);
       if(fromProject?.byteLength){
         return fromProject;
@@ -96,6 +103,7 @@ export class ForgeGameObject extends EventListenerModel {
   }
 
   private static async readProjectTemplate(resRef: string, ext: string): Promise<Uint8Array | undefined> {
+    const ProjectFileSystem = await loadProjectFileSystem();
     const key = `${resRef}.${ext}`.toLowerCase();
     let path = ForgeGameObject.projectTemplatePathCache.get(key);
     if(!path){

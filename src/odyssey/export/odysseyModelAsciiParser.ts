@@ -212,6 +212,7 @@ function putStaticController(
 ): void {
   const gen: IOdysseyControllerGeneric = {
     type,
+    supermodelLink: -1,
     nodeType: node.nodeType,
     frameCount: frames.length,
     timeKeyIndex: 0,
@@ -249,6 +250,7 @@ function applyGeometryController(
     const sc = s.takeNumber();
     const gen: IOdysseyControllerGeneric = {
       type: OdysseyModelControllerType.Scale,
+      supermodelLink: -1,
       nodeType: node.nodeType,
       frameCount: 1,
       timeKeyIndex: 0,
@@ -810,7 +812,7 @@ function parseKeyedList(
       }
     } else if (type === OdysseyModelControllerType.Scale) {
       frames.push({ time, value: vals[0] ?? 0 } as IOdysseyControllerFrameGeneric);
-    } else if (spec.bezier && type !== OdysseyModelControllerType.Position && type !== OdysseyModelControllerType.Orientation && type !== OdysseyModelControllerType.Scale) {
+    } else if (spec.bezier) {  // Position/Orientation/Scale are handled above
       if (defaultCols === 3) {
         frames.push({
           time,
@@ -835,6 +837,7 @@ function parseKeyedList(
 
   const gen: IOdysseyControllerGeneric = {
     type,
+    supermodelLink: -1,
     nodeType,
     frameCount: frames.length,
     timeKeyIndex: 0,

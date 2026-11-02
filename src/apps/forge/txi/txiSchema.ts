@@ -334,10 +334,11 @@ export function completeTxi(lineUntilCursor: string): TxiCompletion[] {
       return items;
     }
     if (directive.valueKind === "bool") {
-      return [
+      const booleans: TxiCompletion[] = [
         { label: "1", insertText: "1", insertAsSnippet: false, documentation: "On / true.", detail: directive.name, kind: "enum", sortText: "1_1" },
         { label: "0", insertText: "0", insertAsSnippet: false, documentation: "Off / false.", detail: directive.name, kind: "enum", sortText: "1_0" },
-      ].filter((item) => matchesPrefix(item.label, parsed.valuePrefix));
+      ];
+      return booleans.filter((item) => matchesPrefix(item.label, parsed.valuePrefix));
     }
     return [];
   }

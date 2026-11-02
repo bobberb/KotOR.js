@@ -90,6 +90,8 @@ export interface ArgumentNode {
 export interface FunctionNode {
   type: "function";
   header_only: boolean;
+  /** Set by the semantic pass; see SemanticFunctionNode.declarationOrder. */
+  declarationOrder?: number;
   name: string;
   returntype: DataTypeNode;
   arguments: ArgumentNode[];

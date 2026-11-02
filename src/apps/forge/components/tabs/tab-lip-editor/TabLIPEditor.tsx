@@ -7,6 +7,7 @@ import { LayoutContainerProvider } from "@/apps/forge/context/LayoutContainerCon
 
 import { ForgeSelect } from "@/apps/forge/components/ui";
 import { LIPShapeLabels } from "@/apps/forge/data/LIPShapeLabels";
+import { formatLipClock } from "@/apps/forge/lip/lipVisemes";
 
 import * as KotOR from "@/apps/forge/KotOR";
 import { UI3DRendererView } from "@/apps/forge/components/UI3DRendererView";
@@ -19,14 +20,6 @@ function formatTimelineMmSs(totalSeconds: number): string {
   const s = Math.floor(totalSeconds % 60);
   const m = Math.floor(totalSeconds / 60);
   return `${m}:${s < 10 ? '0' : ''}${s}`;
-}
-
-function formatLipClock(t: number): string {
-  if (!isFinite(t) || t < 0) t = 0;
-  const m = Math.floor(t / 60);
-  const s = t % 60;
-  const sec = s < 10 ? `0${s.toFixed(2)}` : s.toFixed(2);
-  return `${m}:${sec}`;
 }
 
 export const TabLIPEditor = function(props: BaseTabProps){

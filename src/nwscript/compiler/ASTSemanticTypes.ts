@@ -55,6 +55,8 @@ export interface SemanticStructPropertyNode extends AnnotatedNode {
   type: "property";
   name: string;
   datatype: SemanticDataType;
+  /** Never set on a property; read when a struct member stands in for a variable reference. */
+  is_global?: boolean;
 }
 
 // Functions
@@ -223,7 +225,7 @@ export interface SemanticCompareNode extends AnnotatedNode {
 }
 
 export interface SemanticBinaryNode extends AnnotatedNode {
-  type: "add" | "sub" | "mul" | "div" | "mod" | "incor" | "xor" | "booland" | "assign" | "compare";
+  type: "add" | "sub" | "mul" | "div" | "mod" | "incor" | "xor" | "booland" | "shift" | "assign" | "compare";
   left: SemanticExpressionNode;
   right: SemanticExpressionNode;
   operator?: { type: "operator"; value: string };
