@@ -22,7 +22,7 @@ jest.mock('@/game/kotor/KOTOR', () => ({
   CharGenAbilities: (jest.requireActual('@/game/kotor/menu/CharGenAbilities') as any).CharGenAbilities,
 }));
 jest.mock('@/audio/AudioLoader', () => ({ AudioLoader: class {} }));
-jest.mock('@/engine/CurrentGame', () => ({ CurrentGame: {} }));
+jest.mock('@/engine/CurrentGame', () => ({ CurrentGame: { InitGameInProgressFolder: jest.fn(async () => undefined) } }));
 jest.mock('@/utility/GameFileSystem', () => ({ GameFileSystem: {} }));
 jest.mock('@/loaders/ResourceLoader', () => ({ ResourceLoader: {} }));
 jest.mock('@/loaders', () => ({ MDLLoader: {}, ResourceLoader: {} }));
@@ -46,6 +46,7 @@ import { CharGenManager } from '@/managers/CharGenManager';
 import { CharGenAbilities } from '@/game/kotor/menu/CharGenAbilities';
 import { CharGenAbilities as TSLCharGenAbilities } from '@/game/tsl/menu/CharGenAbilities';
 import { ModuleCreature } from '@/module/ModuleCreature';
+import { ModulePlayer } from '@/module/ModulePlayer';
 import { GFFObject } from '@/resource/GFFObject';
 
 const state = GameState as any;
@@ -110,6 +111,24 @@ beforeEach(() => {
   CharGenManager.wis = CharGenManager.int = CharGenManager.cha = 14;
 });
 
+/**
+ * Load a saved creature template the way a savegame does. The stand-in class
+ * cannot be re-read from ClassList (that needs classes.2da), so the list is
+ * dropped and the class reattached; everything else goes through the real
+ * initProperties(), which swallows its own exceptions, so those are checked.
+ */
+function reloadSaved<T extends ModuleCreature>(Type: new (gff: GFFObject) => T, saved: GFFObject): T {
+  const gff = new GFFObject(saved.getExportBuffer());
+  gff.RootNode.fields = gff.RootNode.fields.filter((field) => field.label !== 'ClassList');
+  const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+  errors.mockClear();
+  const reloaded = new Type(gff);
+  reloaded.initProperties();
+  expect(errors.mock.calls.map((call) => call[0]).filter((first) => first instanceof Error)).toEqual([]);
+  reloaded.classes = [soldierClass()];
+  return reloaded;
+}
+
 function expectBaseOnce(creature: ModuleCreature){
   expect(creature.getFortitudeSave()).toBe(CLASS_BASE.fortsave);
   expect(creature.getReflexSave()).toBe(CLASS_BASE.refsave);
@@ -134,9 +153,30 @@ describe.each([
     CharGenManager.finalizeCreature(creature);
     expectBaseOnce(creature);
 
-    const reloaded = new ModuleCreature(new GFFObject(creature.save().getExportBuffer()));
-    reloaded.initProperties();
-    reloaded.classes = [soldierClass()];
+    const reloaded = reloadSaved(ModuleCreature, creature.save());
     expectBaseOnce(reloaded);
+  });
+});
+
+describe('starting a new game', () => {
+  test('the new protagonist is saved with IsPC 1', async () => {
+    // Module load trusts IsPC=1 in Mod_PlayerList as the real protagonist; the
+    // chargen template carries no IsPC, so without this the PC saved 0.
+    const player = new ModulePlayer(new GFFObject());
+    player.classes = [soldierClass()];
+    player.firstName = 'Revan';
+    expect(player.template.RootNode.hasField('IsPC')).toBe(false);
+    const party: any = { AddPortraitToOrder: jest.fn() };
+    state.PartyManager = party;
+    state.GlobalVariableManager = { Init: jest.fn() };
+    state.LoadModule = jest.fn();
+    CharGenManager.selectedCreature = player;
+
+    await CharGenManager.startNewGame();
+
+    expect(state.LoadModule).toHaveBeenCalled();
+    expect(party.ActualPlayerTemplate.RootNode.getFieldByLabel('IsPC').getValue()).toBe(1);
+    const reloaded = reloadSaved(ModulePlayer, party.PlayerTemplate);
+    expect(reloaded.isPC).toBe(1);
   });
 });

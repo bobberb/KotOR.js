@@ -435,6 +435,10 @@ export class CharGenManager {
       equipList.childStructs = [];
     }
 
+    // The chargen template carries no IsPC, and Module load trusts IsPC=1 in
+    // Mod_PlayerList as the real protagonist; every new game (K1/TSL, Quick/Custom) passes here.
+    creature.isPC = 1;
+
     GameState.GlobalVariableManager.Init();
     GameState.PartyManager.PlayerTemplate = creature.save();
     GameState.PartyManager.ActualPlayerTemplate = GameState.PartyManager.PlayerTemplate;
