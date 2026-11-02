@@ -29,6 +29,13 @@ export enum PazaakCards {
   PLUS_MINUS_6 = 17,
   UNUSED_CARD = 18, //appears to be unused
   MAX_CARDS = 18,
+  // TSL-only side cards, indexed to match the TSL config's sideDeckCards order
+  TSL_PLUS_MINUS_1_OR_2 = 18,
+  TSL_DOUBLE = 19,
+  TSL_TIEBREAKER = 20,
+  TSL_FLIP_2_4 = 21,
+  TSL_FLIP_3_6 = 22,
+  TSL_MAX_CARDS = 23,
   MAIN_CARD_1 = 101,
   MAIN_CARD_2 = 102,
   MAIN_CARD_3 = 103,
