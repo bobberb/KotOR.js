@@ -37,6 +37,10 @@ export class ModuleObjectManager {
     if(id == ModuleObjectConstant.OBJECT_INVALID)
       return undefined;
 
+    // The module is not a ModuleObject, so it is not in ObjectList.
+    if(id == ModuleObjectConstant.MODULE_ID)
+      return GameState.module as unknown as ModuleObject;
+
     if(typeof id === 'object'){
       if(id.id >= 1){
         return id;

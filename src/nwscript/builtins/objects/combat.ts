@@ -146,7 +146,7 @@ export const GetLastHostileTarget = defineAction({
     if (BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature)) {
       return target.combatData.lastAttackTarget;
     }
-    return this.caller.combatData.lastAttackTarget;
+    return this.caller?.combatData?.lastAttackTarget;
   },
 });
 

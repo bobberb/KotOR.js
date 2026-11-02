@@ -40,14 +40,26 @@ export class GameEvent {
     this.callerId = nCallerId;
   }
 
+  /**
+   * A live event owner: a module object, or the module itself (Mod_* scripts
+   * run as the module, so their DelayCommands are owned by it).
+   */
+  static IsLiveOwner(obj: any): boolean {
+    return !!BitWise.InstanceOfObject(obj, ModuleObjectType.ModuleObject) || (!!obj && obj === GameState.module);
+  }
+
+  static OwnerId(obj: any): number {
+    return GameEvent.IsLiveOwner(obj) ? obj.id : 0;
+  }
+
   setCaller(caller: ModuleObject){
     this.caller = caller;
-    this.callerId = BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject) ? this.caller.id : 0;
+    this.callerId = GameEvent.OwnerId(this.caller);
     return this.caller;
   }
 
   getCaller(){
-    return BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject) ? this.caller : this.setCaller(GameState.ModuleObjectManager.GetObjectById(this.callerId));
+    return GameEvent.IsLiveOwner(this.caller) ? this.caller : this.setCaller(GameState.ModuleObjectManager.GetObjectById(this.callerId));
   }
 
   setObjectId(nObjectId: number){
@@ -56,12 +68,12 @@ export class GameEvent {
 
   setObject(obj: ModuleObject){
     this.object = obj;
-    this.objectId = BitWise.InstanceOfObject(this.object, ModuleObjectType.ModuleObject) ? this.object.id : 0;
+    this.objectId = GameEvent.OwnerId(this.object);
     return this.object;
   }
 
   getObject(){
-    return BitWise.InstanceOfObject(this.object, ModuleObjectType.ModuleObject) ? this.object : this.setObject(GameState.ModuleObjectManager.GetObjectById(this.objectId));
+    return GameEvent.IsLiveOwner(this.object) ? this.object : this.setObject(GameState.ModuleObjectManager.GetObjectById(this.objectId));
   }
 
   eventDataFromStruct(struct: GFFStruct){

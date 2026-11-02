@@ -179,7 +179,7 @@ export const GetAttemptedAttackTarget = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.caller.combatData.lastAttemptedAttackTarget;
+    return this.caller?.combatData?.lastAttemptedAttackTarget;
   },
 });
 
@@ -223,7 +223,7 @@ export const GetAttemptedSpellTarget = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.caller.combatData.lastAttemptedSpellTarget;
+    return this.caller?.combatData?.lastAttemptedSpellTarget;
   },
 });
 

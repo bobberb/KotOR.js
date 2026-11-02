@@ -82,6 +82,17 @@ import { buildRuntimeAction } from '@/nwscript/builtins/actionBuilder';
 import * as moduleRoutines from '@/nwscript/builtins/objects/module';
 import * as localVarRoutines from '@/nwscript/builtins/localvars';
 import * as eventRoutines from '@/nwscript/builtins/events';
+import * as scriptingRoutines from '@/nwscript/builtins/scripting';
+import * as queryRoutines from '@/nwscript/builtins/objects/query';
+import * as combatRoutines from '@/nwscript/builtins/combat';
+import * as objectCombatRoutines from '@/nwscript/builtins/objects/combat';
+import * as perceptionRoutines from '@/nwscript/builtins/objects/perception';
+import * as movementRoutines from '@/nwscript/builtins/movement';
+import * as itemsLegacyRoutines from '@/nwscript/builtins/itemsLegacy';
+import { EventTimedEvent } from '@/events/EventTimedEvent';
+import { ModuleObjectManager } from '@/managers/ModuleObjectManager';
+import { ModuleObjectConstant } from '@/enums/module/ModuleObjectConstant';
+import { ModuleTimeManager } from '@/module/ModuleTimeManager';
 import { GetItemActivated, GetItemActivator } from '@/nwscript/builtins/missing';
 import { GetModuleItemAcquired } from '@/nwscript/builtins/upstream/inventory';
 import { ModuleObjectScript } from '@/enums/module/ModuleObjectScript';
@@ -111,9 +122,16 @@ function stubScript(onRun: (instance: any, scriptVar: number) => void = () => {}
     name: 'stub',
     newInstance() {
       const instance: any = {
+        delayCommands: [] as any[],
+        // What NWScriptInstance.run does around the bytecode: OBJECT_SELF is the
+        // caller, and DelayCommands queue on the module once the script ends.
         run(caller: any, scriptVar = 0) {
+          instance.caller = caller;
+          instance.scriptVar = scriptVar;
           runs.push({ caller, scriptVar, instance });
           onRun(instance, scriptVar);
+          state.module?.eventQueue.push(...instance.delayCommands);
+          instance.delayCommands = [];
         },
       };
       return instance;
@@ -269,7 +287,7 @@ describe('party death', () => {
 
     expect(dying.runs).toHaveLength(1);
     expect(death.runs).toHaveLength(1);
-    expect(death.runs[0].caller).toBe(module.area);
+    expect(death.runs[0].caller).toBe(module);
     expect(seen.dyingEntering === pc).toBe(true);
     expect(seen.dyingLastDying === pc).toBe(true);
     expect(seen.dyingLastDied).toBeUndefined();
@@ -1165,5 +1183,124 @@ describe('module locals and tokens survive the IFO save/load', () => {
     state.module = new Module();
     expect(() => call(localVarRoutines.SetLocalNumber, {}, undefined, 1, 5)).not.toThrow();
     expect(call(localVarRoutines.GetLocalBoolean, {}, undefined, 1)).toBe(0);
+  });
+});
+
+describe('Mod_* scripts run as the module (OBJECT_SELF == GetModule())', () => {
+  test('a module event script setting a local on OBJECT_SELF is readable through GetModule()', () => {
+    const module = runningModule();
+    const seen: any = {};
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript((instance) => {
+      seen.selfIsModule = instance.caller === call(moduleRoutines.GetModule, instance);
+      call(localVarRoutines.SetLocalNumber, instance, instance.caller, 3, 9);
+      call(localVarRoutines.SetLocalBoolean, instance, instance.caller, 40, 1);
+    }).script;
+
+    tickFor(module, 6);
+
+    expect(seen.selfIsModule).toBe(true);
+    const oModule = call(moduleRoutines.GetModule, {});
+    expect(call(localVarRoutines.GetLocalNumber, {}, oModule, 3)).toBe(9);
+    expect(call(localVarRoutines.GetLocalBoolean, {}, oModule, 40)).toBe(1);
+  });
+
+  test('OnModLoad and OnClientEnter run as the module too', async () => {
+    const module = runningModule();
+    const onLoad = stubScript();
+    const onEnter = stubScript();
+    module.scriptResRefs.set(ModuleObjectScript.ModuleOnLoad, 'k_mod_load');
+    module.scriptResRefs.set(ModuleObjectScript.ModuleOnPlayerClientEnter, 'k_mod_enter');
+    state.NWScript = { Load: (resref: string) => ({ k_mod_load: onLoad, k_mod_enter: onEnter } as any)[resref]?.script.newInstance() };
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+
+    await module.initScripts();
+
+    expect(onLoad.runs.map((run) => run.caller === module)).toEqual([true]);
+    expect(onEnter.runs.map((run) => run.caller === module)).toEqual([true]);
+    expect(onEnter.runs[0].instance.enteringObject === pc).toBe(true);
+  });
+
+  test('DelayCommand from a module script fires, still as the module', () => {
+    const module = runningModule();
+    module.timeManager = new ModuleTimeManager();
+    module.timeManager.enabled = true;
+    state.GameEventFactory = { EventTimedEvent };
+    const fired: any[] = [];
+    const delayed: any = {
+      setCaller(caller: any) { this.caller = caller; },
+      seekTo() {},
+      runScript() { fired.push(this.caller); },
+    };
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript((instance) => {
+      if (fired.length || module.eventQueue.length) return;
+      call(scriptingRoutines.DelayCommand, instance, 2.0, { script: delayed, offset: 12 });
+    }).script;
+
+    tickFor(module, 6);
+    expect(module.eventQueue).toHaveLength(1);
+    expect(fired).toHaveLength(0);
+    tickFor(module, 1.5);
+    expect(fired).toHaveLength(0);
+    tickFor(module, 1);
+
+    expect(fired).toHaveLength(1);
+    expect(fired[0] === module).toBe(true);
+  });
+
+  test('a saved event owned by the module resolves back to it by id', () => {
+    const module = runningModule();
+    state.ModuleObjectManager.GetObjectById = (id: number) => ModuleObjectManager.GetObjectById(id);
+    const event = new EventTimedEvent();
+    event.setCaller(module as any);
+    expect(event.callerId).toBe(ModuleObjectConstant.MODULE_ID);
+
+    const restored = new EventTimedEvent();
+    restored.setCallerId(event.callerId);
+    expect(restored.getCaller() === (module as any)).toBe(true);
+    expect(ModuleObjectManager.GetObjectById(ModuleObjectConstant.OBJECT_INVALID)).toBeUndefined();
+  });
+
+  test('AssignCommand(GetModule(), ...) runs the command as the module', () => {
+    const module = runningModule();
+    const ran: any[] = [];
+    const action = { script: { seekTo() {}, runScript() { ran.push(this.caller); }, caller: undefined as any }, offset: 0 };
+
+    call(scriptingRoutines.AssignCommand, {}, call(moduleRoutines.GetModule, {}), action);
+
+    expect(ran).toHaveLength(1);
+    expect(ran[0] === module).toBe(true);
+  });
+
+  test('GetArea / GetPosition of OBJECT_SELF in a module script: OBJECT_INVALID and the origin (the module is not in an area)', () => {
+    const module = runningModule();
+    const seen: any = {};
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript((instance) => {
+      seen.self = instance.caller;
+      seen.area = call(queryRoutines.GetArea, instance, instance.caller);
+      seen.position = call(queryRoutines.GetPosition, instance, instance.caller);
+    }).script;
+
+    tickFor(module, 6);
+
+    expect(seen.self === module).toBe(true);
+    expect(seen.area).toBeUndefined();
+    expect(seen.position).toEqual({ x: 0, y: 0, z: 0 });
+  });
+
+  test('creature-only routines called as the module do nothing instead of aborting the script', () => {
+    const module = runningModule();
+    const self = { caller: module, delayCommands: [] as any[] };
+    state.ActionFactory = { ActionGiveItem: class { setParameter() {} } };
+    expect(() => {
+      call(movementRoutines.SetFacing, self, 90);
+      call(scriptingRoutines.ActionDoCommand, self, { script: {}, offset: 0 });
+      // An Action* routine that queues on the caller without checking it.
+      call(itemsLegacyRoutines.ActionGiveItem, self, new FakeItem('g_i_credits001'), creature('pc'));
+    }).not.toThrow();
+    expect(call(combatRoutines.GetAttemptedAttackTarget, self)).toBeUndefined();
+    expect(call(combatRoutines.GetAttemptedSpellTarget, self)).toBeUndefined();
+    expect(call(objectCombatRoutines.GetLastHostileTarget, self)).toBeUndefined();
+    expect(call(perceptionRoutines.GetBlockingDoor, self)).toBeUndefined();
   });
 });

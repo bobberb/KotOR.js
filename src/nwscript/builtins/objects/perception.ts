@@ -127,7 +127,7 @@ export const GetBlockingDoor = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    if (BitWise.InstanceOfObject(this.caller.collisionManager.blockingObject, ModuleObjectType.ModuleDoor)) {
+    if (BitWise.InstanceOfObject(this.caller?.collisionManager?.blockingObject, ModuleObjectType.ModuleDoor)) {
       return this.caller.collisionManager.blockingObject;
     }
     return undefined;

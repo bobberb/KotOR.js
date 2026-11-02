@@ -17,7 +17,8 @@ export const AssignCommand = defineAction({
     actionParam<any>("aActionToAssign"),
   ] as const,
   kotor(this: NWScriptInstance, oActionSubject, aActionToAssign) {
-    if (BitWise.InstanceOfObject(oActionSubject, ModuleObjectType.ModuleObject)) {
+    // AssignCommand(GetModule(), ...) runs the command as the module.
+    if (BitWise.InstanceOfObject(oActionSubject, ModuleObjectType.ModuleObject) || (oActionSubject && (oActionSubject as unknown) === GameState.module)) {
       if (typeof aActionToAssign === "object") {
         aActionToAssign.script.caller = oActionSubject;
         aActionToAssign.script.seekTo(aActionToAssign.offset);
