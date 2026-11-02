@@ -55,6 +55,9 @@ import { TURN_SPEED_SLOW } from "@/engine/TurnSpeeds";
 import { actionParameterToStruct } from "@/actions/actionParameterStructs";
 
 
+/** Trap detection key shared by every party member (see getTrapDetectorFactionId). */
+export const TRAP_DETECTOR_PARTY = -2;
+
 /**
 * ModuleObject class.
 * 
@@ -1976,7 +1979,15 @@ export class ModuleObject {
     this.area.triggers.push(trigger);
   }
 
+  /**
+   * Detection key for a detector: the whole party shares TRAP_DETECTOR_PARTY
+   * (the PC is faction 0 while companions keep their UTC faction), anyone
+   * else their faction id.
+   */
   getTrapDetectorFactionId(detector: ModuleObject): number {
+    if(detector && (detector.isPartyMember?.() || (GameState.PartyManager?.party || []).indexOf(detector as any) >= 0)){
+      return TRAP_DETECTOR_PARTY;
+    }
     const id = detector?.faction?.id ?? detector?.factionId;
     return typeof id === 'number' && !isNaN(id) ? id : -1;
   }

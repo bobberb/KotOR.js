@@ -279,8 +279,10 @@ export class ModuleTrigger extends ModuleObject {
    * @returns true when the OnTrapTriggered event was queued
    */
   fireTrap(victim?: ModuleObject): boolean {
-    if(this.type != ModuleTriggerType.TRAP || this.trapSpent || this.destroyed){ return false; }
+    if(this.type != ModuleTriggerType.TRAP || this.trapSpent || this.destroyed || !this.isTrapArmed()){ return false; }
     if(victim && victim !== this && !this.isHostile(victim)){ return false; }
+    // A party-set mine never goes off on the party, whatever their factions' standing.
+    if(victim && this.setByPlayerParty && SWTrapRules.isPartyMember(victim)){ return false; }
     const oneShot = this.trapOneShot === undefined || !!this.trapOneShot;
     if(oneShot){
       this.trapSpent = true;
@@ -370,7 +372,13 @@ export class ModuleTrigger extends ModuleObject {
     return this.type == ModuleTriggerType.TRAP;
   }
 
+  /** False once disabled: TrapFlag 0 (SetTrapDisabled, a disarmed or spent trap). Unset counts as armed. */
+  isTrapArmed(): boolean {
+    return !(this.trapFlag === false || (this.trapFlag as any) === 0);
+  }
+
   canTrigger(object: ModuleObject): boolean {
+    if(!this.isTrapArmed() || this.trapSpent){ return false; }
     return this.isHostile(object) && (!this.triggered || !this.trapOneShot);
   }
 
@@ -681,6 +689,14 @@ export class ModuleTrigger extends ModuleObject {
     if(this.template.RootNode.hasField('TrapDetected'))
       this.trapDetected = !!this.template.getFieldByLabel('TrapDetected').getValue();
 
+    // Saved inside the spent window (e.g. a quicksave right after the blast): stays spent, removed on the next update.
+    if(this.template.RootNode.hasField('TrapSpent') && this.template.getFieldByLabel('TrapSpent').getValue()){
+      this.trapSpent = true;
+      this.trapSpentTimer = 0;
+      this.trapTriggered = true;
+      this.triggered = true;
+    }
+
     if(this.template.RootNode.hasField('TrapDetectedBy')){
       this.trapDetectedByFactions.clear();
       for(const struct of this.template.getFieldByLabel('TrapDetectedBy').getChildStructs()){
@@ -841,6 +857,7 @@ export class ModuleTrigger extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetectable') ).setValue(this.trapDetectable);
     // TrapDetected/TrapDetectedBy are engine-local (no known retail field); TrapDisarmDC and CreatorId are UTT/GIT fields.
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetected') ).setValue(this.trapDetected ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapSpent') ).setValue(this.trapSpent ? 1 : 0);
     const detectedBy = gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'TrapDetectedBy') );
     for(const factionId of this.trapDetectedByFactions){
       const struct = new GFFStruct();

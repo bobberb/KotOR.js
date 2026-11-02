@@ -61,6 +61,7 @@ import { ActionStatus } from '@/enums/actions/ActionStatus';
 import { ActionParameterType } from '@/enums/actions/ActionParameterType';
 import { ActionType } from '@/enums/actions/ActionType';
 import { GameEffectType } from '@/enums/effects/GameEffectType';
+import { SSFType } from '@/enums/resource/SSFType';
 import { SkillType } from '@/enums/nwscript/SkillType';
 import { ModuleItemProperty } from '@/enums/module/ModuleItemProperty';
 import { Dice } from '@/utility/Dice';
@@ -97,6 +98,8 @@ const loadCachedResource = ResourceLoader.loadCachedResource as unknown as jest.
 const FACTION_HOSTILE = 1;
 const FACTION_PARTY = 2;
 const FACTION_NEUTRAL = 5;
+/** The PC's faction in this engine (CharGenManager/PartyManager write FactionID 0); companions keep theirs. */
+const FACTION_PC = 0;
 
 const TRAP_FRAG = 0;
 const TRAPS_2DA_ROWS: Record<number, any> = {
@@ -104,6 +107,12 @@ const TRAPS_2DA_ROWS: Record<number, any> = {
     label: 'FragMineMinor', name: '1', trapscript: 'k_trp_frag', setdc: '15',
     detectdcmod: '5', disarmdcmod: '10', resref: 'g_i_trapkit001', model: '', explosionsound: 'exp_frag',
   },
+};
+/** A row with explicit detectdc/disarmdc base columns. */
+const TRAP_GAS = 1;
+TRAPS_2DA_ROWS[TRAP_GAS] = {
+  label: 'GasMine', name: '2', trapscript: '', setdc: '12', detectdc: '18', disarmdc: '22',
+  detectdcmod: '1', disarmdcmod: '2', resref: 'g_i_trapkit002', model: '', explosionsound: '',
 };
 
 let registry: Map<number, any>;
@@ -229,10 +238,11 @@ beforeEach(() => {
   };
 
   const factions = new Map<number, any>();
-  for (const id of [FACTION_HOSTILE, FACTION_PARTY, FACTION_NEUTRAL]) factions.set(id, { id });
+  for (const id of [FACTION_PC, FACTION_HOSTILE, FACTION_PARTY, FACTION_NEUTRAL]) factions.set(id, { id });
   const hostile = (a: any, b: any) => {
     const fa = factionOf(a), fb = factionOf(b);
-    return (fa == FACTION_HOSTILE && fb == FACTION_PARTY) || (fa == FACTION_PARTY && fb == FACTION_HOSTILE);
+    const partySide = (f: number) => f == FACTION_PARTY || f == FACTION_PC;
+    return (fa == FACTION_HOSTILE && partySide(fb)) || (partySide(fa) && fb == FACTION_HOSTILE);
   };
 
   state.SWRuleSet = { skills: [], ranges: [], portraits: [], feats: [], classes: [] };
@@ -1046,5 +1056,153 @@ describe('remaining first-round behaviour', () => {
     expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(1);
     expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
     expect(roll).toHaveBeenCalledTimes(1);
+  });
+});
+
+/*
+ * Round 3 (critic of 708364d): the party is one owner although the PC is
+ * faction 0 and companions keep their UTC faction; disabled traps are inert;
+ * a spent trap stays spent through save/load; remaining mutant survivors.
+ */
+
+describe('the party is one owner (PC faction 0, companion faction 2)', () => {
+  test.each([
+    ['PC lays, companion recovers', FACTION_PC, FACTION_PARTY],
+    ['companion lays, PC recovers', FACTION_PARTY, FACTION_PC],
+  ] as const)('%s: no check, no XP, item back', (_, layerFaction, otherFaction) => {
+    jest.spyOn(SWTrapRules, 'createMineItem').mockReturnValue({ tag: 'g_i_trapkit001' } as any);
+    const layer = creature({ party: true, faction: layerFaction, demolitions: 1 });
+    const other = creature({ party: true, faction: otherFaction, demolitions: 0, int: 3, inCombat: true });
+    const { mine } = layAt(layer, 1, 0);
+    const roll = d20(1);
+    const result = SWTrapRules.attemptRecover(other, mine);
+    expect(result.outcome).toBe('success');
+    expect(result.check).toBeUndefined();
+    expect(roll).not.toHaveBeenCalled();
+    expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
+    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' });
+    expect(trapEvents()).toHaveLength(0);
+  });
+
+  test('a mine the PC laid never fires on a companion of another faction', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, demolitions: 1 });
+    const { mine } = layAt(pc, 0, 0);
+    const companion = creature({ party: true, faction: FACTION_HOSTILE, at: [0.5, 0.5] }); // even a hostile-faction companion
+    mine.updateObjectInside(companion);
+    expect(mine.fireTrap(companion)).toBe(false);
+    expect(trapEvents()).toHaveLength(0);
+  });
+
+  test('an NPC of the PC faction does not own a party mine', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, demolitions: 1 });
+    const { mine } = layAt(pc, 1, 0);
+    const npc = creature({ party: false, faction: FACTION_PC, demolitions: 0 });
+    expect(SWTrapRules.isOwnMine(npc, mine)).toBe(false);
+    expect(SWTrapRules.isOwnMine(pc, mine)).toBe(true);
+  });
+
+  test('detection by the PC counts for the companions: no re-roll, GetTrapDetectedBy TRUE', () => {
+    const pc = creature({ party: true, faction: FACTION_PC, awareness: 40, inCombat: true });
+    const companion = creature({ party: true, faction: FACTION_PARTY, awareness: 40, inCombat: true });
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE });
+    const trap = trapTrigger({ at: [1, 0], detectDC: 1 });
+    const roll = d20(10, 10);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(1);
+    expect(SWTrapRules.passiveDetect(companion, [trap])).toHaveLength(0);
+    expect(roll).toHaveBeenCalledTimes(1);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trap, companion)).toBe(1);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trap, enemy)).toBe(0);
+    const reloaded = new ModuleTrigger(new GFFObject(trap.save().getExportBuffer()));
+    expect(reloaded.isTrapDetectedBy(companion)).toBe(true);
+  });
+
+  test('a big failure on a trap that is not hostile reports failed, not triggered', () => {
+    const companion = creature({ party: true, demolitions: 0, int: 3, inCombat: true });
+    const trap = trapTrigger({ at: [1, 0], disarmDC: 30, faction: FACTION_NEUTRAL });
+    d20(1, 1);
+    expect(SWTrapRules.attemptDisarm(companion, trap).outcome).toBe('failed');
+    expect(SWTrapRules.attemptRecover(companion, trap).outcome).toBe('failed');
+    expect(trapEvents()).toHaveLength(0);
+  });
+});
+
+describe('a disabled trap (SetTrapDisabled / TrapFlag 0) is inert', () => {
+  test('it does not fire, is not detected and cannot be disarmed for XP', () => {
+    const { SetTrapDisabled } = require('@/nwscript/builtins/upstream/world');
+    const pc = creature({ party: true, awareness: 40, demolitions: 40, at: [0.5, 0.5] });
+    const trap = trapTrigger({ at: [0, 0], detectDC: 1, disarmDC: 1 });
+    expect(trap.canTrigger(pc)).toBe(true);
+    SetTrapDisabled.action.call({}, [trap]);
+    expect(trap.canTrigger(pc)).toBe(false);
+    trap.updateObjectInside(pc);
+    expect(trap.fireTrap(pc)).toBe(false);
+    expect(trapEvents()).toHaveLength(0);
+    expect(SWTrapRules.passiveDetect(pc, [trap])).toHaveLength(0);
+    expect(SWTrapRules.attemptDisarm(pc, trap).outcome).toBe('invalid');
+    expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
+  });
+
+  test('a trap trigger without a TrapFlag field is armed', () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Type')).setValue(ModuleTriggerType.TRAP);
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'Faction')).setValue(FACTION_HOSTILE);
+    const trap = new ModuleTrigger(gff);
+    expect(trap.isTrapArmed()).toBe(true);
+    expect(trap.fireTrap(creature({ party: true }))).toBe(true);
+  });
+});
+
+describe('a spent one-shot trap stays spent through save/load', () => {
+  test('quicksave right after the blast: the reload neither refires nor pays out, and is removed', () => {
+    const pc = creature({ party: true, awareness: 40, demolitions: 40, at: [0.5, 0.5] });
+    const trap = trapTrigger({ at: [0, 0], detectDC: 1, disarmDC: 1 });
+    expect(trap.fireTrap(pc)).toBe(true);
+    const reloaded = register(new ModuleTrigger(new GFFObject(trap.save().getExportBuffer())));
+    reloaded.load();
+    area.attachObject(reloaded);
+    expect(reloaded.trapSpent).toBe(true);
+    expect(reloaded.canTrigger(pc)).toBe(false);
+    expect(reloaded.fireTrap(pc)).toBe(false);
+    expect(SWTrapRules.passiveDetect(pc, [reloaded])).toHaveLength(0);
+    expect(SWTrapRules.attemptDisarm(pc, reloaded).outcome).toBe('invalid');
+    expect(trapEvents()).toHaveLength(1);
+    expect(reloaded.updateSpentTrap(0)).toBe(true);
+    expect(area.triggers).not.toContain(reloaded);
+  });
+});
+
+describe('round 2 survivors', () => {
+  test('a detected mine stops showing once spent', () => {
+    const pc = creature({ party: true });
+    const trap = trapTrigger();
+    trap.detectTrap(pc);
+    expect(trap.trapDetected).toBe(true);
+    trap.fireTrap(pc);
+    expect(trap.trapDetected).toBe(false);
+  });
+
+  test('an item skill property that needs a missing upgrade does not count', () => {
+    const pc = creature({ party: true, security: 2 });
+    (pc as any).equipment.HEAD = {
+      getINTBonus: () => 0,
+      properties: [{ isUseable: () => false, is: (t: number, st?: number) => t == ModuleItemProperty.Skill && st == SkillType.SECURITY, getValue: () => 5 }],
+    };
+    expect(SWSkillCheck.getSkillTotal(pc, SkillType.SECURITY)).toBe(2);
+  });
+
+  test('traps.2da detectdc/disarmdc base columns are used when present', () => {
+    expect(SWTrapRules.rowDCs(TRAPS_2DA_ROWS[TRAP_GAS])).toEqual({ setDC: 12, detectDC: 19, disarmDC: 24 });
+    const pc = creature({ party: true, demolitions: 1 });
+    const mine = SWTrapRules.layMine(pc, TRAP_GAS, new THREE.Vector3(0, 0, 0)).trigger!;
+    expect([mine.trapDetectDC, mine.trapDisarmDC]).toEqual([19, 24]);
+  });
+
+  test('picking plays the fail sound on failure and the success sound on success', () => {
+    const pc = creature({ party: true, security: 1 });
+    const sound = pc.playSoundSet as unknown as jest.Mock;
+    expect(lockedDoor(30).attemptUnlock(pc)).toBe(false);
+    expect(sound).toHaveBeenLastCalledWith(SSFType.UNLOCK_FAIL);
+    expect(lockedDoor(1).attemptUnlock(pc)).toBe(true);
+    expect(sound).toHaveBeenLastCalledWith(SSFType.UNLOCK_SUCCESS);
   });
 });

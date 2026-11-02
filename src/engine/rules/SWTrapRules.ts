@@ -234,17 +234,26 @@ export class SWTrapRules {
     return detected;
   }
 
-  /** Not destroyed and not a spent one-shot. */
+  /** Not destroyed, not a spent one-shot, not disabled (TrapFlag 0 / SetTrapDisabled). */
   static isLive(trap: ModuleTrigger): boolean {
-    return !!trap && !trap.destroyed && !trap.trapSpent;
+    return !!trap && !trap.destroyed && !trap.trapSpent && trap.isTrapArmed();
   }
 
   static factionIdOf(object: ModuleObject): number {
     return (object as any)?.faction?.id ?? (object as any)?.factionId;
   }
 
-  /** A mine owned by the creature's own faction (e.g. one the party laid). */
+  /**
+   * A mine the creature's side owns. The party is one owner (the PC is
+   * faction 0, companions keep their own faction): any party member owns a
+   * mine set by the party. Anyone else owns mines of their own faction that
+   * the party did not set.
+   */
   static isOwnMine(creature: ModuleObject, trap: ModuleTrigger): boolean {
+    if(!creature || !trap) return false;
+    const setByParty = !!trap.setByPlayerParty;
+    if(SWTrapRules.isPartyMember(creature)) return setByParty;
+    if(setByParty) return false;
     const own = SWTrapRules.factionIdOf(creature);
     return own !== undefined && own === SWTrapRules.factionIdOf(trap);
   }
@@ -287,8 +296,7 @@ export class SWTrapRules {
       SWTrapRules.awardXP(creature, xp);
       return { outcome: 'success', check, xp };
     }
-    if(check.failedBy >= DISARM_TRIGGER_MARGIN){
-      trap.fireTrap(creature);
+    if(check.failedBy >= DISARM_TRIGGER_MARGIN && trap.fireTrap(creature)){
       return { outcome: 'triggered', check };
     }
     return { outcome: 'failed', check };
@@ -326,8 +334,7 @@ export class SWTrapRules {
       SWTrapRules.awardXP(creature, xp);
       return { outcome: 'success', check, item, xp };
     }
-    if(check.failedBy >= DISARM_TRIGGER_MARGIN){
-      trap.fireTrap(creature);
+    if(check.failedBy >= DISARM_TRIGGER_MARGIN && trap.fireTrap(creature)){
       return { outcome: 'triggered', check };
     }
     return { outcome: 'failed', check };
