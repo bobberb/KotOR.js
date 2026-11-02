@@ -56,7 +56,7 @@ const playCard = (hand: number, flipped = false) => { PM.AddPlayHandCardAction(P
 
 beforeEach(() => {
   addGold = jest.fn();
-  state.PartyManager = { Player: { addGold } };
+  state.PartyManager = { Gold: 1000, Player: { addGold } };
   state.MenuManager = {
     MenuPazaakGame: { close: jest.fn() },
     InGameConfirm: { fromStringRef: jest.fn() },
@@ -206,6 +206,26 @@ describe('PazaakManager match + payout', () => {
     expect(addGold).toHaveBeenCalledTimes(1);
     expect(addGold).toHaveBeenCalledWith(100);
     expect(state.MenuManager.MenuPazaakGame.close).toHaveBeenCalled();
+  });
+
+  test('a broke player starts unwagered and a loss costs nothing', () => {
+    state.PartyManager.Gold = 0;
+    scriptRounds(playerLosesRound, playerLosesRound, playerLosesRound);
+    beginMatch(K1Config);
+    expect(PM.Wager).toBe(0);
+    for(let round = 0; round < 3; round++){
+      endTurn();
+      endTurn();
+    }
+    expect(PM.Tables[O].winCount).toBe(3);
+    expect(addGold).not.toHaveBeenCalled();
+  });
+
+  test('the wager is capped at the player credits when the match starts', () => {
+    state.PartyManager.Gold = 30;
+    scriptRounds([1]);
+    beginMatch(K1Config);
+    expect(PM.Wager).toBe(30);
   });
 
   test('losing the match costs exactly the wager', () => {

@@ -39,7 +39,7 @@ function finishMatch(playerWins: boolean){
 }
 
 beforeEach(() => {
-  state.PartyManager = { Player: { addGold: jest.fn() } };
+  state.PartyManager = { Gold: 1000, Player: { addGold: jest.fn() } };
   state.MenuManager = {
     MenuPazaakGame: { close: jest.fn() },
     MenuPazaakSetup: { open: jest.fn() },

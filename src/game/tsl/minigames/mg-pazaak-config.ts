@@ -376,19 +376,6 @@ export const PazaakConfig = {
         ]
       },
       {
-        name: "1±2",
-        type: 1,
-        modifier: [1, -1],
-        altModifier: [2, -2],
-        modifierLabel: "1±2",
-        reversible: true,
-        negateModifier: false,
-        textures: [
-          'pcards_gold_p',
-          'pcards_gold_p'
-        ]
-      },
-      {
         name: "Double",
         type: 1,
         modifier: [0, 0],
@@ -396,19 +383,6 @@ export const PazaakConfig = {
         reversible: false,
         negateModifier: false,
         effect: 'double' as const,
-        textures: [
-          'pcards_gold_p',
-          'pcards_gold_p'
-        ]
-      },
-      {
-        name: "Tie Breaker",
-        type: 1,
-        modifier: [1, -1],
-        modifierLabel: "±1T",
-        reversible: true,
-        negateModifier: false,
-        effect: 'tiebreaker' as const,
         textures: [
           'pcards_gold_p',
           'pcards_gold_p'
@@ -437,6 +411,32 @@ export const PazaakConfig = {
         negateModifier: false,
         effect: 'flip' as const,
         flipValues: [3, 6],
+        textures: [
+          'pcards_gold_p',
+          'pcards_gold_p'
+        ]
+      },
+      {
+        name: "Tie Breaker",
+        type: 1,
+        modifier: [1, -1],
+        modifierLabel: "±1T",
+        reversible: true,
+        negateModifier: false,
+        effect: 'tiebreaker' as const,
+        textures: [
+          'pcards_gold_p',
+          'pcards_gold_p'
+        ]
+      },
+      {
+        name: "1±2",
+        type: 1,
+        modifier: [1, -1],
+        altModifier: [2, -2],
+        modifierLabel: "1±2",
+        reversible: true,
+        negateModifier: false,
         textures: [
           'pcards_gold_p',
           'pcards_gold_p'

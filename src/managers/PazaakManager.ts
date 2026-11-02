@@ -15,8 +15,8 @@ import { GameEngineType } from "@/enums/engine/GameEngineType";
 import { IPazaakCard } from "@/interface/minigames/IPazaakCard";
 import { ActionStatus } from "@/enums/actions/ActionStatus";
 import {
-  IPazaakAIContext, IPazaakSide, PazaakEndOfTurn, PazaakRoundResult,
-  aiShouldStand, applyCardToTable, buildMainDeck, chooseAIMove, dealHand,
+  IPazaakAIContext, IPazaakCardTextures, IPazaakSide, PazaakEndOfTurn, PazaakRoundResult,
+  aiShouldStand, applyCardToTable, buildMainDeck, chooseAIMove, clampWager, dealHand,
   decideRoundWinner, evaluateEndOfTurn, matchWinner, shuffle, sumTable, wagerPayout,
 } from "@/engine/minigames/PazaakRules";
 
@@ -709,6 +709,17 @@ export class PazaakManager {
     return GameState.GameKey == GameEngineType.TSL ? PazaakCards.TSL_MAX_CARDS : PazaakCards.MAX_CARDS;
   }
 
+  /**
+   * Plain positive/negative card textures of the active config.
+   */
+  static GetCardTextures(): IPazaakCardTextures {
+    const find = (name: string) => this.Config.textures.find((t) => t.name == name)?.file;
+    return {
+      positive: find('Card Positive') ?? 'lbl_cardmpos',
+      negative: find('Card Negative') ?? 'lbl_cardmneg',
+    };
+  }
+
   //-----------------//
   // Turn Management //
   //-----------------//
@@ -753,6 +764,8 @@ export class PazaakManager {
     this.Won = false;
     this.LastPayout = 0;
     this.LastRoundResult = PazaakRoundResult.TIE;
+    // Never start a wagered match the player can't pay for
+    this.Wager = clampWager(this.Wager, this.MinWager, this.MaxWager, GameState.PartyManager?.Gold ?? 0);
 
     const tableCount = this.Tables.length;
     for(let i = 0; i < tableCount; i++){

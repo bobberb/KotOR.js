@@ -116,12 +116,13 @@ describe('PARTYTABLE pazaak collection', () => {
 
 describe('pazaak card items', () => {
   class CardItem {
-    constructor(public variation: number, public count = 1) {}
+    constructor(public modelVariation: number, public count = 1) {}
     initProperties() {}
     getStackSize() { return this.count; }
     setStackSize(n: number) { this.count = n; }
     getBaseItemId() { return BaseItemType.PAZAAK_CARD; }
-    getModelVariation() { return this.variation; }
+    // mirrors ModuleItem.getModelVariation(): 0 is coerced to 1
+    getModelVariation() { return this.modelVariation || 1; }
   }
 
   beforeEach(() => {
@@ -135,5 +136,18 @@ describe('pazaak card items', () => {
     expect(PM.Cards.get(PazaakCards.PLUS_1).count).toBe(2);
     expect(PM.Cards.get(PazaakCards.PLUS_2).count).toBe(0);
     expect(PM.Cards.get(PazaakCards.PLUS_MINUS_6).count).toBe(1);
+  });
+
+  test('ModelVariation 0 is invalid: ignored with a warning, not granted as +1', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    InventoryManager.addItem(new CardItem(0) as any);
+    expect(PM.Cards.get(PazaakCards.PLUS_1).count).toBe(0);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  test('TSL special card items map through the same 1-based variation', () => {
+    state.GameKey = 'TSL';
+    InventoryManager.addItem(new CardItem(PazaakCards.TSL_DOUBLE + 1) as any);
+    expect(PM.Cards.get(PazaakCards.TSL_DOUBLE).count).toBe(1);
   });
 });

@@ -3,6 +3,7 @@ import {
   PAZAAK_TABLE_SLOTS, PazaakEndOfTurn, PazaakRoundResult,
   aiShouldStand, applyCardToTable, buildMainDeck, chooseAIMove, dealHand,
   decideRoundWinner, evaluateEndOfTurn, getCardModifier, matchWinner, shuffle, sumTable, wagerPayout,
+  clampWager, getTableCardDisplay,
 } from '@/engine/minigames/PazaakRules';
 import { PazaakConfig as K1Config } from '@/game/kotor/minigames/mg-pazaak-config';
 import { PazaakConfig as TSLConfig } from '@/game/tsl/minigames/mg-pazaak-config';
@@ -195,5 +196,59 @@ describe('AI', () => {
   test('fills the ninth slot when it can for the auto-win', () => {
     const eight = [1, 1, 1, 1, 1, 1, 1, 1];
     expect(chooseAIMove(eight, [k1(PazaakCards.PLUS_1)], ctx)).toMatchObject({ handIndex: 0 });
+  });
+});
+
+describe('TSL card index order', () => {
+  test('keeps the upstream PazaakDeck order: $$=18 F1=19 F2=20 TT=21 VV=22', () => {
+    expect(PazaakDeck.ModifierToCardIndex('$$')).toBe(18);
+    expect(PazaakDeck.ModifierToCardIndex('F1')).toBe(19);
+    expect(PazaakDeck.ModifierToCardIndex('F2')).toBe(20);
+    expect(PazaakDeck.ModifierToCardIndex('TT')).toBe(21);
+    expect(PazaakDeck.ModifierToCardIndex('VV')).toBe(22);
+    expect(TSLConfig.data.sideDeckCards.slice(18).map((c: any) => c.name))
+      .toEqual(['Double', 'Flip2&4', 'Flip 3&6', 'Tie Breaker', '1±2']);
+  });
+});
+
+describe('table card display', () => {
+  const k1Tex = { positive: 'lbl_cardmpos', negative: 'lbl_cardmneg' };
+  const tslTex = { positive: 'pcards_pos_p', negative: 'pcards_neg_p' };
+  const main = (cfg: any, v: number, value = v) => ({ ...cfg.data.mainDeckCards[v - 1], value });
+  const side = (cfg: any, i: PazaakCards, value: number, flipped = false) => ({ ...cfg.data.sideDeckCards[i], value, flipped });
+
+  test('main deck cards show their value; a flipped main card shows negative', () => {
+    expect(getTableCardDisplay(main(TSLConfig, 10), tslTex)).toEqual({ label: '10', texture: 'pcards_generic_p' });
+    expect(getTableCardDisplay(main(TSLConfig, 2, -2), tslTex)).toEqual({ label: '-2', texture: 'pcards_neg_p' });
+    expect(getTableCardDisplay(main(K1Config, 4, -4), k1Tex)).toEqual({ label: '-4', texture: 'lbl_cardmneg' });
+  });
+
+  test('side cards show their signed resolved value', () => {
+    expect(getTableCardDisplay(side(K1Config, PazaakCards.PLUS_3, 3), k1Tex)).toEqual({ label: '+3', texture: 'lbl_cardmpos' });
+    expect(getTableCardDisplay(side(K1Config, PazaakCards.PLUS_MINUS_2, -2, true), k1Tex)).toEqual({ label: '-2', texture: 'lbl_cardraref' });
+    // a +2 side card rewritten by Flip 2&4
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.PLUS_2, -2), tslTex)).toEqual({ label: '-2', texture: 'pcards_neg_p' });
+    // a -4 side card rewritten by Flip 2&4
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.MINUS_4, 4), tslTex)).toEqual({ label: '+4', texture: 'pcards_pos_p' });
+  });
+
+  test('double shows the value it copied; flip keeps its own label', () => {
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_DOUBLE, 5), tslTex)).toEqual({ label: '+5', texture: 'pcards_gold_p' });
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_DOUBLE, -3), tslTex).label).toBe('-3');
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_FLIP_2_4, 0), tslTex)).toEqual({ label: '2&4', texture: 'pcards_gold_p' });
+    expect(getTableCardDisplay(side(TSLConfig, PazaakCards.TSL_TIEBREAKER, -1, true), tslTex).label).toBe('-1');
+  });
+});
+
+describe('wager clamp', () => {
+  test('a player with no credits plays unwagered', () => {
+    expect(clampWager(1, 1, 100, 0)).toBe(0);
+    expect(clampWager(50, 1, 100, 0)).toBe(0);
+  });
+  test('wager is capped by gold and the script maximum, floored at the minimum', () => {
+    expect(clampWager(100, 1, 100, 30)).toBe(30);
+    expect(clampWager(100, 1, 40, 1000)).toBe(40);
+    expect(clampWager(0, 1, 100, 1000)).toBe(1);
+    expect(clampWager(5, 1, 0, 1000)).toBe(0);
   });
 });

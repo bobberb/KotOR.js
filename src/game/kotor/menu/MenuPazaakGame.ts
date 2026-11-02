@@ -5,6 +5,7 @@ import { GameState } from "@/GameState";
 import { GameMenu } from "@/gui";
 import type { GUILabel, GUIButton } from "@/gui";
 import { PazaakTurnState } from "@/enums/minigames/PazaakTurnState";
+import { getTableCardDisplay } from "@/engine/minigames/PazaakRules";
 
 /**
  * MenuPazaakGame class.
@@ -386,11 +387,12 @@ export class MenuPazaakGame extends GameMenu {
           continue;
         };
 
+        const display = getTableCardDisplay(slot, GameState.PazaakManager.GetCardTextures());
         tableCardButton.show();
-        tableCardButton.setFillTextureName(slot.textures[!slot.flipped ? 0 : 1]);
+        tableCardButton.setFillTextureName(display.texture);
 
         tableCardLabel.show();
-        tableCardLabel.setText(slot.modifierLabel);
+        tableCardLabel.setText(display.label);
       }
 
       /**

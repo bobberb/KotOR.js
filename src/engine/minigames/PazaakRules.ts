@@ -134,6 +134,49 @@ export function matchWinner(winCounts: readonly number[], targetWins: number = P
   return -1;
 }
 
+/** Config `type` of main deck cards (side deck cards are type 1). */
+export const PAZAAK_MAIN_CARD_TYPE = 0;
+
+export interface IPazaakCardTextures {
+  positive: string;
+  negative: string;
+}
+
+/**
+ * Label and texture for a card on the table, from its resolved value, so a
+ * card rewritten by a flip card reads (and is coloured) as its new sign.
+ * Flip cards contribute nothing and keep their own label/texture.
+ */
+export function getTableCardDisplay(card: IPazaakCard, textures: IPazaakCardTextures): { label: string, texture: string } {
+  if(card.effect == 'flip'){
+    return { label: card.modifierLabel, texture: card.textures[0] };
+  }
+  const value = card.value ?? card.modifier[0];
+  const isMain = card.type == PAZAAK_MAIN_CARD_TYPE;
+  const label = (value > 0 && !isMain) ? `+${value}` : `${value}`;
+  let texture: string;
+  if(card.effect){
+    texture = card.textures[0];
+  }else if(isMain){
+    texture = value < 0 ? textures.negative : card.textures[0];
+  }else if(card.reversible){
+    texture = card.textures[value < 0 ? 1 : 0];
+  }else{
+    texture = value < 0 ? textures.negative : textures.positive;
+  }
+  return { label, texture };
+}
+
+/**
+ * Clamp a wager to what the player can cover. If they can't afford the
+ * minimum, the match is unwagered (0) rather than a bet they can't pay.
+ */
+export function clampWager(wager: number, minWager: number, maxWager: number, gold: number): number {
+  const cap = Math.min(maxWager, Math.max(0, Math.floor(gold || 0)));
+  if(cap < minWager) return 0;
+  return Math.max(minWager, Math.min(Math.floor(wager || 0), cap));
+}
+
 /**
  * Credits moved to the player at match end. The wager is never deducted up
  * front, so the winner gains the wager and the loser loses it (not 2x).
