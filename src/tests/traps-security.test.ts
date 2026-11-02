@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { afterEach, beforeAll, beforeEach, describe, expect, jest, test } from '@jest/globals';
 
 /**
  * Traps (mines) and locks follow the KotOR d20 skill rules.
@@ -1292,24 +1292,20 @@ describe('effective TrapFlag / TrapOneShot', () => {
     expect(SWTrapRules.attemptDisarm(pc, trap).outcome).toBe('invalid');
   });
 
-  test('GetIsTrapped / GetTrapFlagged / GetNearestTrapToObject agree with the engine', () => {
-    const { GetNearestTrapToObject } = require('@/nwscript/builtins/upstream/perception');
+  test('GetIsTrapped / GetTrapFlagged / GetTrapOneShot agree with the engine', () => {
     const pc = creature({ party: true });
     const bare = bareTrapTrigger();
     const disabled = trapTrigger({ flag: 0 });
     const spent = trapTrigger();
     spent.fireTrap(pc);
-    let nearest: any;
-    state.ModuleObjectManager.GetNearestObject = () => nearest;
-    const nearestTrap = (t: any) => { nearest = t; return GetNearestTrapToObject.action.call({ caller: pc }, [0, pc, 1]); };
 
     expect(routines.GetIsTrapped.kotor.call({}, bare)).toBe(1);
     expect(routines.GetTrapFlagged.kotor.call({}, bare)).toBe(1);
-    expect(nearestTrap(bare)).toBe(bare);
+    expect(routines.GetTrapOneShot.kotor.call({}, bare)).toBe(1);
+    expect(routines.GetTrapOneShot.kotor.call({}, trapTrigger({ oneShot: 0 }))).toBe(0);
     for (const t of [disabled, spent]) {
       expect(routines.GetIsTrapped.kotor.call({}, t)).toBe(0);
       expect(routines.GetTrapFlagged.kotor.call({}, t)).toBe(0);
-      expect(nearestTrap(t)).toBeUndefined();
     }
   });
 });
@@ -1362,5 +1358,103 @@ describe('party membership is PartyManager.party, not isPM', () => {
     expect(member.isPM).toBe(false);
     expect(SWTrapRules.isOwnMine(member, mine)).toBe(true);
     expect(mine.isTrapDetectedBy(member)).toBe(true);
+  });
+});
+
+/*
+ * Round 5 (critic of bf1ab70): routines called the way the VM calls them
+ * (reconciled action map, VM argument order), and detection of traps that
+ * are no longer live.
+ */
+
+describe('trap/lock routines through the reconciled action map, VM argument order', () => {
+  let runtime: ReturnType<typeof harness>;
+  beforeAll(() => { runtime = harness(); });
+  const call = (engine: 'kotor' | 'tsl', id: number, caller: any, args: any[]) =>
+    runtime[engine][id].action.call({ caller }, args);
+
+  test.each(['kotor', 'tsl'] as const)('%s GetNearestTrapToObject(oTarget, nTrapDetected) returns the nearest armed trap', (engine) => {
+    const pc = creature({ party: true, at: [0, 0] });
+    const disabled = trapTrigger({ at: [0.5, 0], flag: 0 });
+    const spent = trapTrigger({ at: [0.7, 0] });
+    spent.fireTrap(pc);
+    const hidden = trapTrigger({ at: [1, 0] });
+    const known = trapTrigger({ at: [3, 0] });
+    known.detectTrap(pc);
+    area.doors = [Object.assign(lockedDoor(1), { trapFlag: true })];
+    area.doors[0].position.set(5, 0, 0);
+    area.placeables = [];
+    disabled.detectTrap(pc);
+
+    expect(call(engine, 488, pc, [pc, 1])).toBe(known);
+    expect(call(engine, 488, pc, [pc, 0])).toBe(hidden);
+    // OBJECT_SELF default resolves to the caller when the VM passes no object
+    expect(call(engine, 488, pc, [undefined, 1])).toBe(known);
+    known.disarmTrap(pc);
+    expect(call(engine, 488, pc, [pc, 1])).toBeUndefined();
+    hidden.disableTrap();
+    expect(call(engine, 488, pc, [pc, 0])).toBe(area.doors[0]);
+    area.doors = [];
+    expect(call(engine, 488, pc, [pc, 0])).toBeUndefined();
+  });
+
+  test.each(['kotor', 'tsl'] as const)('%s the other trap/lock routines read their arguments in VM order', (engine) => {
+    const pc = creature({ party: true });
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE });
+    const trap = trapTrigger({ keyName: 'tk', detectDC: 7, disarmDC: 9, oneShot: 0 });
+    trap.trapCreatorId = enemy.id;
+    const door = lockedDoor(1);
+    door.locked = false;
+    door.lock(pc);
+    door.unlock(enemy);
+
+    expect(call(engine, 349, door, [])).toBe(pc);
+    expect(call(engine, 350, door, [])).toBe(enemy);
+    expect(call(engine, 550, undefined, [trap, pc])).toBe(1);
+    expect(call(engine, 529, undefined, [trap, pc])).toBe(1);
+    expect(call(engine, 529, undefined, [trap, enemy])).toBe(0);
+    expect(call(engine, 486, pc, [pc])).toBe(trap);
+    expect(call(engine, 533, undefined, [trap])).toBe(enemy);
+    expect(call(engine, 534, undefined, [trap])).toBe('tk');
+    expect(call(engine, 532, undefined, [trap])).toBe(0);
+    expect(call(engine, 535, undefined, [trap])).toBe(9);
+    expect(call(engine, 536, undefined, [trap])).toBe(7);
+    expect(call(engine, 551, undefined, [trap])).toBe(1);
+  });
+});
+
+describe('a trap that is not live cannot be detected', () => {
+  test('SetTrapDetectedBy on a disabled trap reveals nothing and returns FALSE', () => {
+    const { SetTrapDisabled } = require('@/nwscript/builtins/upstream/world');
+    const pc = creature({ party: true });
+    const trap = trapTrigger();
+    SetTrapDisabled.action.call({}, [trap]);
+    expect(routines.SetTrapDetectedBy.kotor.call({}, trap, pc)).toBe(0);
+    expect(trap.trapDetected).toBe(false);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trap, pc)).toBe(0);
+    trap.setTrapDetectedBy(pc, true);
+    expect(trap.isTrapDetectedBy(pc)).toBe(false);
+  });
+
+  test('a spent trap forgets who detected it', () => {
+    const pc = creature({ party: true });
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE });
+    const trap = trapTrigger();
+    trap.detectTrap(pc);
+    trap.setTrapDetectedBy(enemy, true);
+    trap.fireTrap(pc);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trap, pc)).toBe(0);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trap, enemy)).toBe(0);
+    expect(routines.SetTrapDetectedBy.kotor.call({}, trap, pc)).toBe(0);
+  });
+
+  test('a TrapFlag 0 trap saved as detected loads undetected', () => {
+    const pc = creature({ party: true });
+    const trap = trapTrigger();
+    trap.detectTrap(pc);
+    trap.trapFlag = false; // disabled without SetTrapDisabled (e.g. toolset/GIT data)
+    const reloaded = reload(trap);
+    expect(reloaded.trapDetected).toBe(false);
+    expect(reloaded.isTrapDetectedBy(pc)).toBe(false);
   });
 });

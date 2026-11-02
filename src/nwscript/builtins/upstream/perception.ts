@@ -92,10 +92,25 @@ export const GetNearestTrapToObject: INWScriptDefAction = {
     name: "GetNearestTrapToObject",
     type: NWScriptDataType.OBJECT,
     args: [NWScriptDataType.OBJECT, NWScriptDataType.INTEGER],
-    action: function(this: NWScriptInstance, args: [number, ModuleObject, number]){
-      const target: any = args[1] ? args[1] : this.caller;
-      if(!target) return undefined;
-      const nearest = GameState.ModuleObjectManager.GetNearestObject(args[0], target, args[2]);
-      return isObjectTrapped(nearest) ? nearest : undefined;
+    // VM argument order is [oTarget, nTrapDetected] (metadata [6,3]).
+    action: function(this: NWScriptInstance, args: [ModuleObject, number]){
+      const target: any = args[0] ? args[0] : this.caller;
+      if(!target?.position) return undefined;
+      const area: any = target.area ?? GameState.module?.area;
+      if(!area) return undefined;
+      const onlyDetected = !!args[1];
+      const candidates: any[] = [...(area.triggers || []), ...(area.doors || []), ...(area.placeables || [])];
+      let nearest: any = undefined;
+      let nearestDistance = Infinity;
+      for(const candidate of candidates){
+        if(!candidate || candidate === target || !candidate.position || !isObjectTrapped(candidate)) continue;
+        if(onlyDetected && !candidate.isTrapDetectedBy?.(target)) continue;
+        const distance = target.position.distanceTo(candidate.position);
+        if(distance < nearestDistance){
+          nearest = candidate;
+          nearestDistance = distance;
+        }
+      }
+      return nearest;
     }
   };

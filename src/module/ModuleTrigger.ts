@@ -254,16 +254,20 @@ export class ModuleTrigger extends ModuleObject {
    * Flag the trap as detected by the detector's faction. It becomes visible
    * (trapDetected, the 'detect' animation in update()) once the party knows it.
    */
-  detectTrap(detector?: ModuleObject){
+  detectTrap(detector?: ModuleObject): boolean {
+    // A disabled, spent or removed trap is no longer there to be found.
+    if(this.type == ModuleTriggerType.TRAP && !SWTrapRules.isLive(this)){ return false; }
     if(detector){
       this.setTrapDetectedBy(detector, true);
     }
     if(!detector || SWTrapRules.isPartyMember(detector)){
       this.trapDetected = true;
     }
+    return true;
   }
 
   setTrapDetectedBy(detector: ModuleObject, detected = true){
+    if(detected && this.type == ModuleTriggerType.TRAP && !SWTrapRules.isLive(this)){ return; }
     super.setTrapDetectedBy(detector, detected);
     if(detector && SWTrapRules.isPartyMember(detector)){
       this.trapDetected = !!detected;
@@ -290,6 +294,7 @@ export class ModuleTrigger extends ModuleObject {
       this.trapDetectable = false;
       this.trapDisarmable = false;
       this.trapDetected = false;
+      this.trapDetectedByFactions.clear();
     }
     this.trapTriggered = true;
     this.triggered = true;
@@ -792,6 +797,11 @@ export class ModuleTrigger extends ModuleObject {
     this.initialized = true;
 
     if(this.type == ModuleTriggerType.TRAP){
+      // A disabled trap (TrapFlag 0) can't be shown as detected, whatever the save says.
+      if(!this.isTrapArmed()){
+        this.trapDetected = false;
+        this.trapDetectedByFactions.clear();
+      }
       const trap = GameState.TwoDAManager.datatables.get('traps')?.rows[this.trapType];
       if(trap){
         this.trapName = GameState.TLKManager.GetStringById(trap.name).Value;

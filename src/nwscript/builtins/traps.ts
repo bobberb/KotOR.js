@@ -87,6 +87,9 @@ export const GetTrapOneShot = defineAction({
   returnType: NWScriptDataType.INTEGER,
   params: [objectParam<ModuleObject>("oTrapObject")] as const,
   kotor(this: NWScriptInstance, oTrapObject) {
+    if (BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleTrigger) && typeof (oTrapObject as any).isTrapOneShot === 'function') {
+      return (oTrapObject as any).isTrapOneShot() ? NW_TRUE : NW_FALSE;
+    }
     if (BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleObject)) {
       return oTrapObject.trapOneShot ? NW_TRUE : NW_FALSE;
     }
@@ -231,7 +234,7 @@ export const SetTrapDetectedBy = defineAction({
   kotor(this: NWScriptInstance, oTrap, oDetector) {
     if (!isTrappable(oTrap) || !BitWise.InstanceOfObject(oDetector, ModuleObjectType.ModuleObject)) return NW_FALSE;
     if (BitWise.InstanceOfObject(oTrap, ModuleObjectType.ModuleTrigger)) {
-      (oTrap as unknown as ModuleTrigger).detectTrap(oDetector);
+      return (oTrap as unknown as ModuleTrigger).detectTrap(oDetector) ? NW_TRUE : NW_FALSE;
     } else {
       oTrap.setTrapDetectedBy(oDetector, true);
     }
