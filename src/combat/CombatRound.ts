@@ -151,7 +151,7 @@ export class CombatRound {
 
     if(this.action){
       const target = this.action.target;
-      const targetCombatRound = target.combatRound;
+      const targetCombatRound = target?.combatRound;
       if(this.action.actionType == CombatActionType.ATTACK){
         combatData.lastAttackTarget = target;
         if(BitWise.InstanceOfObject(owner, ModuleObjectType.ModuleCreature) && BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature)){

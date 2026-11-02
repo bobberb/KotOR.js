@@ -77,6 +77,11 @@ export class ActionCombat extends Action {
         this.owner.actionQueue.unshift(attackAction);
       break;
       case CombatActionType.CAST_SPELL:
+        // Talent casts are object-targeted; an AI passing OBJECT_INVALID gets the action dropped.
+        if(!combatAction.target){
+          combatRound.action = undefined;
+          break;
+        }
         const spellAction = new GameState.ActionFactory.ActionCastSpell();
         spellAction.setParameter(0, ActionParameterType.INT, combatAction.spell ? combatAction.spell.id : 0); //Spell Id
         spellAction.setParameter(1, ActionParameterType.INT, combatAction.spellClassIndex);

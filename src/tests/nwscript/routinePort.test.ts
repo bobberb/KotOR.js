@@ -50,6 +50,15 @@ function harness() {
   return { kotor, tsl, gameState, loadScript, load };
 }
 
+/**
+ * Preserved upstream routines whose body we changed on purpose. The fixture keeps
+ * the upstream hash (it is upstream's record, not ours); the divergence is pinned
+ * by a behavioral test instead. ActionCastFakeSpellAtObject (501): marks its
+ * ActionCastSpell as fake so it plays animations only, with no FP cost or impact
+ * script (src/tests/force-powers.test.ts).
+ */
+const DELIBERATE_DIVERGENCES = new Set([501]);
+
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });
 
@@ -77,6 +86,7 @@ describe("ported action-table preservation", () => {
   test("all preserved bodies match independently extracted upstream AST hashes", () => {
     const printer = ts.createPrinter({ removeComments: true });
     for (const entry of preservation.preserved) {
+      if (DELIBERATE_DIVERGENCES.has(entry.id)) continue;
       const file = ts.createSourceFile(entry.file, fs.readFileSync(path.join(root, entry.file), "utf8"), ts.ScriptTarget.Latest, true);
       let body: ts.Node | undefined;
       function visit(node: ts.Node) {

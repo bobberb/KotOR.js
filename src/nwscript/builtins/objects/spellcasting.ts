@@ -22,6 +22,7 @@ import { BitWise } from "@/utility/BitWise";
 import { Utility } from "@/utility/Utility";
 import { NW_FALSE, NW_TRUE } from "@/nwscript/NWScriptConstants";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
+import type { TalentSpell } from "@/talents/TalentSpell";
 import { defineAction, floatParam, intParam, locationParam, objectParam, stringParam, vectorParam } from "@/nwscript/builtins/actionBuilder";
 export const GetSpellTargetLocation = defineAction({
   id: 222,
@@ -36,9 +37,38 @@ export const GetSpellTargetLocation = defineAction({
     ) {
       return this.talent.oTarget.getLocation();
     }
+    const targetLocation = (this.talent as TalentSpell | undefined)?.targetLocation;
+    if (targetLocation) {
+      return new EngineLocation(targetLocation.x, targetLocation.y, targetLocation.z);
+    }
     return new EngineLocation();
   },
 });
+
+function queueCastSpellAtLocation(
+  this: NWScriptInstance, nSpell: number, lTargetLocation: EngineLocation, nProjectilePathType: number,
+  flags: { cheat?: boolean, instant?: boolean, fake?: boolean },
+) {
+  if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
+  if (!lTargetLocation?.position) return;
+  const action = new GameState.ActionFactory.ActionCastSpell();
+  action.setParameter(0, ActionParameterType.INT, nSpell);
+  action.setParameter(1, ActionParameterType.INT, -1);
+  action.setParameter(2, ActionParameterType.INT, 0);
+  action.setParameter(3, ActionParameterType.INT, 0);
+  action.setParameter(4, ActionParameterType.INT, 0);
+  action.setParameter(5, ActionParameterType.DWORD, -1);
+  action.setParameter(6, ActionParameterType.FLOAT, lTargetLocation.position.x);
+  action.setParameter(7, ActionParameterType.FLOAT, lTargetLocation.position.y);
+  action.setParameter(8, ActionParameterType.FLOAT, lTargetLocation.position.z);
+  action.setParameter(9, ActionParameterType.INT, nProjectilePathType || 0);
+  action.setParameter(10, ActionParameterType.INT, -1);
+  action.setParameter(11, ActionParameterType.INT, -1);
+  action.cheat = !!flags.cheat;
+  action.instant = !!flags.instant;
+  action.fake = !!flags.fake;
+  this.caller.actionQueue.add(action);
+}
 
 export const ActionCastSpellAtLocation = defineAction({
   id: 234,
@@ -54,21 +84,22 @@ export const ActionCastSpellAtLocation = defineAction({
     intParam("bInstantSpell", { optional: true, default: 0 }),
   ] as const,
   kotor(this: NWScriptInstance, nSpell, lTargetLocation, nMetaMagic, bCheat, nProjectilePathType, bInstantSpell) {
-    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
-    const action = new GameState.ActionFactory.ActionCastSpell();
-    action.setParameter(0, ActionParameterType.INT, nSpell);
-    action.setParameter(1, ActionParameterType.INT, -1);
-    action.setParameter(2, ActionParameterType.INT, 0);
-    action.setParameter(3, ActionParameterType.INT, 0);
-    action.setParameter(4, ActionParameterType.INT, 0);
-    action.setParameter(5, ActionParameterType.DWORD, -1);
-    action.setParameter(6, ActionParameterType.FLOAT, lTargetLocation.position.x);
-    action.setParameter(7, ActionParameterType.FLOAT, lTargetLocation.position.y);
-    action.setParameter(8, ActionParameterType.FLOAT, lTargetLocation.position.z);
-    action.setParameter(9, ActionParameterType.INT, nProjectilePathType);
-    action.setParameter(10, ActionParameterType.INT, -1);
-    action.setParameter(11, ActionParameterType.INT, -1);
-    this.caller.actionQueue.add(action);
+    queueCastSpellAtLocation.call(this, nSpell, lTargetLocation, nProjectilePathType, { cheat: !!bCheat, instant: !!bInstantSpell });
+  },
+});
+
+export const ActionCastFakeSpellAtLocation = defineAction({
+  id: 502,
+  name: "ActionCastFakeSpellAtLocation",
+  comment: "502: The action subject will fake casting a spell at lLocation; the conjure and\ncast animations and visuals will occur, nothing else.\n- nSpell\n- lTarget\n- nProjectilePathType: PROJECTILE_PATH_TYPE_*\n",
+  returnType: NWScriptDataType.VOID,
+  params: [
+    intParam("nSpell"),
+    locationParam<EngineLocation>("lTarget"),
+    intParam("nProjectilePathType", { optional: true, default: 0 }),
+  ] as const,
+  kotor(this: NWScriptInstance, nSpell, lTarget, nProjectilePathType) {
+    queueCastSpellAtLocation.call(this, nSpell, lTarget, nProjectilePathType, { fake: true });
   },
 });
 
@@ -106,6 +137,7 @@ export const GetSpellTarget = defineAction({
 export const spellcastingObjectActions = [
   GetSpellTargetLocation,
   ActionCastSpellAtLocation,
+  ActionCastFakeSpellAtLocation,
   GetHasSpell,
   GetSpellTarget,
 ] as const;

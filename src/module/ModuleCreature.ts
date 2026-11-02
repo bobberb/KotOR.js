@@ -2609,16 +2609,19 @@ export class ModuleCreature extends ModuleObject {
 
   getFP() {
     // Mirrors getHP: currentForce is relative to the base pool (forcePoints); max adds bonuses. setFP/addFP/subtractFP all write currentForce.
-    const max = this.maxForcePoints ?? this.forcePoints ?? 0;
-    return (max + (this.currentForce || 0)) - (this.forcePoints || 0);
+    return (this.getMaxFP() + (Number(this.currentForce) || 0)) - (Number(this.forcePoints) || 0);
   }
 
   getMaxFP() {
-    return this.maxForcePoints;
+    const base = Number(this.forcePoints) || 0;
+    const max = Number(this.maxForcePoints);
+    // UTC blueprints have no MaxForcePoints field, and earlier builds saved that absent max as 0.
+    if (!Number.isFinite(max) || (max === 0 && base > 0)) return base;
+    return max;
   }
 
   setFP(nAmount = 0) {
-    let bonus = this.maxForcePoints - this.forcePoints;
+    let bonus = this.getMaxFP() - (Number(this.forcePoints) || 0);
     this.currentForce = nAmount - bonus;
   }
 
@@ -4572,7 +4575,7 @@ export class ModuleCreature extends ModuleObject {
     gff.RootNode.addField(new GFFField(GFFDataType.CEXOLOCSTRING, 'LastName')).setValue(this.template.RootNode.getFieldByLabel('LastName')?.getCExoLocString());
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Listening')).setValue(this.isListening);
 
-    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.maxForcePoints));
+    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.getMaxFP()));
     gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxHitPoints')).setValue(clampShort(this.maxHitPoints));
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Min1HP')).setValue(this.min1HP);
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'MovementRate')).setValue(0);

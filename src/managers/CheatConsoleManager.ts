@@ -1045,20 +1045,21 @@ export class CheatConsoleManager {
     );
   }
 
-  //Refills your character's health and Force points
+  //Refills health and Force points for the controlled character and every party member
   static heal (){
+    const targets = new Set<any>();
     const player = GameState.getCurrentPlayer();
-    if(player){
-      const maxHP = Math.max(player.getMaxHP(), 0);
-      const maxFP = Math.max(player.getMaxFP(), 0);
-
-      player.setHP(maxHP);
-      player.setFP(maxFP);
-
-      return true;
+    if(player) targets.add(player);
+    for(const member of GameState.PartyManager?.party || []){
+      if(member) targets.add(member);
     }
 
-    return false;
+    for(const creature of targets){
+      creature.setHP(Math.max(creature.getMaxHP() || 0, 0));
+      creature.setFP(Math.max(creature.getMaxFP() || 0, 0));
+    }
+
+    return targets.size > 0;
   }
 
   //Reveals the entire map for the area you're in

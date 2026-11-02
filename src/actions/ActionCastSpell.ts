@@ -6,6 +6,7 @@ import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { ActionStatus } from "@/enums/actions/ActionStatus";
 import { ActionType } from "@/enums/actions/ActionType";
 import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
+import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { GameState } from "@/GameState";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
 import type { TalentSpell } from "@/talents/TalentSpell";
@@ -29,6 +30,8 @@ export class ActionCastSpell extends Action {
   cheat: boolean = false;
   /** bInstantSpell from ActionCastSpellAtObject: skip conjure and cast time. Runtime-only, not saved. */
   instant: boolean = false;
+  /** ActionCastFakeSpellAt*: conjure/cast animation and visuals only; no force point gate or cost, no impact script. Runtime-only, not saved. */
+  fake: boolean = false;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -52,6 +55,8 @@ export class ActionCastSpell extends Action {
 
   update(delta: number = 0): ActionStatus {
     this.target = this.getParameter<ModuleObject>(5);
+    // An object target that no longer resolves (destroyed since queueing) fails the cast instead of becoming a location cast.
+    if(!this.target && this.hasTargetObjectId()) return ActionStatus.FAILED;
     const spellId = this.getParameter<number>(0);
     if(!(this.spell instanceof GameState.TalentSpell) || this.spell.id !== spellId){
       this.spell = new GameState.TalentSpell(spellId);
@@ -84,7 +89,8 @@ export class ActionCastSpell extends Action {
     if(!combatRound) return ActionStatus.FAILED;
     if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
 
-    if(!this.cheat && !ActionCastSpell.CanAffordSpell(this.owner, spell)){
+    const paysForcePoints = !this.cheat && !this.fake;
+    if(paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, spell)){
       return ActionStatus.FAILED;
     }
 
@@ -106,15 +112,15 @@ export class ActionCastSpell extends Action {
 
     combatRound.beginCombatRound();
     combatRound.pauseRound(this.owner, combatRound.roundLength);
-    if(!combatRound.roundStarted) return ActionStatus.FAILED;
 
-    if(!this.cheat){
-      const cost = ActionCastSpell.GetSpellForceCost(spell);
-      if(cost > 0) this.owner.subtractFP(cost);
+    if(paysForcePoints){
+      this.owner.subtractFP(ActionCastSpell.GetSpellForceCost(spell));
     }
 
-    this.owner.combatData.lastSpellTarget = this.target;
-    if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
+    if(!this.fake){
+      this.owner.combatData.lastSpellTarget = this.target;
+      if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
+    }
 
     this.startSpellInstance(spell);
     return ActionStatus.COMPLETE;
@@ -122,6 +128,7 @@ export class ActionCastSpell extends Action {
 
   private startSpellInstance(spell: TalentSpell){
     const spellCastInstance = new SpellCastInstance(this.owner, this.target, spell);
+    spellCastInstance.fake = this.fake;
     if(this.instant){
       spellCastInstance.conjureTime = 0;
       spellCastInstance.castTime = 0;
@@ -139,6 +146,11 @@ export class ActionCastSpell extends Action {
     area?.attachSpellInstance(spellCastInstance);
     spellCastInstance.init();
     return spellCastInstance;
+  }
+
+  private hasTargetObjectId(): boolean {
+    const id = this.parameters[5]?.value;
+    return typeof id === 'number' && id > 0 && id !== ModuleObjectConstant.OBJECT_INVALID;
   }
 
   /**

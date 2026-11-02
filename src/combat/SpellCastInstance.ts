@@ -42,6 +42,8 @@ export class SpellCastInstance {
   casthandvisual: string;
   flags: number;
 
+  /** ActionCastFakeSpellAt*: animations and visuals only, no impact script or combat bookkeeping. */
+  fake: boolean = false;
   impacted: boolean = false;
   completed: boolean = false;
   conjureTime: number = 0;
@@ -141,26 +143,8 @@ export class SpellCastInstance {
     if(this.disposed || this.impacted) return;
     this.impacted = true;
 
-    if(this.owner?.combatData){
-      this.owner.combatData.lastForcePowerSuccess = true;
-      // Re-assert: a combat round may have begun (and cleared it) between cast start and impact.
-      this.owner.combatData.lastSpellTarget = this.target;
-    }
-    if(this.target?.combatData){
-      this.target.combatData.lastForcePowerSuccess = true;
-      this.target.combatData.lastSpellAttacker = this.owner;
-    }
-
-    if(this.impactscript){
-      const instance = GameState.NWScript.Load(this.impactscript);
-      if(instance){
-        if(this.spell){
-          this.spell.oCaster = this.owner;
-          this.spell.oTarget = this.target;
-        }
-        instance.talent = this.spell;
-        instance.run(this.owner, 0);
-      }
+    if(!this.fake){
+      this.applyImpact();
     }
 
     if(this.casthandvisual){
@@ -189,6 +173,29 @@ export class SpellCastInstance {
 
     this.projectile?.dispose();
     this.projectile = undefined;
+  }
+
+  private applyImpact(){
+    if(this.owner?.combatData){
+      this.owner.combatData.lastForcePowerSuccess = true;
+      // Re-assert: a combat round may have begun (and cleared it) between cast start and impact.
+      this.owner.combatData.lastSpellTarget = this.target;
+    }
+    if(this.target?.combatData){
+      this.target.combatData.lastForcePowerSuccess = true;
+      this.target.combatData.lastSpellAttacker = this.owner;
+    }
+
+    if(!this.impactscript) return;
+    const instance = GameState.NWScript.Load(this.impactscript);
+    if(!instance) return;
+    if(this.spell){
+      this.spell.oCaster = this.owner;
+      this.spell.oTarget = this.target;
+      this.spell.targetLocation = this.targetLocation.clone();
+    }
+    instance.talent = this.spell;
+    instance.run(this.owner, 0);
   }
 
   dispose(){

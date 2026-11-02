@@ -100,6 +100,8 @@ export class TalentSpell extends TalentObject {
   formmask: number = 0;
 
   nextSpell: TalentSpell;
+  /** Where the last cast of this talent landed; read by GetSpellTargetLocation (covers location casts with no oTarget). */
+  targetLocation: { x: number, y: number, z: number };
 
   constructor( id = 0 ){
     super(id);
