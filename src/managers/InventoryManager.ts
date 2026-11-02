@@ -154,12 +154,12 @@ export class InventoryManager {
     const stored = InventoryManager.storeItem(template, limitOne);
     const module = !options.silent && stored && moduleForItemEvents();
     if(module){
-      module.onItemAcquired(stored.item, options.acquiredFrom, stored.stackSize);
+      module.onItemAcquired(stored, options.acquiredFrom);
     }
-    return stored?.item;
+    return stored;
   }
 
-  private static storeItem(template: GFFObject|ModuleItem, limitOne: boolean): { item: ModuleItem, stackSize: number } | undefined {
+  private static storeItem(template: GFFObject|ModuleItem, limitOne: boolean): ModuleItem | undefined {
 
     let item: ModuleItem;
     if(template instanceof GFFObject){
@@ -193,30 +193,23 @@ export class InventoryManager {
           hasItem.setStackSize(hasItem.getStackSize() + 1);
         }
 
-        return { item: hasItem, stackSize: limitOne ? 1 : itemStackSize };
+        return hasItem;
       }else{
 
         if(limitOne)
           item.setStackSize(1);
 
         InventoryManager.inventory.push(item);
-        return { item, stackSize: item.getStackSize() };
+        return item;
       }
     }
 
   }
 
   static removeItemByResRef(resRef = '', nCount = 1, options: IInventoryRemoveOptions = {}){
-    let item = InventoryManager.getItemByTag(resRef);
+    const item = InventoryManager.getItemByTag(resRef);
     if(item){
-      GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
-      let idx = InventoryManager.inventory.indexOf(item);
-      if(nCount < item.getStackSize()){
-        item.setStackSize( (item.getStackSize() - nCount) || 1 );
-      }else{
-        InventoryManager.inventory.splice(idx, 1);
-      }
-      InventoryManager.itemLost(item, options);
+      InventoryManager.takeFromInventory(item, nCount, options);
     }
   }
 
@@ -224,27 +217,30 @@ export class InventoryManager {
     if(typeof item === 'string'){
       InventoryManager.removeItemByResRef(item, nCount, options);
     }else if(item instanceof GameState.Module.ModuleArea.ModuleItem){
-      let idx = InventoryManager.inventory.indexOf(item);
-      if(idx >= 0){
-        GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
-        if(nCount >= item.getStackSize()){
-          InventoryManager.inventory.splice(idx, 1);
-        }else{
-          item.setStackSize( (item.getStackSize() - nCount) || 1 );
-        }
-        InventoryManager.itemLost(item, options);
-      }else{
-        //Item not in inventory
+      if(InventoryManager.inventory.indexOf(item) >= 0){
+        InventoryManager.takeFromInventory(item, nCount, options);
       }
     }else{
       console.warn('InventoryManager.removeItem() unknown item', item, nCount);
     }
   }
 
-  private static itemLost(item: ModuleItem, options: IInventoryRemoveOptions){
+  private static takeFromInventory(item: ModuleItem, nCount: number, options: IInventoryRemoveOptions){
+    GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
     const module = !options.silent && moduleForItemEvents();
+    let lost = item;
+    if(nCount >= item.getStackSize()){
+      InventoryManager.inventory.splice(InventoryManager.inventory.indexOf(item), 1);
+    }else{
+      // GetModuleItemLost reports what left the party, not the stack that stayed.
+      if(module){
+        lost = item.clone();
+        lost.setStackSize(nCount);
+      }
+      item.setStackSize( (item.getStackSize() - nCount) || 1 );
+    }
     if(module){
-      module.onItemLost(item, options.lostBy || GameState.PartyManager?.party?.[0]);
+      module.onItemLost(lost, options.lostBy || GameState.PartyManager?.party?.[0]);
     }
   }
 

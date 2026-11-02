@@ -28,6 +28,8 @@ export class MenuGameOver extends GameMenu {
     this.gui_resref = 'gameover';
     this.background = '';
     this.voidFill = true;
+    // Escape would drop the player back into a world where the whole party is dead.
+    this.userCanClose = false;
   }
 
   async menuControlInitializer(skipInit: boolean = false) {

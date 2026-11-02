@@ -2292,7 +2292,7 @@ export class ModuleCreature extends ModuleObject {
 
   retrieveInventory() {
     while (this.inventory.length) {
-      GameState.InventoryManager.addItem(this.inventory.pop())
+      GameState.InventoryManager.addItem(this.inventory.pop(), false, { acquiredFrom: this })
     }
   }
 

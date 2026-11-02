@@ -11,9 +11,12 @@ import type { ModuleCreature } from "@/module/ModuleCreature";
  *    the first living member;
  *  - every member is down: Mod_OnPlrDying then Mod_OnPlrDeath run once
  *    (re-armed only after someone is back up). With no OnPlrDeath script the
- *    engine opens the death screen itself;
- *  - members who went down while someone survived get back up at 1 HP once no
- *    living member is in combat and they have been down REVIVE_DELAY seconds.
+ *    engine opens the death screen itself. Once the death screen has been shown
+ *    it is re-opened whenever nothing of it is on screen (closed some other way,
+ *    or Back out of its load-menu fallback) while the party is still down;
+ *  - members who went down while someone survived get back up at 1 HP once the
+ *    fight is over: no survivor in combat, no living hostile within
+ *    HOSTILE_RADIUS of a survivor, and down for REVIVE_DELAY seconds.
  *
  * "Down" is ModuleCreature.isDead() (HP <= 0 without Min1HP); KotOR has no
  * separate dying band.
@@ -28,11 +31,20 @@ export class PartyDeathMonitor {
   /** Lets the death animation finish before a companion gets back up. */
   static readonly REVIVE_DELAY = 3;
 
+  /**
+   * A living hostile this close to a survivor means the fight is still on, even
+   * when the survivor's combat timer lapsed (kiting, Clear All). Conservative
+   * stand-in for KotOR's perception range; not measured against the original.
+   */
+  static readonly HOSTILE_RADIUS = 20;
+
   gameOver: boolean = false;
+  deathScreenRequested: boolean = false;
   downTime: Map<ModuleCreature, number> = new Map();
 
   reset(){
     this.gameOver = false;
+    this.deathScreenRequested = false;
     this.downTime.clear();
   }
 
@@ -47,6 +59,21 @@ export class PartyDeathMonitor {
 
   static isInCombat(creature: ModuleCreature): boolean {
     return !!creature.combatData?.combatState;
+  }
+
+  static hostilesEngaged(living: ModuleCreature[]): boolean {
+    const party = GameState.PartyManager.party;
+    const creatures: ModuleCreature[] = GameState.module?.area?.creatures || [];
+    return creatures.some((creature) =>
+      PartyDeathMonitor.isParticipant(creature) &&
+      !creature.destroyed &&
+      party.indexOf(creature) == -1 &&
+      !PartyDeathMonitor.isDown(creature) &&
+      living.some((member) =>
+        creature.isHostile(member) &&
+        creature.position.distanceTo(member.position) <= PartyDeathMonitor.HOSTILE_RADIUS
+      )
+    );
   }
 
   update(delta = 0){
@@ -65,6 +92,7 @@ export class PartyDeathMonitor {
       return;
     }
     this.gameOver = false;
+    this.deathScreenRequested = false;
 
     const leader = partyManager.party[0];
     if(leader && PartyDeathMonitor.isDown(leader)){
@@ -75,7 +103,12 @@ export class PartyDeathMonitor {
   }
 
   onPartyDefeated(leader: ModuleCreature){
-    if(this.gameOver){ return; }
+    if(this.gameOver){
+      if(this.deathScreenRequested && !GameOver.IsDeathScreenUp()){
+        void GameOver.OpenDeathScreen();
+      }
+      return;
+    }
     this.gameOver = true;
     this.downTime.clear();
 
@@ -95,7 +128,7 @@ export class PartyDeathMonitor {
   }
 
   updateRevive(delta: number, party: ModuleCreature[], living: ModuleCreature[]){
-    const inCombat = living.some(PartyDeathMonitor.isInCombat);
+    const fightOn = living.some(PartyDeathMonitor.isInCombat) || PartyDeathMonitor.hostilesEngaged(living);
     for(const creature of party){
       if(!PartyDeathMonitor.isDown(creature)){
         this.downTime.delete(creature);
@@ -103,7 +136,7 @@ export class PartyDeathMonitor {
       }
       const downFor = (this.downTime.get(creature) || 0) + delta;
       this.downTime.set(creature, downFor);
-      if(!inCombat && downFor >= PartyDeathMonitor.REVIVE_DELAY){
+      if(!fightOn && downFor >= PartyDeathMonitor.REVIVE_DELAY){
         PartyDeathMonitor.revive(creature);
         this.downTime.delete(creature);
       }

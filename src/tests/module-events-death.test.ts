@@ -6,15 +6,16 @@ import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globa
  * Before this suite Module loaded Mod_OnPlrDeath / Mod_OnAcquirItem / Mod_OnHeartbeat
  * / Mod_OnUsrDefined and friends but only ever ran OnModLoad and OnClientEnter;
  * a dead party leader kept control of a corpse and a wiped party stood there
- * forever; PopUpDeathGUIPanel, GetModuleItemAcquiredFrom, GetModuleItemLost* and
- * GetItemActivated* were diagnostic stubs; SetLocal* on GetModule() threw and the
- * module's SWVarTable and Mod_Tokens were saved empty.
+ * forever; PopUpDeathGUIPanel, StartCreditSequence, GetModuleItemAcquiredFrom,
+ * GetModuleItemLost* and GetItemActivated* were diagnostic stubs; SetLocal* on
+ * GetModule() threw and the module's SWVarTable and Mod_Tokens were saved empty.
  *
  * Drives the real Module, PartyDeathMonitor, PartyManager, InventoryManager,
- * ModuleCreature, ModulePlaceable, the MenuGameOver classes and the NWScript
- * routine bodies (through buildRuntimeAction, i.e. with the VM's argument
- * inflation). Module scripts are stand-ins whose run() calls those routines,
- * which is what a compiled .ncs would do.
+ * ModuleCreature, ModulePlaceable, ModuleItem equip paths, SaveGame inventory
+ * restore, ActionGiveItem/ActionTakeItem, MenuStore purchases, the MenuGameOver
+ * and MenuCredits classes and the NWScript routine bodies (through
+ * buildRuntimeAction, i.e. with the VM's argument inflation). Module scripts are
+ * stand-ins whose run() calls those routines, which is what a compiled .ncs does.
  */
 
 jest.mock('@/GameState', () => ({ GameState: {} }));
@@ -22,6 +23,7 @@ jest.mock('@/utility/GameFileSystem', () => ({ GameFileSystem: {} }));
 jest.mock('@/engine/CurrentGame', () => ({ CurrentGame: { WriteFile: jest.fn(), gameinprogress_dir: '/nonexistent' } }));
 jest.mock('@/loaders/ResourceLoader', () => ({ ResourceLoader: {} }));
 jest.mock('@/loaders', () => ({ MDLLoader: {}, ResourceLoader: {}, TextureLoader: { textures: new Map() } }));
+jest.mock('@/KotOR', () => ({ ResourceTypes: (jest.requireActual('@/resource/ResourceTypes') as any).ResourceTypes }));
 jest.mock('@/odyssey', () => ({
   OdysseyModel: class {}, OdysseyModelAnimation: class {}, OdysseyWalkMesh: class {},
 }));
@@ -31,28 +33,51 @@ jest.mock('@/three/odyssey', () => {
     OdysseyModel3D: class {}, OdysseyObject3D: class extends THREE.Object3D {}, OdysseyLightsaberEffect: class {},
   };
 });
+jest.mock('@/three/odyssey/OdysseyTexture', () => ({ OdysseyTexture: class {} }));
 jest.mock('@/engine/TextSprite3D', () => {
   const THREE = jest.requireActual('three') as typeof import('three');
   return { TextSprite3D: class { container = new THREE.Object3D(); setColor() {} } };
 });
 jest.mock('@/module/ModuleArea', () => ({ ModuleArea: class {} }));
+// The '@/module' barrel drags in the renderer; MenuStore only needs these three.
+jest.mock('@/module', () => ({
+  ModuleCreature: (jest.requireActual('@/module/ModuleCreature') as any).ModuleCreature,
+  ModuleItem: (jest.requireActual('@/module/ModuleItem') as any).ModuleItem,
+  ModuleStore: class {},
+}));
 jest.mock('@/nwscript/NWScript', () => ({ NWScript: class {} }));
 jest.mock('@/nwscript/NWScriptInstance', () => ({ NWScriptInstance: class {} }));
 jest.mock('@/engine/CollisionManager', () => ({ CollisionManager: class {} }));
 jest.mock('@/combat', () => ({ CombatRound: class {}, CombatRoundAction: class {} }));
-// The GUI layer is browser-only; GameMenu is reduced to the fields the menus read.
-jest.mock('@/gui', () => ({ GameMenu: class { tGuiPanel: any; selectedControl: any; gui_resref = ''; background = ''; voidFill = false; async menuControlInitializer() {} } }));
+// The GUI layer is browser-only; GameMenu keeps the menu-stack contract the menus rely on.
+jest.mock('@/gui', () => ({
+  GameMenu: class {
+    tGuiPanel: any; selectedControl: any; manager: any; gui_resref = ''; background = ''; voidFill = false; userCanClose = true;
+    async menuControlInitializer() {}
+    open() { this.manager.Add(this); }
+    close() { this.manager.Remove(this); }
+    update() {}
+  },
+}));
 
 import { GameState } from '@/GameState';
+import { GameFileSystem } from '@/utility/GameFileSystem';
 import { Module } from '@/module/Module';
 import { PartyDeathMonitor } from '@/module/PartyDeathMonitor';
 import { ModuleCreature } from '@/module/ModuleCreature';
 import { ModulePlaceable } from '@/module/ModulePlaceable';
+import { ModuleItem } from '@/module/ModuleItem';
 import { PartyManager } from '@/managers/PartyManager';
 import { InventoryManager } from '@/managers/InventoryManager';
 import { GameOver } from '@/engine/GameOver';
+import { SaveGame } from '@/engine/SaveGame';
+import { ActionGiveItem } from '@/actions/ActionGiveItem';
+import { ActionTakeItem } from '@/actions/ActionTakeItem';
+import { ActionStatus } from '@/enums/actions/ActionStatus';
 import { MenuGameOver as K1MenuGameOver } from '@/game/kotor/menu/MenuGameOver';
 import { MenuGameOver as TSLMenuGameOver } from '@/game/tsl/menu/MenuGameOver';
+import { MenuCredits } from '@/game/kotor/menu/MenuCredits';
+import { MenuStore } from '@/game/kotor/menu/MenuStore';
 import { buildRuntimeAction } from '@/nwscript/builtins/actionBuilder';
 import * as moduleRoutines from '@/nwscript/builtins/objects/module';
 import * as localVarRoutines from '@/nwscript/builtins/localvars';
@@ -60,6 +85,7 @@ import * as eventRoutines from '@/nwscript/builtins/events';
 import { GetItemActivated, GetItemActivator } from '@/nwscript/builtins/missing';
 import { GetModuleItemAcquired } from '@/nwscript/builtins/upstream/inventory';
 import { ModuleObjectScript } from '@/enums/module/ModuleObjectScript';
+import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { MenuSaveLoadMode } from '@/enums/gui/MenuSaveLoadMode';
 import { EngineMode } from '@/enums/engine/EngineMode';
 import { GFFObject } from '@/resource/GFFObject';
@@ -112,7 +138,7 @@ const kill = (c: ModuleCreature) => { c.currentHitPoints = 0; };
 /** A running module: events are processed, the area and calendar are inert. */
 function runningModule(): Module {
   const module = new Module();
-  module.area = { update: jest.fn(), updatePaused: jest.fn() } as any;
+  module.area = { update: jest.fn(), updatePaused: jest.fn(), creatures: [] } as any;
   module.timeManager = { update: jest.fn(), pauseDay: 0, pauseTime: 0 } as any;
   module.readyToProcessEvents = true;
   state.module = module;
@@ -126,8 +152,13 @@ function tickFor(module: Module, seconds: number, step = 0.25) {
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 class FakeItem {
+  objectType = ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem;
   stack: number;
-  constructor(public tag: string, stack = 1, public stackable = false) { this.stack = stack; }
+  tag: string;
+  constructor(tagOrTemplate: string | GFFObject, stack = 1, public stackable = false) {
+    this.tag = typeof tagOrTemplate === 'string' ? tagOrTemplate : tagOrTemplate.RootNode.getFieldByLabel('Tag').getValue();
+    this.stack = stack;
+  }
   initProperties() {}
   load() {}
   getStackSize() { return this.stack; }
@@ -135,9 +166,31 @@ class FakeItem {
   getBaseItemId() { return 1; }
   getTag() { return this.tag; }
   canStackWith(other: any) { return this.stackable && other instanceof FakeItem && other.tag === this.tag; }
+  clone() { return new FakeItem(this.tag, 1, this.stackable); }
 }
 
-let deathMenu: { tGuiPanel: any; open: jest.Mock };
+/** A minimal MenuManager: the real menu stack contract (Add hides nothing, Remove pops). */
+function menuManager() {
+  const manager: any = {
+    activeMenus: [] as any[],
+    Add(menu: any) { if (manager.activeMenus.indexOf(menu) == -1) manager.activeMenus.push(menu); },
+    Remove(menu: any) { const i = manager.activeMenus.indexOf(menu); if (i >= 0) manager.activeMenus.splice(i, 1); },
+    MainMenu: { Start: jest.fn() },
+  };
+  manager.MenuSaveLoad = { mode: undefined as any, manager, open: jest.fn(function (this: any) { manager.Add(this); }), close() { manager.Remove(this); } };
+  manager.MenuGameOver = undefined;
+  manager.GetMenuGameOver = jest.fn(async () => {
+    if (!manager.MenuGameOver) {
+      const menu: any = new K1MenuGameOver();
+      menu.manager = manager;
+      menu.tGuiPanel = {};
+      jest.spyOn(menu, 'open');
+      manager.MenuGameOver = menu;
+    }
+    return manager.MenuGameOver;
+  });
+  return manager;
+}
 
 beforeEach(() => {
   jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -153,20 +206,13 @@ beforeEach(() => {
   state.UINotificationManager = { EnableUINotificationIconType: jest.fn() };
   state.SWRuleSet = { skills: [], ranges: [], portraits: [], feats: [], classes: [] };
   state.ModuleObjectManager = { AddObjectById: jest.fn(), GetNextPlayerId: jest.fn(() => 1), GetObjectById: jest.fn() };
-  state.FactionManager = { factions: new Map(), AddCreatureToFaction: jest.fn(), Export: jest.fn(async () => {}) };
+  state.FactionManager = { factions: new Map(), AddCreatureToFaction: jest.fn(), Export: jest.fn(async () => {}), IsHostile: () => false };
   state.AppearanceManager = { GetCreatureAppearanceById: (): undefined => undefined };
   state.ActionFactory = { FromStruct: jest.fn(() => undefined) };
   state.TwoDAManager = { datatables: new Map() };
   state.GetDebugState = () => false;
-
-  deathMenu = { tGuiPanel: {}, open: jest.fn() };
-  state.MenuManager = {
-    activeMenus: [] as any[],
-    GetMenuGameOver: jest.fn(async () => deathMenu),
-    MenuSaveLoad: { mode: undefined as any, open: jest.fn() },
-    MainMenu: { Start: jest.fn() },
-  };
-  GameOver.creditsInProgress = false;
+  state.MenuManager = menuManager();
+  GameOver.opening = undefined;
 
   PartyManager.party = [];
   PartyManager.CurrentMembers = [];
@@ -194,17 +240,22 @@ describe('party death', () => {
     expect(state.currentLeader).toBe(bastila);
     expect(death.runs).toHaveLength(0);
     expect(dying.runs).toHaveLength(0);
-    expect(deathMenu.open).not.toHaveBeenCalled();
+    expect(state.MenuManager.GetMenuGameOver).not.toHaveBeenCalled();
   });
 
-  test('the whole party down: OnPlrDeath runs exactly once and PopUpDeathGUIPanel opens the death menu', async () => {
+  test('the whole party down: Dying then Death run exactly once, each told who died, and PopUpDeathGUIPanel opens the death menu', async () => {
     const module = runningModule();
-    let lastDied: any;
+    const seen: any = {};
+    const dying = stubScript((instance) => {
+      seen.dyingEntering = instance.enteringObject;
+      seen.dyingLastDying = call(moduleRoutines.GetLastPlayerDying, instance);
+      seen.dyingLastDied = call(moduleRoutines.GetLastPlayerDied, instance);
+    });
     const death = stubScript((instance) => {
-      lastDied = call(moduleRoutines.GetLastPlayerDied, instance);
+      seen.deathEntering = instance.enteringObject;
+      seen.deathLastDied = call(moduleRoutines.GetLastPlayerDied, instance);
       call(moduleRoutines.PopUpDeathGUIPanel, instance, PartyManager.party[0], 0, 0, 0, '');
     });
-    const dying = stubScript();
     module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = death.script;
     module.scripts[ModuleObjectScript.ModuleOnPlayerDying] = dying.script;
     const pc = creature('pc');
@@ -219,8 +270,14 @@ describe('party death', () => {
     expect(dying.runs).toHaveLength(1);
     expect(death.runs).toHaveLength(1);
     expect(death.runs[0].caller).toBe(module.area);
-    expect(lastDied).toBe(pc);
-    expect(deathMenu.open).toHaveBeenCalledTimes(1);
+    expect(seen.dyingEntering === pc).toBe(true);
+    expect(seen.dyingLastDying === pc).toBe(true);
+    expect(seen.dyingLastDied).toBeUndefined();
+    expect(seen.deathEntering === pc).toBe(true);
+    expect(seen.deathLastDied === pc).toBe(true);
+    const menu = state.MenuManager.MenuGameOver;
+    expect(menu.open).toHaveBeenCalledTimes(1);
+    expect(state.MenuManager.activeMenus).toEqual([menu]);
   });
 
   test('a module without an OnPlrDeath script still gets the death menu, once', async () => {
@@ -233,7 +290,90 @@ describe('party death', () => {
     await flush();
 
     expect(state.MenuManager.GetMenuGameOver).toHaveBeenCalledTimes(1);
-    expect(deathMenu.open).toHaveBeenCalledTimes(1);
+    expect(state.MenuManager.MenuGameOver.open).toHaveBeenCalledTimes(1);
+  });
+
+  test('the death screen cannot be closed with Escape, and comes back if it is closed anyway', async () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    kill(pc);
+    module.tick(0.1);
+    await flush();
+    const menu = state.MenuManager.MenuGameOver;
+    expect(menu.userCanClose).toBe(false);
+    expect(new TSLMenuGameOver().userCanClose).toBe(false);
+
+    menu.close();
+    module.tick(0.1);
+    await flush();
+
+    expect(state.MenuManager.activeMenus).toEqual([menu]);
+    expect(menu.open).toHaveBeenCalledTimes(2);
+  });
+
+  test('Back out of the load menu returns to the death screen, never the dead world', async () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    kill(pc);
+    module.tick(0.1);
+    await flush();
+
+    GameOver.OpenLoadGame();
+    module.tick(0.1);
+    await flush();
+    expect(state.MenuManager.MenuGameOver.open).toHaveBeenCalledTimes(1);
+
+    state.MenuManager.MenuSaveLoad.close();
+    state.MenuManager.MenuGameOver.close();
+    module.tick(0.1);
+    await flush();
+    expect(state.MenuManager.activeMenus).toEqual([state.MenuManager.MenuGameOver]);
+  });
+
+  test('with the game over GUI missing, the load menu stands in and keeps coming back', async () => {
+    const module = runningModule();
+    const missing: any = { tGuiPanel: null, open: jest.fn() };
+    state.MenuManager.GetMenuGameOver = jest.fn(async () => missing);
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    kill(pc);
+    module.tick(0.1);
+    await flush();
+
+    expect(missing.open).not.toHaveBeenCalled();
+    expect(state.MenuManager.MenuSaveLoad.mode).toBe(MenuSaveLoadMode.LOADGAME);
+    expect(state.MenuManager.MenuSaveLoad.open).toHaveBeenCalledTimes(1);
+
+    // While it is up, it is the death screen: not stacked again every tick.
+    tickFor(module, 1);
+    await flush();
+    expect(state.MenuManager.MenuSaveLoad.open).toHaveBeenCalledTimes(1);
+
+    state.MenuManager.MenuSaveLoad.close();
+    module.tick(0.1);
+    await flush();
+    expect(state.MenuManager.MenuSaveLoad.open).toHaveBeenCalledTimes(2);
+  });
+
+  test('a module death script that handles death itself is not overridden by the death screen', async () => {
+    const module = runningModule();
+    module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = stubScript().script;
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    kill(pc);
+    tickFor(module, 5);
+    await flush();
+    expect(state.MenuManager.GetMenuGameOver).not.toHaveBeenCalled();
+  });
+
+  test('the death screen is built once even if asked for again while it loads', async () => {
+    runningModule();
+    await Promise.all([GameOver.OpenDeathScreen(), GameOver.OpenDeathScreen()]);
+    await GameOver.OpenDeathScreen();
+    expect(state.MenuManager.GetMenuGameOver).toHaveBeenCalledTimes(2);
+    expect(state.MenuManager.MenuGameOver.open).toHaveBeenCalledTimes(1);
   });
 
   test('an OnPlrDying script that saves someone cancels the death', () => {
@@ -251,14 +391,53 @@ describe('party death', () => {
     expect(pc.isDead()).toBe(false);
   });
 
-  test('the death screen falls back to the load menu when the game over GUI is missing', async () => {
-    deathMenu.tGuiPanel = null;
-    expect(await GameOver.OpenDeathScreen()).toBe(false);
-    expect(deathMenu.open).not.toHaveBeenCalled();
-    expect(state.MenuManager.MenuSaveLoad.mode).toBe(MenuSaveLoadMode.LOADGAME);
-    expect(state.MenuManager.MenuSaveLoad.open).toHaveBeenCalledTimes(1);
+  test('after the party is back up, a second wipe runs the death script again', () => {
+    const module = runningModule();
+    const death = stubScript();
+    module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = death.script;
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+
+    kill(pc);
+    tickFor(module, 2);
+    pc.currentHitPoints = 10;
+    module.tick(0.25);
+    kill(pc);
+    tickFor(module, 2);
+
+    expect(death.runs).toHaveLength(2);
   });
 
+  test('members with no hit points loaded yet are not a wiped party', () => {
+    const module = runningModule();
+    const death = stubScript();
+    module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = death.script;
+    const loading = creature('pc', 0);
+    loading.maxHitPoints = 0;
+    loading.hitPoints = 0;
+    PartyManager.party = [loading];
+
+    tickFor(module, 2);
+
+    expect(death.runs).toHaveLength(0);
+  });
+
+  test('nothing is judged during a minigame', () => {
+    const module = runningModule();
+    const death = stubScript();
+    module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = death.script;
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    state.Mode = EngineMode.MINIGAME;
+
+    kill(pc);
+    tickFor(module, 2);
+
+    expect(death.runs).toHaveLength(0);
+  });
+});
+
+describe('companion revival', () => {
   test('a companion who fell gets back up at 1 HP once combat is over', () => {
     const module = runningModule();
     const pc = creature('pc');
@@ -278,6 +457,66 @@ describe('party death', () => {
     expect(PartyManager.party[0]).toBe(pc);
   });
 
+  test('out of combat they stay down for the revive delay first', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+
+    kill(carth);
+    tickFor(module, 2.75);
+    expect(carth.isDead()).toBe(true);
+    tickFor(module, 0.25);
+    expect(carth.getHP()).toBe(1);
+  });
+
+  test('a survivor who stopped fighting (kiting, Clear All) does not revive anyone next to a live hostile', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    const sith = creature('sith');
+    PartyManager.party = [pc, carth];
+    (module.area as any).creatures = [sith];
+    state.FactionManager.IsHostile = (a: any, b: any) => a === sith || b === sith;
+    sith.position.set(10, 0, 0);
+
+    kill(carth);
+    tickFor(module, 10);
+    expect(carth.isDead()).toBe(true);
+
+    sith.position.set(PartyDeathMonitor.HOSTILE_RADIUS + 5, 0, 0);
+    module.tick(0.25);
+    expect(carth.getHP()).toBe(1);
+  });
+
+  test('party members standing in the area never count as the enemy', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+    (module.area as any).creatures = [pc, carth];
+    state.FactionManager.IsHostile = () => true;
+
+    kill(carth);
+    tickFor(module, 3.25);
+    expect(carth.getHP()).toBe(1);
+  });
+
+  test('a dead hostile nearby does not hold the revive', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    const sith = creature('sith');
+    kill(sith);
+    PartyManager.party = [pc, carth];
+    (module.area as any).creatures = [sith];
+    state.FactionManager.IsHostile = (a: any, b: any) => a === sith || b === sith;
+
+    kill(carth);
+    tickFor(module, 3.25);
+    expect(carth.getHP()).toBe(1);
+  });
+
   test('a fallen leader is revived after combat too, but control stays with the survivor', () => {
     const module = runningModule();
     const pc = creature('pc');
@@ -289,6 +528,44 @@ describe('party death', () => {
 
     expect(PartyManager.party[0]).toBe(carth);
     expect(pc.getHP()).toBe(1);
+  });
+
+  test('time down is forgotten when a member leaves the party', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+    pc.combatData.combatState = true;
+    kill(carth);
+    tickFor(module, 2.75);
+
+    PartyManager.party = [pc];
+    module.tick(0.25);
+    PartyManager.party = [pc, carth];
+    pc.combatData.combatState = false;
+    tickFor(module, 0.5);
+    expect(carth.isDead()).toBe(true);
+    tickFor(module, 2.75);
+    expect(carth.getHP()).toBe(1);
+  });
+
+  test('a wipe resets time down, so a member downed before it waits the full delay after a scripted rescue', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+    pc.combatData.combatState = true;
+    kill(carth);
+    tickFor(module, 10);
+    kill(pc);
+    module.tick(0.25);
+
+    pc.currentHitPoints = 10;
+    pc.combatData.combatState = false;
+    tickFor(module, 1);
+    expect(carth.isDead()).toBe(true);
+    tickFor(module, 2.25);
+    expect(carth.getHP()).toBe(1);
   });
 
   test('nobody gets back up when the whole party is down', () => {
@@ -357,73 +634,191 @@ describe('death menu', () => {
     expect(state.MenuManager.MainMenu.Start).toHaveBeenCalledTimes(1);
   });
 
-  test('EndGame returns to the main menu', () => {
+  test('EndGame from a script inside Module.tick leaves the module in place for the rest of the frame', async () => {
+    const module = runningModule();
+    const dispose = jest.spyOn(module, 'dispose').mockImplementation(() => {});
+    state.UnloadModule = jest.fn();
+    state.NWScript = { Reload: jest.fn() };
+    state.controls = { initKeys: jest.fn() };
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript((instance) => call(moduleRoutines.EndGame, instance, 0)).script;
+
+    tickFor(module, 6);
+    // What GameState.UpdateIngame reads after module.tick in the same frame.
+    expect(() => state.module.area.update).not.toThrow();
+    expect(state.MenuManager.MainMenu.Start).not.toHaveBeenCalled();
+
+    await flush();
+    expect(dispose).toHaveBeenCalled();
+    expect(state.module).toBeUndefined();
+    expect(state.MenuManager.MainMenu.Start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('credits', () => {
+  function creditsMenu(lines?: string[]) {
+    const credits: any = new MenuCredits();
+    credits.manager = state.MenuManager;
+    credits.tGuiPanel = {};
+    const items: string[] = [];
+    credits.LB_CREDITS = {
+      scroll: 0, maxScroll: 100, updateList: jest.fn(),
+      mutate(fn: any) { fn({ clear: () => items.splice(0), add: (line: string) => items.push(line) }); },
+    };
+    state.MenuManager.MenuCredits = credits;
+    state.MenuManager.GetMenuCredits = jest.fn(async () => credits);
+    return { credits, items };
+  }
+
+  /** What GameState.Update does each frame for the open menus. */
+  async function frames(seconds: number, step = 0.5) {
+    for (let t = 0; t < seconds - 1e-9; t += step) {
+      for (const menu of [...state.MenuManager.activeMenus]) menu.update(step);
+      await flush();
+    }
+  }
+
+  test('an ending script that waits for the credits gets to EndGame', async () => {
+    const { credits } = creditsMenu();
     state.module = undefined;
     state.UnloadModule = jest.fn();
     state.NWScript = { Reload: jest.fn() };
     state.controls = { initKeys: jest.fn() };
+
+    call(moduleRoutines.StartCreditSequence, {}, 0);
+    await flush();
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+    expect(state.MenuManager.activeMenus).toEqual([credits]);
+
+    // The ending script: poll until the crawl is over, then end the game.
+    let polls = 0;
+    while (call(moduleRoutines.IsCreditSequenceInProgress, {}) && polls < 1000) {
+      await frames(1);
+      polls++;
+    }
+    expect(polls).toBe(MenuCredits.MIN_DURATION);
+    expect(state.MenuManager.activeMenus).toEqual([]);
     call(moduleRoutines.EndGame, {}, 0);
+    await flush();
     expect(state.MenuManager.MainMenu.Start).toHaveBeenCalledTimes(1);
   });
 
-  test('StartCreditSequence opens the credits and IsCreditSequenceInProgress tracks them', async () => {
-    const credits: any = { tGuiPanel: {}, open: jest.fn(() => state.MenuManager.activeMenus.push(credits)) };
-    state.MenuManager.GetMenuCredits = jest.fn(async () => credits);
-    state.MenuManager.MenuCredits = credits;
+  test('the crawl lists the credits 2DA lines, scrolls to the end and lasts per line', async () => {
+    state.TwoDAManager.datatables.set('credits', { rows: { 0: { text: 'Producer' }, 1: { text: '****', strref: '42' }, 2: { text: '****', strref: '****' } } });
+    state.TLKManager = { GetStringById: (id: number) => ({ Value: `tlk${id}` }) };
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`);
+    expect(MenuCredits.GetCreditLines()).toEqual(['Producer', 'tlk42']);
+
+    const { credits, items } = creditsMenu();
+    credits.startSequence(lines);
+    expect(items).toEqual(lines);
+    expect(credits.duration).toBe(30);
+    await frames(15);
+    expect(credits.LB_CREDITS.scroll).toBe(50);
+    await frames(15);
+    expect(credits.inProgress).toBe(false);
+    expect(credits.LB_CREDITS.scroll).toBe(100);
+  });
+
+  test('skipping with Escape ends the sequence', async () => {
+    const { credits } = creditsMenu();
+    credits.startSequence([]);
+    credits.close();
     expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
-    call(moduleRoutines.StartCreditSequence, {}, 0);
-    await flush();
-    expect(credits.open).toHaveBeenCalledTimes(1);
-    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+  });
+
+  test('without a credits GUI nothing claims to be in progress', async () => {
+    const { credits } = creditsMenu();
+    credits.tGuiPanel = null;
+    expect(await GameOver.StartCreditSequence()).toBe(false);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
   });
 });
 
 describe('module item events', () => {
+  function acquireRecorder(module: Module) {
+    const seen: Array<{ item: any; from: any }> = [];
+    module.scripts[ModuleObjectScript.ModuleOnPlayerAcquireItem] = stubScript((instance) => {
+      seen.push({ item: call(GetModuleItemAcquired, instance), from: call(moduleRoutines.GetModuleItemAcquiredFrom, instance) });
+    }).script;
+    return seen;
+  }
+
+  function lossRecorder(module: Module) {
+    const seen: Array<{ item: any; by: any }> = [];
+    module.scripts[ModuleObjectScript.ModuleOnUnAcquireItem] = stubScript((instance) => {
+      seen.push({ item: call(moduleRoutines.GetModuleItemLost, instance), by: call(moduleRoutines.GetModuleItemLostBy, instance) });
+    }).script;
+    return seen;
+  }
+
   test('acquiring an item fires OnAcquireItem once, inside which GetModuleItemAcquired(From) are right', () => {
     const module = runningModule();
-    const seen: any[] = [];
-    const onAcquire = stubScript((instance) => {
-      seen.push([call(GetModuleItemAcquired, instance), call(moduleRoutines.GetModuleItemAcquiredFrom, instance)]);
-    });
-    module.scripts[ModuleObjectScript.ModuleOnPlayerAcquireItem] = onAcquire.script;
-    const pc = creature('pc');
+    const seen = acquireRecorder(module);
+    PartyManager.party = [creature('pc')];
     const giver = creature('trader');
-    PartyManager.party = [pc];
     const item = new FakeItem('g_w_blstrpstl001');
 
     const stored = InventoryManager.addItem(item as any, false, { acquiredFrom: giver });
 
     expect(stored).toBe(item);
-    expect(onAcquire.runs).toHaveLength(1);
     // Identity checks: a creature holds Three.js buffers jest cannot diff.
     expect(seen).toHaveLength(1);
-    expect(seen[0][0] === item).toBe(true);
-    expect(seen[0][1] === giver).toBe(true);
+    expect(seen[0].item === item).toBe(true);
+    expect(seen[0].from === giver).toBe(true);
   });
 
-  test('restoring a savegame inventory, unequipping and a module that is still loading fire nothing', () => {
+  test('a module that is still loading fires nothing', () => {
     const module = runningModule();
-    const onAcquire = stubScript();
-    const onLose = stubScript();
-    module.scripts[ModuleObjectScript.ModuleOnPlayerAcquireItem] = onAcquire.script;
-    module.scripts[ModuleObjectScript.ModuleOnUnAcquireItem] = onLose.script;
-
-    const equipped = new FakeItem('armor');
-    InventoryManager.addItem(equipped as any, false, { silent: true });
-    InventoryManager.removeItem(equipped as any, 1, { silent: true });
+    const seen = acquireRecorder(module);
     module.readyToProcessEvents = false;
     InventoryManager.addItem(new FakeItem('loading') as any);
-
-    expect(onAcquire.runs).toHaveLength(0);
-    expect(onLose.runs).toHaveLength(0);
+    expect(seen).toHaveLength(0);
   });
 
-  test('losing an item fires OnUnAcquireItem with GetModuleItemLost / GetModuleItemLostBy', () => {
+  test('restoring a savegame inventory is not an acquisition', async () => {
     const module = runningModule();
-    const seen: any[] = [];
-    module.scripts[ModuleObjectScript.ModuleOnUnAcquireItem] = stubScript((instance) => {
-      seen.push([call(moduleRoutines.GetModuleItemLost, instance), call(moduleRoutines.GetModuleItemLostBy, instance)]);
-    }).script;
+    const seen = acquireRecorder(module);
+    const inventory = new GFFObject();
+    const entry = new GFFStruct();
+    entry.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue('g_a_class4001');
+    inventory.RootNode.addField(new GFFField(GFFDataType.LIST, 'ItemList')).addChildStruct(entry);
+    (GameFileSystem as any).readFile = jest.fn(async () => inventory.getExportBuffer());
+
+    await (Object.create(SaveGame.prototype) as SaveGame).loadInventory();
+
+    expect(InventoryManager.inventory.map((i: any) => i.tag)).toEqual(['g_a_class4001']);
+    expect(seen).toHaveLength(0);
+  });
+
+  test('equipping and unequipping move items without OnUnAcquire / OnAcquire', () => {
+    const module = runningModule();
+    const acquired = acquireRecorder(module);
+    const lost = lossRecorder(module);
+    state.Module = { ModuleArea: { ModuleItem } };
+    for (const name of ['initProperties', 'load', 'setStackSize'] as const) {
+      jest.spyOn(ModuleItem.prototype, name as any).mockImplementation(() => {});
+    }
+    jest.spyOn(ModuleItem.prototype, 'getStackSize').mockReturnValue(1);
+    jest.spyOn(ModuleItem.prototype, 'getBaseItemId').mockReturnValue(1);
+    jest.spyOn(ModuleItem.prototype, 'isDisguise').mockReturnValue(false);
+    const pc = creature('pc');
+    jest.spyOn(pc, 'removeEffectsByCreator').mockImplementation(() => {});
+    PartyManager.party = [pc];
+    const armor = Object.create(ModuleItem.prototype) as ModuleItem;
+    InventoryManager.inventory = [armor];
+
+    armor.onEquip(pc);
+    expect(InventoryManager.inventory).toHaveLength(0);
+    armor.onUnEquip(pc);
+    expect(InventoryManager.inventory).toHaveLength(1);
+
+    expect(acquired).toHaveLength(0);
+    expect(lost).toHaveLength(0);
+  });
+
+  test('losing an item fires OnUnAcquireItem with GetModuleItemLost / GetModuleItemLostBy (leader by default)', () => {
+    const module = runningModule();
+    const seen = lossRecorder(module);
     const pc = creature('pc');
     PartyManager.party = [pc];
     const item = new FakeItem('datapad');
@@ -431,16 +826,104 @@ describe('module item events', () => {
 
     InventoryManager.removeItem(item as any, 1);
 
-    expect(seen).toEqual([[item, pc]]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].item === item).toBe(true);
+    expect(seen[0].by === pc).toBe(true);
     expect(InventoryManager.inventory).toHaveLength(0);
+  });
+
+  test('removing part of a stack reports the part that left, with its stack size', () => {
+    const module = runningModule();
+    const seen = lossRecorder(module);
+    PartyManager.party = [creature('pc')];
+    const medpacs = new FakeItem('g_i_medeqpmnt01', 5, true);
+    InventoryManager.inventory.push(medpacs as any);
+
+    InventoryManager.removeItem(medpacs as any, 2);
+
+    expect(medpacs.getStackSize()).toBe(3);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].item).not.toBe(medpacs);
+    expect(seen[0].item.getTag()).toBe('g_i_medeqpmnt01');
+    expect(seen[0].item.getStackSize()).toBe(2);
+  });
+
+  test('removal by tag fires the event too', () => {
+    const module = runningModule();
+    const seen = lossRecorder(module);
+    PartyManager.party = [creature('pc')];
+    const card = new FakeItem('k_keycard');
+    InventoryManager.inventory.push(card as any);
+
+    InventoryManager.removeItem('k_keycard', 1);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].item === card).toBe(true);
+  });
+
+  /** An item action as the queue runs it; object parameters already resolved. */
+  function act(ActionClass: any, owner: any, item: any, target: any) {
+    const action = new ActionClass();
+    action.owner = owner;
+    action.parameters = [{ type: -1, value: item }, { type: -1, value: target }];
+    return action.update(0);
+  }
+
+  function joinParty(...members: ModuleCreature[]) {
+    for (const member of members) member.isPM = true;
+    PartyManager.party = members;
+  }
+
+  test('ActionGiveItem: party to NPC is lost by the giver; NPC to party is acquired from the NPC; party to party fires nothing', () => {
+    const module = runningModule();
+    const lost = lossRecorder(module);
+    const acquired = acquireRecorder(module);
+    const pc = creature('pc');
+    const mission = creature('mission');
+    joinParty(pc, mission);
+    const npc = creature('trask');
+    const spice = new FakeItem('g_i_spice');
+    InventoryManager.inventory.push(spice as any);
+
+    expect(act(ActionGiveItem, mission, spice, npc)).toBe(ActionStatus.COMPLETE);
+    expect(lost).toHaveLength(1);
+    expect(lost[0].by === mission).toBe(true);
+    expect(npc.inventory).toHaveLength(1);
+
+    expect(act(ActionGiveItem, npc, npc.inventory[0], pc)).toBe(ActionStatus.COMPLETE);
+    expect(acquired).toHaveLength(1);
+    expect(acquired[0].from === npc).toBe(true);
+
+    expect(act(ActionGiveItem, pc, InventoryManager.inventory[0], mission)).toBe(ActionStatus.COMPLETE);
+    expect(lost).toHaveLength(1);
+    expect(acquired).toHaveLength(1);
+    expect(InventoryManager.inventory).toHaveLength(1);
+  });
+
+  test('ActionTakeItem by a party member reports the creature it came from; between party members nothing fires', () => {
+    const module = runningModule();
+    const lost = lossRecorder(module);
+    const acquired = acquireRecorder(module);
+    const pc = creature('pc');
+    const carth = creature('carth');
+    joinParty(pc, carth);
+    const npc = creature('guard');
+    const keycard = new FakeItem('k_keycard');
+    npc.inventory = [keycard as any];
+
+    expect(act(ActionTakeItem, pc, keycard, npc)).toBe(ActionStatus.COMPLETE);
+    expect(acquired).toHaveLength(1);
+    expect(acquired[0].from === npc).toBe(true);
+
+    expect(act(ActionTakeItem, pc, InventoryManager.inventory[0], carth)).toBe(ActionStatus.COMPLETE);
+    expect(acquired).toHaveLength(1);
+    expect(lost).toHaveLength(0);
+    expect(InventoryManager.inventory).toHaveLength(1);
   });
 
   test('looting a placeable moves each stack once and fires one acquire per stack', () => {
     const module = runningModule();
-    const from: any[] = [];
-    module.scripts[ModuleObjectScript.ModuleOnPlayerAcquireItem] = stubScript((instance) => {
-      from.push(call(moduleRoutines.GetModuleItemAcquiredFrom, instance));
-    }).script;
+    const seen = acquireRecorder(module);
     const footlocker = Object.create(ModulePlaceable.prototype) as ModulePlaceable;
     footlocker.scripts = {} as any;
     const medpacs = new FakeItem('g_i_medeqpmnt01', 3, true);
@@ -450,7 +933,49 @@ describe('module item events', () => {
 
     expect(InventoryManager.inventory).toEqual([medpacs]);
     expect(medpacs.getStackSize()).toBe(3);
-    expect(from).toEqual([footlocker]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].from === footlocker).toBe(true);
+  });
+
+  test('looting a corpse reports the corpse', () => {
+    const module = runningModule();
+    const seen = acquireRecorder(module);
+    const corpse = creature('sith_trooper');
+    const rifle = new FakeItem('g_w_blstrrfl001');
+    corpse.inventory = [rifle as any];
+
+    corpse.retrieveInventory();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].item === rifle).toBe(true);
+    expect(seen[0].from === corpse).toBe(true);
+  });
+
+  test('buying from a store reports the store', () => {
+    const module = runningModule();
+    const seen = acquireRecorder(module);
+    const pc = creature('pc');
+    joinParty(pc);
+    (PartyManager as any).Gold = 1000;
+    jest.spyOn(PartyManager, 'AddGold').mockImplementation(() => {});
+    const stock: any = Object.create(ModuleItem.prototype);
+    stock.isInfinite = () => true;
+    const bought = new FakeItem('g_i_medeqpmnt01');
+    const store: any = { getInventory: () => [stock] };
+    const menu: any = Object.create(MenuStore.prototype);
+    menu.storeObject = store;
+    menu.getSelectedTradeItem = () => stock;
+    menu.merchantSellsToCustomer = () => true;
+    menu.getItemBuyPrice = () => 10;
+    menu.sanitizePurchasedItem = () => bought;
+    menu.getCurrentTrader = () => pc;
+    menu.refreshView = () => {};
+
+    expect(menu.buySelectedItem()).toBe(true);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].item === bought).toBe(true);
+    expect(seen[0].from === store).toBe(true);
   });
 
   test('SignalEvent(GetModule(), EventActivateItem(...)) runs OnActvtItem with the GetItemActivated* values', () => {
@@ -496,6 +1021,17 @@ describe('module item events', () => {
     expect(userDefined.runs.map((run) => run.scriptVar)).toEqual([4002]);
     expect(areaHandler).not.toHaveBeenCalled();
   });
+
+  test('SignalEvent(GetModule(), <other event>) still reaches the area, as before', () => {
+    const module = runningModule();
+    const areaHandler = jest.fn();
+    (module.area as any).scriptEventHandler = areaHandler;
+    const event = call(eventRoutines.EventSpellCastAtAction, {}, undefined, 5, 1);
+
+    call(eventRoutines.SignalEvent, {}, module, event);
+
+    expect(areaHandler).toHaveBeenCalledWith(event);
+  });
 });
 
 describe('module heartbeat', () => {
@@ -514,6 +1050,31 @@ describe('module heartbeat', () => {
     module.readyToProcessEvents = false;
     tickFor(module, 12);
     expect(heartbeat.runs).toHaveLength(3);
+  });
+
+  test('a long hitch gives one beat and keeps the phase', () => {
+    const module = runningModule();
+    const heartbeat = stubScript();
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = heartbeat.script;
+
+    module.tick(13);
+    expect(heartbeat.runs).toHaveLength(1);
+    module.tick(0.5);
+    expect(heartbeat.runs).toHaveLength(1);
+    module.tick(4.5);
+    expect(heartbeat.runs).toHaveLength(2);
+  });
+
+  test('a module script that throws does not take the tick down', () => {
+    const module = runningModule();
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript(() => { throw new Error('bad ncs'); }).script;
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+    kill(pc);
+
+    expect(() => module.tick(6)).not.toThrow();
+    expect(PartyManager.party[0]).toBe(carth);
   });
 });
 
@@ -540,11 +1101,22 @@ describe('module locals and tokens survive the IFO save/load', () => {
     return ifo;
   }
 
+  async function saveAndReload(module: Module): Promise<Module> {
+    module.area = { saveAreaListStruct: () => baseIFO().getFieldByLabel('Mod_Area_list').getChildStructs()[0], save: jest.fn() } as any;
+    module.filename = 'end_m01aa';
+    state.TwoDAManager.datatables.set('modulesave', { getRowByColumnAndValue: () => ({ includeInSave: '0' }) });
+    state.PartyManager = { Save: jest.fn(), ExportPartyMemberTemplates: jest.fn(async () => {}), party: [] };
+    state.InventoryManager = { Save: jest.fn(async () => {}) };
+    await module.save(true);
+    const reloaded = new Module();
+    reloaded.setFromIFO(new GFFObject(module.ifo.getExportBuffer()), true);
+    state.module = reloaded;
+    return reloaded;
+  }
+
   test('SetLocalBoolean/SetLocalNumber on GetModule() and custom tokens round-trip a save', async () => {
     const module = new Module();
     module.setFromIFO(baseIFO(), false);
-    module.area = { saveAreaListStruct: () => baseIFO().getFieldByLabel('Mod_Area_list').getChildStructs()[0], save: jest.fn() } as any;
-    module.filename = 'end_m01aa';
     state.module = module;
     const self = {};
     const oModule = call(moduleRoutines.GetModule, self);
@@ -554,20 +1126,39 @@ describe('module locals and tokens survive the IFO save/load', () => {
     call(localVarRoutines.SetLocalNumber, self, oModule, 3, 42);
     module.setCustomToken(51, 'Revan');
 
-    state.TwoDAManager.datatables.set('modulesave', { getRowByColumnAndValue: () => ({ includeInSave: '0' }) });
-    state.PartyManager = { Save: jest.fn(), ExportPartyMemberTemplates: jest.fn(async () => {}), party: [] };
-    state.InventoryManager = { Save: jest.fn(async () => {}) };
-    await module.save(true);
-
-    const reloaded = new Module();
-    reloaded.setFromIFO(new GFFObject(module.ifo.getExportBuffer()), true);
-    state.module = reloaded;
+    await saveAndReload(module);
     const oReloaded = call(moduleRoutines.GetModule, self);
 
     expect([0, 1, 31, 70].map((i) => call(localVarRoutines.GetLocalBoolean, self, oReloaded, i))).toEqual([1, 0, 1, 1]);
     expect(call(localVarRoutines.GetLocalNumber, self, oReloaded, 3)).toBe(42);
     expect(call(localVarRoutines.GetLocalNumber, self, oReloaded, 4)).toBe(0);
-    expect(reloaded.getCustomToken(51)).toBe('Revan');
+    expect(state.module.getCustomToken(51)).toBe('Revan');
+  });
+
+  test('locals past the 96 boolean / 8 number default layout are written, not dropped; numbers are bytes', async () => {
+    const module = new Module();
+    module.setFromIFO(baseIFO(), false);
+    module.setLocalBoolean(120, true);
+    module.setLocalNumber(20, 7);
+    module.setLocalNumber(5, 300);
+
+    const reloaded = await saveAndReload(module);
+
+    expect(reloaded.getLocalBoolean(120)).toBe(true);
+    expect(reloaded.getLocalNumber(20)).toBe(7);
+    expect(reloaded.getLocalNumber(5)).toBe(300 & 0xFF);
+  });
+
+  test('loading an IFO replaces the previous module locals', () => {
+    const module = new Module();
+    module.setFromIFO(baseIFO(), false);
+    module.setLocalBoolean(4, true);
+    module.setLocalNumber(2, 9);
+
+    module.setFromIFO(baseIFO(), true);
+
+    expect(module.getLocalBoolean(4)).toBe(false);
+    expect(module.getLocalNumber(2)).toBe(0);
   });
 
   test('locals on an invalid object are ignored rather than throwing', () => {

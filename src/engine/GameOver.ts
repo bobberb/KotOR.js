@@ -15,14 +15,28 @@ import { MenuSaveLoadMode } from "@/enums/gui/MenuSaveLoadMode";
  */
 export class GameOver {
 
-  static creditsInProgress: boolean = false;
+  static opening: Promise<boolean> | undefined;
 
   /**
-   * Show the death menu (Load Game / Quit). Returns false when the game-over GUI
+   * Show the death menu (Load Game / Quit). Resolves false when the game-over GUI
    * could not be built (missing GUI resource); the load-game menu is opened
    * instead so the player is never left with a dead party and no way out.
    */
-  static async OpenDeathScreen(): Promise<boolean> {
+  static OpenDeathScreen(): Promise<boolean> {
+    const partyDeath = GameState.module?.partyDeath;
+    if(partyDeath){
+      partyDeath.deathScreenRequested = true;
+    }
+    // The menu is built asynchronously the first time; ticks in between must not build it twice.
+    if(!GameOver.opening){
+      GameOver.opening = GameOver.openDeathScreen().finally(() => {
+        GameOver.opening = undefined;
+      });
+    }
+    return GameOver.opening;
+  }
+
+  private static async openDeathScreen(): Promise<boolean> {
     const manager = GameState.MenuManager;
     const menu = await manager.GetMenuGameOver();
     if(menu?.tGuiPanel){
@@ -36,6 +50,14 @@ export class GameOver {
     return false;
   }
 
+  /**
+   * True while the death menu, or the load menu reached from it, is on screen.
+   */
+  static IsDeathScreenUp(): boolean {
+    const manager = GameState.MenuManager;
+    return [manager.MenuGameOver, manager.MenuSaveLoad].some((menu) => !!menu && manager.activeMenus.indexOf(menu) >= 0);
+  }
+
   static OpenLoadGame(){
     const manager = GameState.MenuManager;
     manager.MenuSaveLoad.mode = MenuSaveLoadMode.LOADGAME;
@@ -46,7 +68,6 @@ export class GameOver {
    * Same teardown as the in-game Options > Quit button.
    */
   static ReturnToMainMenu(){
-    GameOver.creditsInProgress = false;
     GameState.UnloadModule();
     GameState.State = EngineState.RUNNING;
 
@@ -60,24 +81,31 @@ export class GameOver {
     GameState.MenuManager.MainMenu.Start();
   }
 
+  /**
+   * Starts the credits. They end by themselves (MenuCredits.update), so a
+   * script polling IsCreditSequenceInProgress always gets FALSE eventually.
+   */
   static async StartCreditSequence(bTransparentBackground = false): Promise<boolean> {
     const menu = await GameState.MenuManager.GetMenuCredits();
     if(!menu?.tGuiPanel){
       console.warn('GameOver.StartCreditSequence: credits GUI unavailable');
       return false;
     }
-    GameOver.creditsInProgress = true;
-    menu.open();
+    menu.startSequence();
     return true;
   }
 
   static IsCreditSequenceInProgress(): boolean {
-    const menu = GameState.MenuManager.MenuCredits;
-    return GameOver.creditsInProgress && !!menu && GameState.MenuManager.activeMenus.indexOf(menu) >= 0;
+    return !!GameState.MenuManager.MenuCredits?.inProgress;
   }
 
+  /**
+   * Deferred to the end of the frame: EndGame runs from scripts inside
+   * Module.tick, and the rest of that frame (GameState.UpdateIngame) still
+   * reads GameState.module.
+   */
   static EndGame(bShowEndGameGui = false){
-    GameOver.ReturnToMainMenu();
+    queueMicrotask(() => GameOver.ReturnToMainMenu());
   }
 
 }

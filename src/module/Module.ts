@@ -75,7 +75,6 @@ export class Module {
   transWP: string;
   lastItemAcquired: any = undefined;
   lastItemAcquiredFrom: ModuleObject = undefined;
-  lastItemAcquiredStackSize: number = 0;
   lastItemLost: ModuleItem = undefined;
   lastItemLostBy: ModuleObject = undefined;
   itemActivated: ModuleItem = undefined;
@@ -538,10 +537,9 @@ export class Module {
     return true;
   }
 
-  onItemAcquired(item: ModuleItem, acquiredFrom?: ModuleObject, stackSize = 1){
+  onItemAcquired(item: ModuleItem, acquiredFrom?: ModuleObject){
     this.lastItemAcquired = item;
     this.lastItemAcquiredFrom = acquiredFrom;
-    this.lastItemAcquiredStackSize = stackSize;
     return this.runScript(ModuleObjectScript.ModuleOnPlayerAcquireItem);
   }
 
@@ -597,7 +595,8 @@ export class Module {
         this.onItemActivated(event.getObject(0), event.getObject(1), event.getObject(3), location);
       } break;
       default:
-        console.warn('Module.scriptEventHandler: unhandled event', event);
+        // Event types the module has no script for keep going to the area, as before.
+        this.area?.scriptEventHandler?.(event);
       break;
     }
   }
@@ -637,11 +636,22 @@ export class Module {
     }
   }
 
-  /** Same layout ModuleObject.getSWVarTableSaveStruct() writes for objects. */
+  /**
+   * Same layout ModuleObject.getSWVarTableSaveStruct() writes for objects: at
+   * least 3 BitArray DWORDs (booleans 0-95) and 8 ByteArray BYTEs (numbers 0-7).
+   * The retail per-index limits are not verified here, so a higher index that a
+   * script did set is written too rather than dropped (the loader reads any
+   * length). Numbers are BYTE fields: like object locals, values outside 0-255
+   * wrap on save.
+   */
   getSWVarTableSaveStruct(){
     const struct = new GFFStruct();
+    const setIndices = (values: { [index: number]: any }) =>
+      Object.keys(values).map(Number).filter((index) => !!values[index]);
+    const wordCount = Math.max(3, Math.ceil((Math.max(-1, ...setIndices(this._locals.Booleans)) + 1) / 32));
+    const byteCount = Math.max(8, Math.max(-1, ...setIndices(this._locals.Numbers)) + 1);
     const bitArray = struct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
-    for(let i = 0; i < 3; i++){
+    for(let i = 0; i < wordCount; i++){
       let value = 0;
       for(let j = 0; j < 32; j++){
         if(this.getLocalBoolean((32 * i) + j)){
@@ -653,9 +663,9 @@ export class Module {
       bitArray.addChildStruct(varStruct);
     }
     const byteArray = struct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
-    for(let i = 0; i < 8; i++){
+    for(let i = 0; i < byteCount; i++){
       const varStruct = new GFFStruct();
-      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) );
+      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) & 0xFF );
       byteArray.addChildStruct(varStruct);
     }
     return struct;

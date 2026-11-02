@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { Action } from "@/actions/Action";
+import type { IInventoryAddOptions } from "@/managers/InventoryManager";
 import { ActionQueue } from "@/actions/ActionQueue";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { CollisionManager } from "@/engine/CollisionManager";
@@ -1735,9 +1736,9 @@ export class ModuleObject {
    * @param item 
    * @returns 
    */
-  addItem(item: ModuleItem){
+  addItem(item: ModuleItem, options: IInventoryAddOptions = {}){
     if(this.isPartyMember()){
-      return GameState.InventoryManager.addItem(item);
+      return GameState.InventoryManager.addItem(item, false, options);
     }
 
     item.load();
@@ -1773,7 +1774,7 @@ export class ModuleObject {
     removedItem.setStackSize(removedCount);
 
     if(this.isPartyMember()){
-      GameState.InventoryManager.removeItem(eItem, removedCount);
+      GameState.InventoryManager.removeItem(eItem, removedCount, { lostBy: this });
       return removedItem;
     }
 
@@ -1806,7 +1807,7 @@ export class ModuleObject {
     removedItem.setStackSize(removedCount);
 
     if(this.isPartyMember()){
-      GameState.InventoryManager.removeItem(eItem, removedCount);
+      GameState.InventoryManager.removeItem(eItem, removedCount, { lostBy: this });
       return removedItem;
     }
 
