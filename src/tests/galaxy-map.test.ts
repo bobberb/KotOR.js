@@ -28,10 +28,10 @@ const PLANET_ROWS = [
 ].map((row, i) => ({ __rowlabel: String(i), name: String(10 + i), description: String(20 + i), icon: '****', model: '****', ...row }));
 const TARIS = 1, DANTOOINE = 2, TATOOINE = 3, LEVIATHAN = 4;
 
-async function initPlanetary() {
+async function initPlanetary(planetRows: any[] = PLANET_ROWS) {
   const rows: Record<number, any> = {};
-  PLANET_ROWS.forEach((row, i) => rows[i] = row);
-  state.TwoDAManager = { datatables: new Map([['planetary', { rows, RowCount: PLANET_ROWS.length }]]) };
+  planetRows.forEach((row, i) => rows[i] = row);
+  state.TwoDAManager = { datatables: new Map([['planetary', { rows, RowCount: planetRows.length }]]) };
   state.TLKManager = { TLKStrings: Array.from({ length: 40 }, (_, i) => ({ Value: `str${i}` })) };
   await Planetary.Init();
 }
@@ -207,6 +207,19 @@ describe.each([['kotor', K1Menu], ['tsl', TSLMenu]] as const)('%s galaxy map men
     expect(travelledTo).toEqual([]);
   });
 
+  test('reopening with no valid planet forgets the planet browsed last time', async () => {
+    const menu = await openMenu(MenuClass);
+    state.MenuManager.MenuGalaxyMap = { open: () => menu.show() };
+    routine(ShowGalaxyMap, engine)(TARIS);
+    menu.controls.get('LBL_Planet_Dantooine').click();
+    menu.BTN_BACK.click();
+    routine(ShowGalaxyMap, engine)(-1);
+    menu.BTN_ACCEPT.click();
+    routine(ShowGalaxyMap, engine)(99);
+    menu.BTN_ACCEPT.click();
+    expect(travelledTo).toEqual([]);
+  });
+
   test('planet routines ignore out-of-range indices instead of throwing', () => {
     expect(() => routine(SetPlanetAvailable, engine)(99, 1)).not.toThrow();
     expect(() => routine(SetPlanetSelectable, engine)(99, 1)).not.toThrow();
@@ -250,6 +263,50 @@ describe('galaxy map save/load', () => {
     Planetary.LoadStruct(roundTrip(struct));
     expect(Planetary.selectedIndex).toBe(TATOOINE);
     expect(Planetary.planets.map(p => p.selectable)).toEqual([false, true, false, true, false]);
+  });
+
+  const syntheticRows = (count: number) => Array.from({ length: count }, (_, i) => ({ __rowlabel: String(i), label: `P${i}`, name: '0', description: '0', icon: '****', model: '****', guitag: `LBL_P${i}`, lockedoutreason: '****' }));
+  function mapStruct(count: number, available: number, selectable: number, selected: number) {
+    const struct = new GFFStruct();
+    struct.addField(new GFFField(GFFDataType.DWORD, 'GlxyMapNumPnts')).setValue(count);
+    struct.addField(new GFFField(GFFDataType.DWORD, 'GlxyMapPlntMsk')).setValue(available >>> 0);
+    struct.addField(new GFFField(GFFDataType.INT, 'GlxyMapSelPnt')).setValue(selected);
+    struct.addField(new GFFField(GFFDataType.DWORD, 'GlxyMapSelMsk')).setValue(selectable >>> 0);
+    return roundTrip(struct);
+  }
+
+  test('planets past the saved planet count are reset even if mask bits are set', () => {
+    Planetary.LoadStruct(mapStruct(2, 0b11111, 0b11111, TARIS));
+    expect(Planetary.planets.map(p => p.enabled)).toEqual([true, true, false, false, false]);
+    expect(Planetary.planets.map(p => p.selectable)).toEqual([true, true, false, false, false]);
+  });
+
+  test('a 2da with more than 32 planets does not alias planet 32 onto bit 0 when loading', async () => {
+    await initPlanetary(syntheticRows(34));
+    Planetary.LoadStruct(mapStruct(34, 0b1, 0b1, 0));
+    expect(Planetary.planets[0].enabled).toBe(true);
+    expect(Planetary.planets[32].enabled).toBe(false);
+    expect(Planetary.planets[32].selectable).toBe(false);
+    expect(Planetary.planets[33].enabled).toBe(false);
+  });
+
+  test('planet ids >= 32 are left out of the save masks instead of wrapping onto low bits', async () => {
+    await initPlanetary(syntheticRows(34));
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    Planetary.SetPlanetAvailable(32, true);
+    Planetary.SetPlanetSelectable(33, true);
+    Planetary.SetPlanetAvailable(31, true);
+    const saved = roundTrip(Planetary.SaveStruct());
+    expect(saved.getFieldByLabel('GlxyMapPlntMsk').getValue()).toBe(0x80000000);
+    expect(saved.getFieldByLabel('GlxyMapSelMsk').getValue()).toBe(0);
+  });
+
+  test('a missing GlxyMap struct leaves the current map untouched', () => {
+    Planetary.SetPlanetAvailable(TARIS, true);
+    Planetary.SetSelectedPlanet(TARIS);
+    expect(() => Planetary.LoadStruct(undefined)).not.toThrow();
+    expect(Planetary.selectedIndex).toBe(TARIS);
+    expect(Planetary.planets[TARIS].enabled).toBe(true);
   });
 
   test('a save recording more planets than planetary.2da has loads without throwing', () => {
