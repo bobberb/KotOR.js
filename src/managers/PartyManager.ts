@@ -178,17 +178,7 @@ export class PartyManager {
     }
 
     if(gff.RootNode.hasField('GlxyMap')){
-      let GlxyMap = gff.getFieldByLabel('GlxyMap').getChildStructs()[0];
-      
-      let planetCount = GlxyMap.getFieldByLabel('GlxyMapNumPnts').getValue();
-      let planetBits = GlxyMap.getFieldByLabel('GlxyMapPlntMsk').getValue(); //Max 32?
-      let currentPlanet = GlxyMap.getFieldByLabel('GlxyMapSelPnt').getValue();
-
-      for(let i = 0; i < planetCount; i++){
-        GameState.Planetary.SetPlanetAvailable(i,  !!((planetBits>>i) & 0x01));
-      }
-
-      GameState.Planetary.SetSelectedPlanet(currentPlanet);
+      GameState.Planetary.LoadStruct(gff.getFieldByLabel('GlxyMap').getChildStructs()[0]);
     }
 
     //Init the TutorialWindowTracker      

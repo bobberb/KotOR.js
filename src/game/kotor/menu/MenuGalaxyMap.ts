@@ -57,6 +57,8 @@ export class MenuGalaxyMap extends GameMenu {
   _3dViewPlanetModel: OdysseyModel3D;
 
   activePlanet: Planet;
+  /** Planet selected when the map opened (the party's current location, via ShowGalaxyMap). */
+  openedPlanetIndex: number = -1;
 
   planetModelAnimationState: PlanetAnimStateInfo = {
     lastAnimState: undefined,
@@ -76,25 +78,13 @@ export class MenuGalaxyMap extends GameMenu {
     if(skipInit) return;
     this.BTN_BACK.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.close();
-      // Planetary.SetSelectedPlanet(GameState.GlobalVariableManager.GetGlobalNumber('K_CURRENT_PLANET'));
+      this.onBack();
     });
     this._button_b = this.BTN_BACK;
 
     this.BTN_ACCEPT.addEventListener('click', (e) => {
       e.stopPropagation();
-      if(!this.activePlanet?.selectable){
-        if(this.activePlanet.lockedOutReason >= 0){
-          GameState.MenuManager.InGameConfirm.fromStringRef(this.activePlanet.lockedOutReason);
-        }
-      }else if(this.activePlanet.id == Planetary.selectedIndex){
-        GameState.MenuManager.InGameConfirm.fromStringRef(STR_ALREADY_AT_THAT_LOCATION);
-      }else{
-        if(this.script instanceof NWScriptInstance){
-          this.script.run(GameState.PartyManager.party[0]);
-        }
-        this.close();
-      }
+      this.onAccept();
     });
 
     this._3dViewPlanet = new LBL_3DView();
@@ -130,6 +120,32 @@ export class MenuGalaxyMap extends GameMenu {
     TextureLoader.LoadQueue().then(() => {
       GameState.PerformanceMonitor.stop('MenuGalaxyMap.loadGalaxyModel.TextureLoader.LoadQueue');
     });
+  }
+
+  onBack(){
+    // Browsing commits each click to Planetary; cancelling must not leave a destination behind.
+    Planetary.SetSelectedPlanet(this.openedPlanetIndex);
+    this.close();
+  }
+
+  onAccept(){
+    const planet = this.activePlanet;
+    if(!planet){ return; }
+    if(!planet.enabled || !planet.selectable){
+      if(planet.lockedOutReason >= 0){
+        GameState.MenuManager.InGameConfirm.fromStringRef(planet.lockedOutReason);
+      }
+      return;
+    }
+    if(planet.id == this.openedPlanetIndex){
+      GameState.MenuManager.InGameConfirm.fromStringRef(STR_ALREADY_AT_THAT_LOCATION);
+      return;
+    }
+    Planetary.SetSelectedPlanet(planet.id);
+    if(this.script instanceof NWScriptInstance){
+      this.script.run(GameState.PartyManager.party[0]);
+    }
+    this.close();
   }
 
   update(delta = 0) {
@@ -209,7 +225,10 @@ export class MenuGalaxyMap extends GameMenu {
     this.LBL_PLANETNAME.setText(planet.getName());
     this.LBL_DESC.setText(planet.getDescription());
     this.activePlanet = planet;
-    // Planetary.SetSelectedPlanet(planet.getId());
+    // k_sup_galaxymap reads the destination via GetSelectedPlanet, so the click must commit it.
+    if(planet.enabled && planet.selectable){
+      Planetary.SetSelectedPlanet(planet.getId());
+    }
     if(Planetary.models.has(planet.model)){
       this._3dViewPlanet.removeModel(this._3dViewPlanetModel);
       const mdl = Planetary.models.get(planet.model);
@@ -233,7 +252,8 @@ export class MenuGalaxyMap extends GameMenu {
 
   show() {
     super.show();
-    // Planetary.SetSelectedPlanet(GameState.GlobalVariableManager.GetGlobalNumber('K_CURRENT_PLANET'));
+    this.openedPlanetIndex = Planetary.selectedIndex;
+    this.activePlanet = undefined;
     this.changePlanet(Planetary.selected);
     this.UpdateScale();
     const planets = Planetary.planets;
