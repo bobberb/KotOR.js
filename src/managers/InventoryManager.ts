@@ -150,7 +150,12 @@ export class InventoryManager {
       GameState.PartyManager.AddGold(itemStackSize);
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.CREDITS_RECEIVED);
     }else if(item.getBaseItemId() == BaseItemType.PAZAAK_CARD){
-      GameState.PazaakManager.AddCard(item.getModelVariation(), itemStackSize);
+      // Raw field, not getModelVariation(): that coerces 0 to 1, which would
+      // silently turn an invalid card into +1. ModelVariation is 1-based.
+      const variation = Number(item.modelVariation) || 0;
+      if(variation < 1 || !GameState.PazaakManager.AddCard(variation - 1, itemStackSize)){
+        console.warn(`InventoryManager: Ignoring pazaak card item with ModelVariation ${variation}`);
+      }
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_RECEIVED);
     }else{
       GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_RECEIVED);
