@@ -18,12 +18,14 @@ jest.mock('@/three/odyssey', () => {
 });
 jest.mock('@/nwscript/NWScript', () => ({ NWScript: class {} }));
 jest.mock('@/nwscript/NWScriptInstance', () => ({ NWScriptInstance: class {} }));
-jest.mock('@/nwscript/events', () => ({ NWScriptEvent: class {} }));
+// Real event classes so OnSpellCastAt runs through EventSpellCastAt and ModuleObject.scriptEventHandler.
+jest.mock('@/nwscript/events', () => jest.requireActual('@/nwscript/events'));
 jest.mock('@/engine/CollisionManager', () => ({ CollisionManager: class {} }));
 jest.mock('@/audio/AudioEmitter', () => ({ AudioEmitter: class { constructor(..._args: unknown[]) {} setPriorityGroupId(): void {} load(): void {} } }));
 jest.mock('@/audio/AudioEngine', () => ({ AudioEngine: { GetAudioEngine: (): any => ({}) } }));
 // CheatConsoleManager pulls the whole module barrel; only ModuleItem is referenced and heal() does not use it.
 jest.mock('@/module', () => ({ ModuleItem: class {} }));
+jest.mock('@/engine/CurrentGame', () => ({ CurrentGame: { WriteFile: (): void => {} } }));
 
 import { GameState } from '@/GameState';
 import { MDLLoader } from '@/loaders';
@@ -49,7 +51,14 @@ import { GameEngineType } from '@/enums/engine/GameEngineType';
 import { TalentObjectType } from '@/enums/engine/TalentObjectType';
 import { ModuleObjectConstant } from '@/enums/module/ModuleObjectConstant';
 import { ActionCastSpellAtObject, GetSpellSaveDC } from '@/nwscript/builtins/miscLegacy';
-import { GetSpellTargetObject, GetSpellId } from '@/nwscript/builtins/combat';
+import { GetSpellTargetObject, GetSpellId, GetLastSpellCaster, GetLastSpell } from '@/nwscript/builtins/combat';
+import { EventSpellCastAtAction } from '@/nwscript/builtins/events';
+import { buildReconciledActionMap } from '@/nwscript/reconciledActions';
+import { ActionParameter } from '@/actions/ActionParameter';
+import { ModuleItem } from '@/module/ModuleItem';
+import { ModuleItemProperty } from '@/enums/module/ModuleItemProperty';
+import { ModuleObjectScript } from '@/enums/module/ModuleObjectScript';
+import { PartyManager } from '@/managers/PartyManager';
 import { ActionUseTalentOnObject } from '@/nwscript/builtins/talents';
 import { ActionCastSpellAtLocation, ActionCastFakeSpellAtLocation, GetSpellTargetLocation } from '@/nwscript/builtins/objects/spellcasting';
 import { ActionCastFakeSpellAtObject } from '@/nwscript/builtins/upstream/creatures';
@@ -86,6 +95,8 @@ function makeCreature(fp: FP = { base: 20, max: 20, current: 20 }): ModuleCreatu
   creature.forcePoints = fp.base;
   creature.maxForcePoints = fp.max;
   creature.currentForce = fp.current;
+  // Alive: a creature at 0 HP counts as dead and loses its casts.
+  creature.hitPoints = creature.maxHitPoints = creature.currentHitPoints = 50;
   creature.area = GameState.module.area as any;
   creature.actionQueue.setOwner(creature);
   objects.set(creature.id, creature);
@@ -277,6 +288,7 @@ describe('force power casting', () => {
     expect(GameState.NWScript.Load).not.toHaveBeenCalled();
     expect(impactRuns).toHaveLength(0);
     expect(caster.actionQueue.actionTypeExists(ActionType.ActionCastSpell)).toBe(false);
+    expect(caster.combatRound.action).toBeUndefined();
   });
 
   test('exactly enough force points casts and empties the pool', () => {
@@ -392,14 +404,20 @@ describe('force power casting', () => {
     expect(impactRuns).toHaveLength(0);
     expect(caster.getFP()).toBe(20);
     expect(caster.actionQueue.length).toBe(0);
+    expect(caster.combatRound.action).toBeUndefined();
   });
 
-  test('a non-creature caster (placeable) resolves its cast without a combat round', () => {
+  function makePlaceable(){
     const placeable = new ModuleObject();
     placeable.id = nextId++;
     placeable.area = GameState.module.area as any;
     placeable.actionQueue.setOwner(placeable);
     objects.set(placeable.id, placeable);
+    return placeable;
+  }
+
+  test('a non-creature caster (placeable) resolves its cast without a combat round', () => {
+    const placeable = makePlaceable();
     const target = makeCreature();
     ActionCastSpellAtObject.kotor.call({ caller: placeable } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
     ActionCastSpellAtObject.kotor.call({ caller: placeable } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
@@ -407,9 +425,101 @@ describe('force power casting', () => {
     // Both casts resolve: nothing leaves the placeable's (never-updated) combat round paused.
     expect(impactRuns).toHaveLength(2);
     expect(impactRuns[0].caller).toBe(placeable);
+    expect(impactRuns[0].spellTarget).toBe(target);
     expect(placeable.combatRound.roundStarted).toBe(false);
     expect(placeable.combatRound.roundPaused).toBe(false);
     expect(placeable.actionQueue.length).toBe(0);
+  });
+
+  test('a placeable casts at an out-of-range target instead of trying to walk', () => {
+    installSpells({ [SPELL_ID]: spellRow({ range: 'S' }) });
+    const placeable = makePlaceable();
+    const target = makeCreature();
+    target.position.set(100, 0, 0);
+    ActionCastSpellAtObject.kotor.call({ caller: placeable } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([placeable, target]);
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].spellTarget).toBe(target);
+    expect(placeable.actionQueue.length).toBe(0);
+  });
+
+  test('a caster that dies mid-conjure loses the power (FP stays spent)', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    tick([caster, target], 0.3);
+    expect(spellInstances).toHaveLength(1);
+    caster.currentHitPoints = -50;
+    expect(caster.isDead()).toBe(true);
+    // The cast is dropped on the next frame, not left conjuring until its impact time.
+    tick([caster, target], 0.1);
+    expect(spellInstances).toHaveLength(0);
+    tick([caster, target], 3);
+    expect(impactRuns).toHaveLength(0);
+    expect(spellInstances).toHaveLength(0);
+    expect(caster.getFP()).toBe(20 - SPELL_COST);
+  });
+
+  test('a caster debilitated (stunned) mid-conjure loses the power', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    tick([caster, target], 0.3);
+    jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    tick([caster, target], 3);
+    expect(impactRuns).toHaveLength(0);
+    expect(spellInstances).toHaveLength(0);
+  });
+
+  test('round end records the attempted spell for a real cast', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target]);
+    expect(caster.combatRound.roundStarted).toBe(false);
+    expect(caster.combatData.lastAttemptedSpellTarget).toBe(target);
+    expect(caster.combatData.lastForcePowerUsed?.id).toBe(SPELL_ID);
+    expect(caster.combatData.lastAttackAction).toBe(ActionType.ActionCastSpell);
+  });
+
+  test('item-granted powers (armbands) cost no FP and are not refused at 0 FP', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const rich = makeCreature();
+    const target = makeCreature();
+    const item: any = { id: 999 };
+    const power = new TalentSpell(SPELL_ID);
+    power.setItem(item);
+    power.useTalentOnObject(target, caster);
+    const power2 = new TalentSpell(SPELL_ID);
+    power2.setItem(item);
+    power2.useTalentOnObject(target, rich);
+    tick([caster, rich, target]);
+    expect(impactRuns).toHaveLength(2);
+    expect(caster.getFP()).toBe(0);
+    expect(rich.getFP()).toBe(20);
+  });
+
+  test('ModuleItem.getSpells maps CastSpell subtypes through iprp_spells and tags the item', () => {
+    const item = Object.create(ModuleItem.prototype) as ModuleItem;
+    item.properties = [{ propertyName: ModuleItemProperty.CastSpell, subType: 3 } as any];
+    TwoDAManager.datatables.set('iprp_spells', { rows: { 3: { spellindex: String(SPELL_ID) } } } as any);
+    const [spell] = item.getSpells();
+    expect(spell.id).toBe(SPELL_ID);
+    expect(spell.item).toBe(item);
+    expect(spell.itemPropertyIndex).toBe(0);
+    TwoDAManager.datatables.delete('iprp_spells');
+    expect(item.getSpells()[0].id).toBe(3);
+  });
+
+  test('OnSpellCastAt handlers see the caster and spell id via GetLastSpellCaster / GetLastSpell', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const event = EventSpellCastAtAction.kotor.call({ caller: caster } as any, caster, SPELL_ID, 1);
+    let seen: any;
+    const handler: any = { run(this: any){ seen = { caster: GetLastSpellCaster.kotor.call(this), spell: GetLastSpell.kotor.call(this), harmful: this.lastSpellHarmful }; } };
+    target.scripts[ModuleObjectScript.CreatureOnSpellAt] = { nwscript: { newInstance: () => handler } } as any;
+    target.scriptEventHandler(event as any);
+    expect(seen).toEqual({ caster, spell: SPELL_ID, harmful: true });
   });
 
   test('GetSpellTargetLocation in the impact script follows a target that moved during conjuration', () => {
@@ -445,6 +555,34 @@ describe('location casts', () => {
     expect(impactRuns).toHaveLength(1);
     expect(caster.getFP()).toBe(0);
   });
+
+  test('a queued location cast survives a GFF save/load of its parameters', () => {
+    const caster = makeCreature();
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(4, 5, 6), 0, 0, 0, 0);
+    const action = caster.actionQueue[0] as ActionCastSpell;
+    const gff = new GFFObject();
+    const list = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'Paramaters'));
+    for(const parameter of action.parameters) list.addChildStruct(parameter.toStruct());
+    const reloaded = new GFFObject(gff.getExportBuffer());
+    action.parameters = reloaded.RootNode.getFieldByLabel('Paramaters').getChildStructs().map((struct: any) => ActionParameter.FromStruct(struct));
+    tick([caster]);
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].location).toEqual({ x: 4, y: 5, z: 6 });
+  });
+
+  test('a location cast saved by an older build (DWORD -1 reloaded as 0xFFFFFFFF) still casts', () => {
+    const caster = makeCreature();
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(4, 5, 6), 0, 0, 0, 0);
+    (caster.actionQueue[0] as ActionCastSpell).parameters[5].value = 0xFFFFFFFF;
+    tick([caster]);
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  test('ActionCastSpellAtLocation with an invalid location queues nothing', () => {
+    const caster = makeCreature();
+    expect(() => ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, undefined, 0, 0, 0, 0)).not.toThrow();
+    expect(caster.actionQueue).toHaveLength(0);
+  });
 });
 
 describe('fake casts (animation only)', () => {
@@ -465,6 +603,20 @@ describe('fake casts (animation only)', () => {
     expect(target.combatData.lastSpellAttacker).toBeUndefined();
     expect(spellInstances).toHaveLength(0);
     expect(caster.actionQueue.length).toBe(0);
+    // The round ended without recording a spell attempt.
+    expect(caster.combatRound.roundStarted).toBe(false);
+    expect(caster.combatData.lastAttemptedSpellTarget).toBeUndefined();
+    expect(caster.combatData.lastForcePowerUsed).toBeUndefined();
+    expect(caster.combatData.lastAttackAction).not.toBe(ActionType.ActionCastSpell);
+  });
+
+  test('ActionCastFakeSpellAtLocation is reachable from the script action table', () => {
+    const caster = makeCreature();
+    const actions = buildReconciledActionMap('kotor');
+    expect(actions[502].name).toBe('ActionCastFakeSpellAtLocation');
+    actions[502].action.call({ caller: caster } as any, [SPELL_ID, location(1, 1, 0), 0]);
+    expect(caster.actionQueue).toHaveLength(1);
+    expect((caster.actionQueue[0] as ActionCastSpell).fake).toBe(true);
   });
 
   test('a caster with 0 FP still plays a fake cast', () => {
@@ -573,6 +725,70 @@ describe('cheat heal', () => {
 
     expect([player.getFP(), jedi.getFP(), bonus.getFP()]).toEqual([20, 30, 24]);
     expect([player.getHP(), jedi.getHP(), bonus.getHP()]).toEqual([50, 50, 50]);
+  });
+
+  test('reports false when there is nobody to heal', () => {
+    (GameState as any).getCurrentPlayer = (): any => undefined;
+    (GameState as any).PartyManager = { party: [] };
+    expect(CheatConsoleManager.heal()).toBe(false);
+  });
+});
+
+describe('party switching keeps live HP/FP', () => {
+  function npcFromTemplate(template: GFFObject){
+    const rebuilt = new ModuleCreature(template);
+    rebuilt.initProperties();
+    return rebuilt;
+  }
+
+  function setupParty(){
+    const state = GameState as any;
+    state.FactionManager = { factions: new Map() };
+    state.AppearanceManager = { GetCreatureAppearanceById: (): any => undefined };
+    state.module.area.creatures = [];
+    state.PartyManager = PartyManager;
+    // initProperties/load log unrelated asset gaps (no skills/appearance 2DA, no models).
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const utc = new GFFObject();
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'ForcePoints')).setValue(30);
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'CurrentForce')).setValue(30);
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'HitPoints')).setValue(40);
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxHitPoints')).setValue(40);
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'CurrentHitPoints')).setValue(40);
+    const npc = new ModuleCreature(utc);
+    npc.initProperties();
+    npc.npcId = 0;
+    PartyManager.NPCS = { 0: { available: false, canSelect: true, spawned: false } } as any;
+    PartyManager.party = [];
+    PartyManager.AddCreatureToParty(0, npc);
+    npc.save(); // the slot template is whatever was last saved; play continues after it
+    npc.subtractFP(12);
+    npc.subtractHP(15);
+    return npc;
+  }
+
+  test('switching control to an NPC rebuilds it with its spent HP/FP', () => {
+    const npc = setupParty();
+    const player = makeCreature();
+    player.npcId = -1;
+    PartyManager.Player = player;
+    PartyManager.SwitchPlayerCharacter(0);
+    const rebuilt = npcFromTemplate(PartyManager.NPCS[0].template);
+    expect(rebuilt.getFP()).toBe(18);
+    expect(rebuilt.getHP()).toBe(25);
+    expect(npc.getFP()).toBe(18);
+  });
+
+  test('switching control away from an NPC stores its spent HP/FP for the next rebuild', () => {
+    const npc = setupParty();
+    PartyManager.party = [];
+    PartyManager.Player = npc;
+    PartyManager.ActualPlayerTemplate = new GFFObject();
+    PartyManager.SwitchPlayerCharacter(-1);
+    const rebuilt = npcFromTemplate(PartyManager.NPCS[0].template);
+    expect(rebuilt.getFP()).toBe(18);
+    expect(rebuilt.getHP()).toBe(25);
   });
 });
 

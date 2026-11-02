@@ -47,8 +47,8 @@ export const GetSpellTargetObject = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    if (BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) {
-      return this.caller.combatData.lastSpellTarget;
+    if (BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) {
+      return this.caller.combatData?.lastSpellTarget;
     }
     return undefined;
   },
@@ -190,7 +190,7 @@ export const GetLastSpellCaster = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.lastSpellAttacker;
+    return this.lastSpellCaster;
   },
 });
 
@@ -201,7 +201,7 @@ export const GetLastSpell = defineAction({
   returnType: NWScriptDataType.INTEGER,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.lastSpell?.id ? this.lastSpell.id : 0;
+    return this.lastSpell?.id ?? 0;
   },
 });
 

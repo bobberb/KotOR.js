@@ -5,6 +5,8 @@ import { OdysseyModel3D } from "@/three/odyssey";
 import { OdysseyModel } from "@/odyssey";
 import { GameState } from "@/GameState";
 import { MDLLoader } from "@/loaders";
+import { BitWise } from "@/utility/BitWise";
+import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 
 /**
  * SpellCastInstance class.
@@ -45,6 +47,8 @@ export class SpellCastInstance {
   /** ActionCastFakeSpellAt*: animations and visuals only, no impact script or combat bookkeeping. */
   fake: boolean = false;
   impacted: boolean = false;
+  /** The caster died or was debilitated before impact, so the power never landed. */
+  interrupted: boolean = false;
   completed: boolean = false;
   conjureTime: number = 0;
   conjuring: boolean = false;
@@ -109,6 +113,10 @@ export class SpellCastInstance {
 
   update(delta: number = 0){
     if(this.disposed) return;
+    if(!this.impacted && this.isCasterIncapacitated()){
+      this.impact();
+      return;
+    }
     if(this.conjureTime > 0){
       this.conjuring = true;
       this.conjureTime -= 1000 * delta;
@@ -143,6 +151,15 @@ export class SpellCastInstance {
     if(this.disposed || this.impacted) return;
     this.impacted = true;
 
+    // A creature that dies or is stunned/paralyzed before the power lands loses it; the force points stay spent.
+    if(this.isCasterIncapacitated()){
+      this.interrupted = true;
+      this.completed = true;
+      this.projectile?.dispose();
+      this.projectile = undefined;
+      return;
+    }
+
     if(!this.fake){
       this.applyImpact();
     }
@@ -173,6 +190,11 @@ export class SpellCastInstance {
 
     this.projectile?.dispose();
     this.projectile = undefined;
+  }
+
+  private isCasterIncapacitated(): boolean {
+    if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return false;
+    return this.owner.isDead() || this.owner.isDebilitated();
   }
 
   private applyImpact(){

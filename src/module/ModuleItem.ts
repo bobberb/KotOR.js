@@ -958,11 +958,24 @@ export class ModuleItem extends ModuleObject {
       let property = this.properties[i];
       //Activate Item
       if(property.propertyName == ModuleItemProperty.CastSpell){
-        spells.push(new TalentSpell(property.subType));
+        const spell = new TalentSpell(ModuleItem.GetCastSpellId(property.subType));
+        spell.setItem(this);
+        spell.setItemPropertyIndex(i);
+        spells.push(spell);
       }
     }
 
     return spells;
+  }
+
+  /**
+   * CastSpell item property subtypes index iprp_spells.2da; its spellindex column is the spells.2da row.
+   * Falls back to the subtype itself when the table (or column) is unavailable.
+   */
+  static GetCastSpellId(subType: number): number {
+    const row = GameState.TwoDAManager?.datatables?.get('iprp_spells')?.rows?.[subType];
+    const spellIndex = Number(row?.spellindex);
+    return row && row.spellindex !== '****' && Number.isFinite(spellIndex) ? spellIndex : subType;
   }
 
   initProperties(){

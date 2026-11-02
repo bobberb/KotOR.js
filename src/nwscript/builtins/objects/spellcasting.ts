@@ -7,6 +7,7 @@ import { PerceptionMask } from "@/enums/engine/PerceptionMask";
 import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { ModuleCreatureArmorSlot } from "@/enums/module/ModuleCreatureArmorSlot";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
+import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { NWScriptDataType } from "@/enums/nwscript/NWScriptDataType";
 import { NWModuleObjectType } from "@/enums/nwscript/NWModuleObjectType";
 import EngineLocation from "@/engine/EngineLocation";
@@ -57,7 +58,7 @@ function queueCastSpellAtLocation(
   action.setParameter(2, ActionParameterType.INT, 0);
   action.setParameter(3, ActionParameterType.INT, 0);
   action.setParameter(4, ActionParameterType.INT, 0);
-  action.setParameter(5, ActionParameterType.DWORD, -1);
+  action.setParameter(5, ActionParameterType.DWORD, ModuleObjectConstant.OBJECT_INVALID);
   action.setParameter(6, ActionParameterType.FLOAT, lTargetLocation.position.x);
   action.setParameter(7, ActionParameterType.FLOAT, lTargetLocation.position.y);
   action.setParameter(8, ActionParameterType.FLOAT, lTargetLocation.position.z);

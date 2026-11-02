@@ -64,6 +64,12 @@ export class ActionCastSpell extends Action {
     const spell: TalentSpell = this.spell;
     if(!spell) return ActionStatus.FAILED;
 
+    // Placeables/triggers cannot move into range and have no combat round driving them, so their casts resolve directly.
+    if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
+      this.startSpellInstance(spell);
+      return ActionStatus.COMPLETE;
+    }
+
     if(this.target && !spell.inRange(this.target, this.owner)){
       enqueueMoveToPoint(this.owner, {
         x: this.target.position.x,
@@ -79,18 +85,18 @@ export class ActionCastSpell extends Action {
       return ActionStatus.IN_PROGRESS;
     }
 
-    // Placeables/triggers have no combat round driving them, so their casts resolve directly.
-    if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
-      this.startSpellInstance(spell);
-      return ActionStatus.COMPLETE;
-    }
-
     const combatRound = this.owner.combatRound;
     if(!combatRound) return ActionStatus.FAILED;
     if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
 
-    const paysForcePoints = !this.cheat && !this.fake;
-    if(paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, spell)){
+    // Menu/talent casts arrive via ActionCombat with their round action (and the talent it carries) already set.
+    const queued = combatRound.action;
+    const reuseQueued = !!queued && queued.actionType == CombatActionType.CAST_SPELL && queued.spellId == spell.id;
+    // Item-granted powers (armbands) are paid for by the item, not the caster's force points.
+    const castSpell: TalentSpell = (reuseQueued && queued.spell) || spell;
+    const paysForcePoints = !this.cheat && !this.fake && !castSpell.item;
+    if(paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, castSpell)){
+      if(reuseQueued) combatRound.action = undefined;
       return ActionStatus.FAILED;
     }
 
@@ -98,23 +104,24 @@ export class ActionCastSpell extends Action {
     this.owner.speed = 0;
 
     // Script-initiated casts (ActionCastSpellAtObject) bypass ActionCombat, so no round action exists yet.
-    let combatAction = combatRound.action;
-    if(!combatAction || combatAction.actionType != CombatActionType.CAST_SPELL || combatAction.spellId != spell.id){
+    let combatAction = queued;
+    if(!reuseQueued){
       combatAction = new CombatRoundAction(this.owner);
       combatAction.actionType = CombatActionType.CAST_SPELL;
       combatAction.target = this.target;
-      combatAction.setSpell(spell);
+      combatAction.setSpell(castSpell);
       combatAction.isUserAction = this.isUserAction;
       combatRound.action = combatAction;
     }
+    combatAction.fake = this.fake;
     combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
-    combatAction.animationName = spell.getConjureAnimation();
+    combatAction.animationName = castSpell.getConjureAnimation();
 
     combatRound.beginCombatRound();
     combatRound.pauseRound(this.owner, combatRound.roundLength);
 
     if(paysForcePoints){
-      this.owner.subtractFP(ActionCastSpell.GetSpellForceCost(spell));
+      this.owner.subtractFP(ActionCastSpell.GetSpellForceCost(castSpell));
     }
 
     if(!this.fake){
@@ -122,7 +129,7 @@ export class ActionCastSpell extends Action {
       if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
     }
 
-    this.startSpellInstance(spell);
+    this.startSpellInstance(castSpell);
     return ActionStatus.COMPLETE;
   }
 
@@ -150,7 +157,8 @@ export class ActionCastSpell extends Action {
 
   private hasTargetObjectId(): boolean {
     const id = this.parameters[5]?.value;
-    return typeof id === 'number' && id > 0 && id !== ModuleObjectConstant.OBJECT_INVALID;
+    // Location casts store -1, which a GFF DWORD round trip turns into 0xFFFFFFFF.
+    return typeof id === 'number' && id > 0 && id !== ModuleObjectConstant.OBJECT_INVALID && id !== 0xFFFFFFFF;
   }
 
   /**
