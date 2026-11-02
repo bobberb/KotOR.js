@@ -16,16 +16,21 @@ import { MenuSaveLoadMode } from "@/enums/gui/MenuSaveLoadMode";
 export class GameOver {
 
   static opening: Promise<boolean> | undefined;
+  static pendingMessage: string | undefined;
 
   /**
    * Show the death menu (Load Game / Quit). Resolves false when the game-over GUI
    * could not be built (missing GUI resource); the load-game menu is opened
    * instead so the player is never left with a dead party and no way out.
    */
-  static OpenDeathScreen(): Promise<boolean> {
+  static OpenDeathScreen(message?: string): Promise<boolean> {
     const partyDeath = GameState.module?.partyDeath;
     if(partyDeath){
       partyDeath.deathScreenRequested = true;
+    }
+    // undefined keeps the current text (a re-open); '' restores the GUI's own.
+    if(message !== undefined){
+      GameOver.pendingMessage = message;
     }
     // The menu is built asynchronously the first time; ticks in between must not build it twice.
     if(!GameOver.opening){
@@ -40,6 +45,10 @@ export class GameOver {
     const manager = GameState.MenuManager;
     const menu = await manager.GetMenuGameOver();
     if(menu?.tGuiPanel){
+      if(GameOver.pendingMessage !== undefined){
+        menu.setMessage(GameOver.pendingMessage);
+        GameOver.pendingMessage = undefined;
+      }
       if(manager.activeMenus.indexOf(menu) == -1){
         menu.open();
       }
@@ -68,6 +77,7 @@ export class GameOver {
    * Same teardown as the in-game Options > Quit button.
    */
   static ReturnToMainMenu(){
+    GameOver.creditsPending = false;
     GameState.UnloadModule();
     GameState.State = EngineState.RUNNING;
 
@@ -86,17 +96,27 @@ export class GameOver {
    * script polling IsCreditSequenceInProgress always gets FALSE eventually.
    */
   static async StartCreditSequence(bTransparentBackground = false): Promise<boolean> {
-    const menu = await GameState.MenuManager.GetMenuCredits();
-    if(!menu?.tGuiPanel){
-      console.warn('GameOver.StartCreditSequence: credits GUI unavailable');
-      return false;
+    // In progress from the call itself: the menu is built asynchronously, and a
+    // script checking straight after StartCreditSequence must already see TRUE.
+    GameOver.creditsPending = true;
+    try{
+      const menu = await GameState.MenuManager.GetMenuCredits();
+      if(!GameOver.creditsPending){ return false; }
+      if(!menu?.tGuiPanel){
+        console.warn('GameOver.StartCreditSequence: credits GUI unavailable');
+        return false;
+      }
+      menu.startSequence();
+      return true;
+    }finally{
+      GameOver.creditsPending = false;
     }
-    menu.startSequence();
-    return true;
   }
 
+  static creditsPending: boolean = false;
+
   static IsCreditSequenceInProgress(): boolean {
-    return !!GameState.MenuManager.MenuCredits?.inProgress;
+    return GameOver.creditsPending || !!GameState.MenuManager.MenuCredits?.inProgress;
   }
 
   /**

@@ -54,6 +54,20 @@ export class MenuGameOver extends GameMenu {
     this.selectedControl = this.BTN_LOADGAME || this.BTN_LASTSAVE || this.BTN_QUIT;
   }
 
+  defaultMessage: string | undefined;
+
+  /**
+   * The reason line (PopUpDeathGUIPanel's help string). An empty message
+   * restores the GUI's own text, so one death's reason never leaks into the next.
+   */
+  setMessage(message = ''){
+    if(!this.LBL_MESSAGE){ return; }
+    if(this.defaultMessage === undefined){
+      this.defaultMessage = this.LBL_MESSAGE.getText?.() ?? '';
+    }
+    this.LBL_MESSAGE.setText(message || this.defaultMessage);
+  }
+
   loadGame(){
     GameOver.OpenLoadGame();
   }

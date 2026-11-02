@@ -132,6 +132,7 @@ export const GetIsObjectValid = defineAction({
   ] as const,
 
   kotor(this: NWScriptInstance, oObject) {
+    if (oObject && (oObject as unknown) === GameState.module) return NW_TRUE;
     return BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleObject) ? NW_TRUE : NW_FALSE;
   },
 });
@@ -170,6 +171,10 @@ export const GetTag = defineAction({
   kotor(this: NWScriptInstance, oObject) {
     if (BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleObject)) {
       return oObject.getTag();
+    }
+
+    if (oObject && (oObject as unknown) === GameState.module) {
+      return GameState.module.getTag();
     }
 
     return "";
@@ -368,6 +373,8 @@ export const GetNearestObject = defineAction({
     intParam("nNth", { optional: true, default: 1 }),
   ] as const,
   kotor(this: NWScriptInstance, nObjectType, oTarget, nNth) {
+    // The module has no position, so nothing is nearest to it.
+    if (oTarget && (oTarget as unknown) === GameState.module) return undefined;
     return GameState.ModuleObjectManager.GetNearestObject(nObjectType, oTarget, nNth - 1);
   },
 });
@@ -383,6 +390,7 @@ export const GetNearestObjectByTag = defineAction({
     intParam("nNth", { optional: true, default: 1 }),
   ] as const,
   kotor(this: NWScriptInstance, sTag, oTarget, nNth) {
+    if (oTarget && (oTarget as unknown) === GameState.module) return undefined;
     return GameState.ModuleObjectManager.GetNearestObjectByTag(sTag, oTarget, nNth - 1);
   },
 });

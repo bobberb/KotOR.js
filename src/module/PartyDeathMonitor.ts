@@ -63,7 +63,9 @@ export class PartyDeathMonitor {
 
   static hostilesEngaged(living: ModuleCreature[]): boolean {
     const party = GameState.PartyManager.party;
-    const creatures: ModuleCreature[] = GameState.module?.area?.creatures || [];
+    const creatures: ModuleCreature[] = GameState.module?.area?.creatures;
+    // Without an area the hostiles cannot be checked, so the fight is not known to be over.
+    if(!Array.isArray(creatures)){ return true; }
     return creatures.some((creature) =>
       PartyDeathMonitor.isParticipant(creature) &&
       !creature.destroyed &&
@@ -123,7 +125,7 @@ export class PartyDeathMonitor {
     }
 
     if(!module.onPlayerDeath(leader)){
-      void GameOver.OpenDeathScreen();
+      void GameOver.OpenDeathScreen('');
     }
   }
 

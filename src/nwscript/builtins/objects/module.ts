@@ -127,7 +127,7 @@ export const IsCreditSequenceInProgress = defineAction({
 export const PopUpDeathGUIPanel = defineAction({
   id: 554,
   name: "PopUpDeathGUIPanel",
-  comment: "554: Displays the death GUI panel (Load Game / Quit).\nThe respawn / wait-for-help options are NWN-only and ignored.",
+  comment: "554: Displays the death GUI panel (Load Game / Quit) with the help text (sHelpString, else the dialog.tlk string nHelpStringReference).\nThe respawn / wait-for-help options are NWN-only and ignored.",
   returnType: NWScriptDataType.VOID,
   params: [
     objectParam<ModuleObject | undefined>("oPC"),
@@ -137,7 +137,9 @@ export const PopUpDeathGUIPanel = defineAction({
     stringParam("sHelpString", { optional: true, default: "" }),
   ] as const,
   kotor(this: NWScriptInstance, oPC, bRespawnButtonEnabled, bWaitForHelpButtonEnabled, nHelpStringReference, sHelpString) {
-    void GameOver.OpenDeathScreen();
+    const message = sHelpString ||
+      (nHelpStringReference > 0 ? GameState.TLKManager?.GetStringById(nHelpStringReference)?.Value || '' : '');
+    void GameOver.OpenDeathScreen(message);
   },
 });
 

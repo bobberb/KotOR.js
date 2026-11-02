@@ -89,6 +89,9 @@ import * as objectCombatRoutines from '@/nwscript/builtins/objects/combat';
 import * as perceptionRoutines from '@/nwscript/builtins/objects/perception';
 import * as movementRoutines from '@/nwscript/builtins/movement';
 import * as itemsLegacyRoutines from '@/nwscript/builtins/itemsLegacy';
+import * as doorRoutines from '@/nwscript/builtins/doorsplaceables';
+import * as equipmentRoutines from '@/nwscript/builtins/objects/equipment';
+import * as miscLegacyRoutines from '@/nwscript/builtins/miscLegacy';
 import { EventTimedEvent } from '@/events/EventTimedEvent';
 import { ModuleObjectManager } from '@/managers/ModuleObjectManager';
 import { ModuleObjectConstant } from '@/enums/module/ModuleObjectConstant';
@@ -231,6 +234,8 @@ beforeEach(() => {
   state.GetDebugState = () => false;
   state.MenuManager = menuManager();
   GameOver.opening = undefined;
+  GameOver.pendingMessage = undefined;
+  GameOver.creditsPending = false;
 
   PartyManager.party = [];
   PartyManager.CurrentMembers = [];
@@ -703,6 +708,8 @@ describe('credits', () => {
     state.controls = { initKeys: jest.fn() };
 
     call(moduleRoutines.StartCreditSequence, {}, 0);
+    // Same script, no frame in between: already in progress.
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
     await flush();
     expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
     expect(state.MenuManager.activeMenus).toEqual([credits]);
@@ -744,11 +751,30 @@ describe('credits', () => {
     expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
   });
 
-  test('without a credits GUI nothing claims to be in progress', async () => {
+  test('without a credits GUI it is in progress only until that is known', async () => {
     const { credits } = creditsMenu();
     credits.tGuiPanel = null;
-    expect(await GameOver.StartCreditSequence()).toBe(false);
+    const started = GameOver.StartCreditSequence();
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+    expect(await started).toBe(false);
     expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
+  });
+
+  test('while the credits GUI is still being built for the first time, a poll already sees TRUE', async () => {
+    const { credits } = creditsMenu();
+    let finishBuild!: (menu: any) => void;
+    state.MenuManager.MenuCredits = undefined;
+    state.MenuManager.GetMenuCredits = jest.fn(() => new Promise((resolve) => { finishBuild = resolve; }));
+
+    call(moduleRoutines.StartCreditSequence, {}, 0);
+    await flush();
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+
+    state.MenuManager.MenuCredits = credits;
+    finishBuild(credits);
+    await flush();
+    expect(credits.inProgress).toBe(true);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
   });
 });
 
@@ -1153,17 +1179,30 @@ describe('module locals and tokens survive the IFO save/load', () => {
     expect(state.module.getCustomToken(51)).toBe('Revan');
   });
 
-  test('locals past the 96 boolean / 8 number default layout are written, not dropped; numbers are bytes', async () => {
+  test('locals keep the object SWVarTable layout: out-of-range indices are ignored with a warning, the save stays 3 + 8 entries', async () => {
     const module = new Module();
     module.setFromIFO(baseIFO(), false);
-    module.setLocalBoolean(120, true);
-    module.setLocalNumber(20, 7);
+    const warn = console.warn as jest.Mock;
+    module.setLocalBoolean(95, true);
+    module.setLocalNumber(7, 4);
+    module.setLocalBoolean(96, true);
+    module.setLocalBoolean(1e6, true);
+    module.setLocalNumber(8, 7);
+    module.setLocalNumber(100000, 5);
+    module.setLocalNumber(-1, 5);
     module.setLocalNumber(5, 300);
+
+    expect(warn.mock.calls.filter((args) => String(args[0]).includes('Module: local'))).toHaveLength(5);
+    const table = module.getSWVarTableSaveStruct();
+    expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
+    expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(8);
 
     const reloaded = await saveAndReload(module);
 
-    expect(reloaded.getLocalBoolean(120)).toBe(true);
-    expect(reloaded.getLocalNumber(20)).toBe(7);
+    expect(reloaded.getLocalBoolean(95)).toBe(true);
+    expect(reloaded.getLocalNumber(7)).toBe(4);
+    expect(reloaded.getLocalBoolean(96)).toBe(false);
+    expect(reloaded.getLocalNumber(8)).toBe(0);
     expect(reloaded.getLocalNumber(5)).toBe(300 & 0xFF);
   });
 
@@ -1202,6 +1241,19 @@ describe('Mod_* scripts run as the module (OBJECT_SELF == GetModule())', () => {
     const oModule = call(moduleRoutines.GetModule, {});
     expect(call(localVarRoutines.GetLocalNumber, {}, oModule, 3)).toBe(9);
     expect(call(localVarRoutines.GetLocalBoolean, {}, oModule, 40)).toBe(1);
+  });
+
+  test('a throwing OnModLoad does not reject the module load, and OnClientEnter still runs', async () => {
+    const module = runningModule();
+    const onLoad = stubScript(() => { throw new TypeError("Cannot read properties of undefined (reading 'filter')"); });
+    const onEnter = stubScript();
+    module.scriptResRefs.set(ModuleObjectScript.ModuleOnLoad, 'k_mod_load');
+    module.scriptResRefs.set(ModuleObjectScript.ModuleOnPlayerClientEnter, 'k_mod_enter');
+    state.NWScript = { Load: (resref: string) => ({ k_mod_load: onLoad, k_mod_enter: onEnter } as any)[resref]?.script.newInstance() };
+
+    await expect(module.initScripts()).resolves.toBeUndefined();
+    expect(onLoad.runs).toHaveLength(1);
+    expect(onEnter.runs).toHaveLength(1);
   });
 
   test('OnModLoad and OnClientEnter run as the module too', async () => {
@@ -1302,5 +1354,140 @@ describe('Mod_* scripts run as the module (OBJECT_SELF == GetModule())', () => {
     expect(call(combatRoutines.GetAttemptedSpellTarget, self)).toBeUndefined();
     expect(call(objectCombatRoutines.GetLastHostileTarget, self)).toBeUndefined();
     expect(call(perceptionRoutines.GetBlockingDoor, self)).toBeUndefined();
+  });
+
+  test('attacks made as the module (ActionAttack, DoDoorAction bash, CutsceneAttack) do nothing', () => {
+    const module = runningModule();
+    const self = { caller: module };
+    const victim = creature('sith');
+    const door: any = { objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleDoor };
+    state.TwoDAManager.datatables.set('animations', { rows: { 5: { name: 'attack' } } });
+    expect(() => call(combatRoutines.ActionAttack, self, victim, 0)).not.toThrow();
+    expect(() => call(doorRoutines.DoDoorAction, self, door, 2)).not.toThrow();
+    expect(() => call(objectCombatRoutines.CutsceneAttack, self, victim, 5, 1, 3)).not.toThrow();
+  });
+
+  test('routines that queue on the caller do nothing when it is gone (a destroyed DelayCommand owner)', () => {
+    const self = { caller: undefined as any };
+    const action = class { setParameter() {} };
+    state.ActionFactory = { ActionUnlockObject: action, ActionLockObject: action, ActionGiveItem: action, ActionTakeItem: action, ActionEquipItem: action };
+    const door: any = { objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleDoor };
+    const npc = creature('trask');
+    const sword: any = new FakeItem('g_w_lghtsbr01');
+    sword.baseItem = { weaponWield: 4, dieToRoll: 8, numDice: 2 };
+    npc.inventory = [sword];
+    npc.equipment = {} as any;
+    expect(() => {
+      call(doorRoutines.ActionUnlockObject, self, door);
+      call(doorRoutines.ActionLockObject, self, door);
+      call(itemsLegacyRoutines.ActionGiveItem, self, new FakeItem('a'), npc);
+      call(itemsLegacyRoutines.ActionTakeItem, self, new FakeItem('a'), npc);
+      call(scriptingRoutines.ActionDoCommand, self, { script: {}, offset: 0 });
+      call(equipmentRoutines.ActionEquipMostDamagingMelee, self, npc, 0);
+      call(equipmentRoutines.ActionEquipMostDamagingRanged, self, npc);
+    }).not.toThrow();
+  });
+
+  test('nearest-object queries relative to the module are OBJECT_INVALID, not a crash', () => {
+    const module = runningModule();
+    const a = creature('a');
+    const b = creature('b');
+    (module.area as any).creatures = [a, b];
+    (module.area as any).placeables = [];
+    ModuleObjectManager.module = module;
+    state.ModuleObjectManager.GetNearestCreature = ModuleObjectManager.GetNearestCreature.bind(ModuleObjectManager);
+    state.ModuleObjectManager.GetNearestObject = ModuleObjectManager.GetNearestObject.bind(ModuleObjectManager);
+    const self = { caller: module };
+
+    // CREATURE_TYPE_PERCEPTION / PERCEPTION_SEEN_AND_HEARD reads the target's perception list.
+    expect(call(miscLegacyRoutines.GetNearestCreature, self, 7, 0, module, 1, -1, -1, -1, -1)).toBeUndefined();
+    expect(call(queryRoutines.GetNearestObject, self, 1, module, 1)).toBeUndefined();
+    expect(call(queryRoutines.GetNearestObjectByTag, self, 'a', module, 1)).toBeUndefined();
+  });
+
+  test('GetIsObjectValid(GetModule()) / (OBJECT_SELF) is TRUE and GetTag(GetModule()) is the module tag', () => {
+    const module = runningModule();
+    module.tag = 'END_M01AA';
+    module.filename = 'end_m01aa';
+    const seen: any = {};
+    module.scripts[ModuleObjectScript.ModuleOnHeartbeat] = stubScript((instance) => {
+      seen.self = call(queryRoutines.GetIsObjectValid, instance, instance.caller);
+      seen.module = call(queryRoutines.GetIsObjectValid, instance, call(moduleRoutines.GetModule, instance));
+      seen.tag = call(queryRoutines.GetTag, instance, call(moduleRoutines.GetModule, instance));
+    }).script;
+
+    tickFor(module, 6);
+
+    expect(seen).toEqual({ self: 1, module: 1, tag: 'END_M01AA' });
+    module.tag = '';
+    expect(call(queryRoutines.GetTag, {}, module)).toBe('end_m01aa');
+    expect(call(queryRoutines.GetIsObjectValid, {}, undefined)).toBe(0);
+  });
+});
+
+describe('death screen message and revive without an area', () => {
+  function messageLabel(menu: any, initial = 'You have been defeated.') {
+    let text = initial;
+    menu.LBL_MESSAGE = { getText: () => text, setText: (value: string) => { text = value; } };
+    return () => text;
+  }
+
+  test('PopUpDeathGUIPanel shows sHelpString, else the TLK string; a later plain death restores the GUI text', async () => {
+    runningModule();
+    state.TLKManager = { GetStringById: (id: number) => ({ Value: `tlk ${id}` }) };
+    await state.MenuManager.GetMenuGameOver();
+    const text = messageLabel(state.MenuManager.MenuGameOver);
+
+    call(moduleRoutines.PopUpDeathGUIPanel, {}, undefined, 0, 0, 0, 'The Sith overwhelmed you.');
+    await flush();
+    expect(text()).toBe('The Sith overwhelmed you.');
+
+    call(moduleRoutines.PopUpDeathGUIPanel, {}, undefined, 0, 0, 42213, '');
+    await flush();
+    expect(text()).toBe('tlk 42213');
+
+    // A re-open (monitor) keeps the text; an engine-default death restores the GUI's.
+    await GameOver.OpenDeathScreen();
+    expect(text()).toBe('tlk 42213');
+    await GameOver.OpenDeathScreen('');
+    expect(text()).toBe('You have been defeated.');
+  });
+
+  test('an engine-default death after a scripted one does not show the old reason', async () => {
+    const module = runningModule();
+    await state.MenuManager.GetMenuGameOver();
+    const text = messageLabel(state.MenuManager.MenuGameOver);
+    const pc = creature('pc');
+    PartyManager.party = [pc];
+    module.scripts[ModuleObjectScript.ModuleOnPlayerDeath] = stubScript((instance) => {
+      call(moduleRoutines.PopUpDeathGUIPanel, instance, pc, 0, 0, 0, 'Killed by the rancor.');
+    }).script;
+    kill(pc);
+    module.tick(0.1);
+    await flush();
+    expect(text()).toBe('Killed by the rancor.');
+
+    // Loaded back up; this time the module has no death script.
+    state.MenuManager.MenuGameOver.close();
+    pc.currentHitPoints = 10;
+    module.tick(0.1);
+    delete module.scripts[ModuleObjectScript.ModuleOnPlayerDeath];
+    kill(pc);
+    module.tick(0.1);
+    await flush();
+    expect(text()).toBe('You have been defeated.');
+  });
+
+  test('with no area to check for hostiles, nobody is revived', () => {
+    const module = runningModule();
+    const pc = creature('pc');
+    const carth = creature('carth');
+    PartyManager.party = [pc, carth];
+    module.area = undefined;
+
+    kill(carth);
+    tickFor(module, 10);
+
+    expect(carth.isDead()).toBe(true);
   });
 });

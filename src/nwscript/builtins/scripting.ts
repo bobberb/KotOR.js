@@ -100,6 +100,8 @@ export const ActionDoCommand = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [actionParam<any>("aActionToDo")] as const,
   kotor(this: NWScriptInstance, aActionToDo) {
+    // Only module objects have an action queue; as the module this is discarded.
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     this.caller.doCommand(aActionToDo.script);
   },
 });

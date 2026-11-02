@@ -618,7 +618,23 @@ export class Module {
     return !!this._locals.Booleans[index];
   }
 
+  /**
+   * Module locals use the same SWVarTable layout as object locals
+   * (ModuleObject.getSWVarTableSaveStruct): 3 BitArray DWORDs and 8 ByteArray
+   * BYTEs. Indices outside that are not stored (warned), so a script index bug
+   * cannot grow the save; number values wrap to a byte on save, as for objects.
+   */
+  static readonly LOCAL_BOOLEAN_COUNT = 96;
+  static readonly LOCAL_NUMBER_COUNT = 8;
+
+  static isLocalIndex(index: number, count: number, kind: string){
+    if(Number.isInteger(index) && index >= 0 && index < count){ return true; }
+    console.warn(`Module: local ${kind} index ${index} is outside 0-${count - 1}; ignored`);
+    return false;
+  }
+
   setLocalBoolean(index: number, value: boolean){
+    if(!Module.isLocalIndex(index, Module.LOCAL_BOOLEAN_COUNT, 'boolean')){ return; }
     this._locals.Booleans[index] = !!value;
   }
 
@@ -627,6 +643,7 @@ export class Module {
   }
 
   setLocalNumber(index: number, value: number){
+    if(!Module.isLocalIndex(index, Module.LOCAL_NUMBER_COUNT, 'number')){ return; }
     this._locals.Numbers[index] = value;
   }
 
@@ -634,7 +651,7 @@ export class Module {
     if(!struct){ return; }
     if(struct.hasField('BitArray')){
       const words = struct.getFieldByLabel('BitArray').getChildStructs();
-      for(let i = 0; i < words.length; i++){
+      for(let i = 0; i < Math.min(words.length, Module.LOCAL_BOOLEAN_COUNT / 32); i++){
         const data = words[i].getFieldByLabel('Variable').getValue() >>> 0;
         for(let bit = 0; bit < 32; bit++){
           this._locals.Booleans[bit + (i * 32)] = ((data >>> bit) & 1) == 1;
@@ -643,26 +660,16 @@ export class Module {
     }
     if(struct.hasField('ByteArray')){
       const bytes = struct.getFieldByLabel('ByteArray').getChildStructs();
-      for(let i = 0; i < bytes.length; i++){
+      for(let i = 0; i < Math.min(bytes.length, Module.LOCAL_NUMBER_COUNT); i++){
         this.setLocalNumber(i, bytes[i].getFieldByLabel('Variable').getValue());
       }
     }
   }
 
-  /**
-   * Same layout ModuleObject.getSWVarTableSaveStruct() writes for objects: at
-   * least 3 BitArray DWORDs (booleans 0-95) and 8 ByteArray BYTEs (numbers 0-7).
-   * The retail per-index limits are not verified here, so a higher index that a
-   * script did set is written too rather than dropped (the loader reads any
-   * length). Numbers are BYTE fields: like object locals, values outside 0-255
-   * wrap on save.
-   */
   getSWVarTableSaveStruct(){
     const struct = new GFFStruct();
-    const setIndices = (values: { [index: number]: any }) =>
-      Object.keys(values).map(Number).filter((index) => !!values[index]);
-    const wordCount = Math.max(3, Math.ceil((Math.max(-1, ...setIndices(this._locals.Booleans)) + 1) / 32));
-    const byteCount = Math.max(8, Math.max(-1, ...setIndices(this._locals.Numbers)) + 1);
+    const wordCount = Module.LOCAL_BOOLEAN_COUNT / 32;
+    const byteCount = Module.LOCAL_NUMBER_COUNT;
     const bitArray = struct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
     for(let i = 0; i < wordCount; i++){
       let value = 0;
@@ -748,17 +755,16 @@ export class Module {
       this.scripts[key] = script;
     }
 
-    const onLoad = this.scripts[ModuleObjectScript.ModuleOnLoad];
-    if(onLoad){
-      onLoad.enteringObject = GameState.PartyManager.party[0];
-      onLoad.run(this, 0);
-    }
+    // Through runScript: a throwing load script must not reject the module load
+    // (GameState.LoadModule would leave the load screen up forever).
+    const entering = (instance: NWScriptInstance) => { instance.enteringObject = GameState.PartyManager.party[0]; };
+    this.runScript(ModuleObjectScript.ModuleOnLoad, entering);
+    this.runScript(ModuleObjectScript.ModuleOnPlayerClientEnter, entering);
+  }
 
-    const onPlayerClientEnter = this.scripts[ModuleObjectScript.ModuleOnPlayerClientEnter];
-    if(onPlayerClientEnter){
-      onPlayerClientEnter.enteringObject = GameState.PartyManager.party[0];
-      onPlayerClientEnter.run(this, 0);
-    }
+  /** GetTag(GetModule()): the IFO's Mod_Tag, else the module resref. */
+  getTag(){
+    return this.tag || this.filename || '';
   }
 
   setCustomToken(tokenNumber = 0, tokenValue = ''){

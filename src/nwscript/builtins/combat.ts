@@ -32,6 +32,8 @@ export const ActionAttack = defineAction({
     intParam("bPassive", { optional: true, default: 0 }),
   ] as const,
   kotor(this: NWScriptInstance, oAttackee, bPassive) {
+    // Only creatures attack; the module (OBJECT_SELF in Mod_* scripts) cannot.
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) return;
     if (BitWise.InstanceOfObject(oAttackee, ModuleObjectType.ModuleCreature)) {
       this.caller.attackCreature(oAttackee);
     } else {
