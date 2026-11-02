@@ -87,7 +87,12 @@ export class ActionCombat extends Action {
         spellAction.setParameter(1, ActionParameterType.INT, combatAction.spellClassIndex);
         spellAction.setParameter(2, ActionParameterType.INT, combatAction.domainLevel); //DomainLevel
         spellAction.setParameter(3, ActionParameterType.INT, 0);
-        spellAction.setParameter(4, ActionParameterType.INT, 0);
+        // Item-granted powers carry their source item so the cast stays free after a save/load (see ActionCastSpell).
+        if(combatAction.spell?.item){
+          spellAction.setParameter(4, ActionParameterType.DWORD, combatAction.spell.item.id);
+        }else{
+          spellAction.setParameter(4, ActionParameterType.INT, 0);
+        }
         spellAction.setParameter(5, ActionParameterType.DWORD, combatAction.target?.id || ModuleObjectConstant.OBJECT_INVALID); //Target Object
         spellAction.setParameter(6, ActionParameterType.FLOAT, combatAction.target.position.x); //Target X
         spellAction.setParameter(7, ActionParameterType.FLOAT, combatAction.target.position.y); //Target Y

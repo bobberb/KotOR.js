@@ -3259,9 +3259,15 @@ export class ModuleCreature extends ModuleObject {
     return spells;
   }
 
+  /** Force powers the creature cannot pay for are not offered to the AI; item-granted powers cost no FP. */
+  canAffordTalent(talent: TalentObject): boolean {
+    if (!BitWise.InstanceOf(talent?.objectType, TalentObjectType.TalentSpell) || talent.item) return true;
+    return this.getFP() >= (talent as TalentSpell).getForcePointCost();
+  }
+
   getRandomTalent(category = 0, category2 = 0) {
 
-    let talents = this.getTalents().filter((talent: TalentObject) => talent.category == category || talent.category == category2);
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category == category || talent.category == category2) && this.canAffordTalent(talent));
     let talent = talents[Math.floor(Math.random() * talents.length)];
     //console.log('getRandomTalent', talent);
     return talent;
@@ -3269,7 +3275,7 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getTalentBest(nCategory = 0, nCRMax = 0, nInclusion = 0, nExcludeType = -1, nExcludeId = -1) {
-    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax));
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax) && this.canAffordTalent(talent));
     talents.sort((a: TalentObject, b: TalentObject) => (a.maxCR > b.maxCR) ? 1 : -1);
     //console.log('getTalentBest', talents);
     if (talents.length) {

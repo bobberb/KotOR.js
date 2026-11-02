@@ -171,6 +171,15 @@ export class TalentSpell extends TalentObject {
     return 'castoutlp1';
   }
 
+  /**
+   * Force point cost from the spells.2da `forcepoints` column; `****` parses to -1 and means free.
+   * Alignment / Force Focus cost modifiers are not applied.
+   */
+  getForcePointCost(): number {
+    const cost = Number(this.forcepoints);
+    return Number.isFinite(cost) && cost > 0 ? cost : 0;
+  }
+
   /** spells.2da `forcehostile`: `****` parses to -1, any other value marks a power usable on enemies. */
   isHostile(){
     return this.forcehostile >= 0;

@@ -152,7 +152,9 @@ export class SpellCastInstance {
     this.impacted = true;
 
     // A creature that dies or is stunned/paralyzed before the power lands loses it; the force points stay spent.
+    // The round still reports it via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
     if(this.isCasterIncapacitated()){
+      if(this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
       this.interrupted = true;
       this.completed = true;
       this.projectile?.dispose();

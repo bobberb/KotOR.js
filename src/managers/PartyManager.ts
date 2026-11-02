@@ -856,7 +856,28 @@ export class PartyManager {
       ?? PartyManager.party.find((pm) => pm instanceof ModuleCreature && pm.npcId == npcId)
       ?? npc.moduleObject;
     if(!(live instanceof ModuleCreature) || live.destroyed) return;
-    npc.template = live.save();
+    // A copy, so the live creature's own template keeps its identity fields.
+    const template = new GFFObject(live.save().getExportBuffer());
+    PartyManager.StripInstanceFields(template.RootNode);
+    npc.template = template;
+  }
+
+  /**
+   * A slot template becomes a new object when spawned, so it must not carry the old instance's identity
+   * (ObjectId, also on inventory items) or its runtime state (queued actions, perception, combat round, area).
+   * HP/FP, effects, inventory and variables persist.
+   */
+  static StripInstanceFields(struct: GFFStruct){
+    for(const label of ['ActionList', 'PerceptionList', 'CombatRoundData', 'AreaId']){
+      struct.removeFieldByLabel(label);
+    }
+    for(const field of struct.getFields().slice()){
+      if(field.getLabel() === 'ObjectId'){
+        struct.removeField(field);
+      }else{
+        for(const child of field.getChildStructs() || []) PartyManager.StripInstanceFields(child);
+      }
+    }
   }
 
   /**

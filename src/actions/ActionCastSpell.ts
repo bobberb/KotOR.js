@@ -13,6 +13,9 @@ import type { TalentSpell } from "@/talents/TalentSpell";
 import { BitWise } from "@/utility/BitWise";
 import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleCreature } from "@/module/ModuleCreature";
+import type { ModuleItem } from "@/module/ModuleItem";
+import { ActionParameterType } from "@/enums/actions/ActionParameterType";
+import * as THREE from "three";
 
 /**
  * ActionCastSpell class.
@@ -85,6 +88,25 @@ export class ActionCastSpell extends Action {
       return ActionStatus.IN_PROGRESS;
     }
 
+    if(!this.target){
+      const range = spell.getCastRange();
+      const x = this.getParameter<number>(6) || 0;
+      const y = this.getParameter<number>(7) || 0;
+      const z = this.getParameter<number>(8) || 0;
+      if(Number.isFinite(range) && this.owner.position.distanceTo(new THREE.Vector3(x, y, z)) > range){
+        enqueueMoveToPoint(this.owner, {
+          x, y, z,
+          area: GameState.module.area.id,
+          target: ModuleObjectConstant.OBJECT_INVALID,
+          run: true,
+          range,
+          timeout: 30.0,
+          groupId: this.groupId,
+        });
+        return ActionStatus.IN_PROGRESS;
+      }
+    }
+
     const combatRound = this.owner.combatRound;
     if(!combatRound) return ActionStatus.FAILED;
     if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
@@ -92,11 +114,20 @@ export class ActionCastSpell extends Action {
     // Menu/talent casts arrive via ActionCombat with their round action (and the talent it carries) already set.
     const queued = combatRound.action;
     const reuseQueued = !!queued && queued.actionType == CombatActionType.CAST_SPELL && queued.spellId == spell.id;
-    // Item-granted powers (armbands) are paid for by the item, not the caster's force points.
     const castSpell: TalentSpell = (reuseQueued && queued.spell) || spell;
-    const paysForcePoints = !this.cheat && !this.fake && !castSpell.item;
-    if(paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, castSpell)){
+    // Item-granted powers (armbands) are paid for by the item, not the caster's force points. Param 4 carries the
+    // item id so the source survives a save/load of the queued action (the round action is runtime-only).
+    const item = (castSpell.item || this.getSourceItem()) as ModuleItem | undefined;
+    if(item && !castSpell.item) castSpell.setItem(item);
+    const paysForcePoints = !this.cheat && !this.fake && !item;
+    const usesItemCharge = !this.cheat && !this.fake && !!item;
+    if(
+      (paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, castSpell)) ||
+      (usesItemCharge && !ActionCastSpell.ItemHasCharge(item))
+    ){
       if(reuseQueued) combatRound.action = undefined;
+      // The creature still loses its round, so the end-of-round AI hook fires and it can choose something else.
+      if(!combatRound.roundStarted) combatRound.beginCombatRound();
       return ActionStatus.FAILED;
     }
 
@@ -123,8 +154,13 @@ export class ActionCastSpell extends Action {
     if(paysForcePoints){
       this.owner.subtractFP(ActionCastSpell.GetSpellForceCost(castSpell));
     }
+    if(usesItemCharge){
+      ActionCastSpell.ConsumeItemCharge(item);
+    }
 
     if(!this.fake){
+      // Cleared until the power actually lands (SpellCastInstance.applyImpact sets it).
+      this.owner.combatData.lastForcePowerSuccess = false;
       this.owner.combatData.lastSpellTarget = this.target;
       if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
     }
@@ -161,13 +197,30 @@ export class ActionCastSpell extends Action {
     return typeof id === 'number' && id > 0 && id !== ModuleObjectConstant.OBJECT_INVALID && id !== 0xFFFFFFFF;
   }
 
-  /**
-   * Force point cost from the spells.2da `forcepoints` column; `****` parses to -1 and means free.
-   * Alignment / Force Focus cost modifiers are not applied.
-   */
   static GetSpellForceCost(spell: TalentSpell): number {
-    const cost = Number(spell?.forcepoints);
-    return Number.isFinite(cost) && cost > 0 ? cost : 0;
+    return spell ? spell.getForcePointCost() : 0;
+  }
+
+  private getSourceItem(): ModuleItem | undefined {
+    if(this.parameters[4]?.type !== ActionParameterType.DWORD) return undefined;
+    const item = this.getParameter<ModuleItem>(4);
+    return BitWise.InstanceOfObject(item, ModuleObjectType.ModuleItem) ? item : undefined;
+  }
+
+  /**
+   * Charge-based items (MaxCharges > 0) spend one charge per use and refuse at 0; other items are unlimited.
+   * Uses-per-day properties are not limited: the engine has no rest cycle to restore them yet.
+   */
+  static IsChargeItem(item: ModuleItem): boolean {
+    return Number(item?.maxCharges) > 0;
+  }
+
+  static ItemHasCharge(item: ModuleItem): boolean {
+    return !ActionCastSpell.IsChargeItem(item) || Number(item.charges) > 0;
+  }
+
+  static ConsumeItemCharge(item: ModuleItem){
+    if(ActionCastSpell.IsChargeItem(item)) item.charges = Math.max(0, (Number(item.charges) || 0) - 1);
   }
 
   static CanAffordSpell(caster: ModuleObject, spell: TalentSpell): boolean {

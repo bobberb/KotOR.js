@@ -62,6 +62,11 @@ import { PartyManager } from '@/managers/PartyManager';
 import { ActionUseTalentOnObject } from '@/nwscript/builtins/talents';
 import { ActionCastSpellAtLocation, ActionCastFakeSpellAtLocation, GetSpellTargetLocation } from '@/nwscript/builtins/objects/spellcasting';
 import { ActionCastFakeSpellAtObject } from '@/nwscript/builtins/upstream/creatures';
+import { GetWasForcePowerSuccessful, GetLastForcePowerUsed } from '@/nwscript/builtins/objects/combat';
+import { CombatRoundAction } from '@/combat/CombatRoundAction';
+import { TalentObject } from '@/talents/TalentObject';
+import { GFFStruct } from '@/resource/GFFStruct';
+import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 
 const SPELL_ID = 7;
 const SPELL_COST = 10;
@@ -132,7 +137,8 @@ beforeEach(() => {
   state.ActionFactory = { ActionCastSpell, ActionCombat, ActionMoveToPoint };
   state.ModuleObjectManager = {
     GetObjectById: (id: number) => objects.get(id),
-    AddObjectById: (): void => {},
+    AddObjectById: (object: ModuleObject): void => { if(!object.id) object.id = nextId++; objects.set(object.id, object); },
+    RemoveObjectById: (id: number): void => { objects.delete(id); },
     GetNextPlayerId: () => nextId++,
   };
   state.module = { area: { id: 1, attachSpellInstance: (instance: SpellCastInstance) => spellInstances.push(instance) } };
@@ -908,4 +914,241 @@ describe('action menu', () => {
 
 test('OBJECT_INVALID constant is what scripts pass for no target', () => {
   expect(GameState.ModuleObjectManager.GetObjectById(ModuleObjectConstant.OBJECT_INVALID)).toBeUndefined();
+});
+
+describe('AI and force point shortage', () => {
+  test('an AI that keeps picking an unaffordable power still gets its end-of-round turns', () => {
+    const caster = makeCreature({ base: 25, max: 25, current: 25 });
+    const target = makeCreature();
+    caster.combatData.combatState = true;
+    let endRounds = 0;
+    const ai: any = { run(){ endRounds++; ActionUseTalentOnObject.kotor.call({ caller: caster } as any, new TalentSpell(SPELL_ID), target); } };
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ai } as any;
+    ActionUseTalentOnObject.kotor.call({ caller: caster } as any, new TalentSpell(SPELL_ID), target);
+    tick([caster, target], 30);
+    expect(impactRuns).toHaveLength(2);
+    expect(caster.getFP()).toBe(5);
+    // One decision per round (3 s), not one per frame.
+    expect(endRounds).toBeGreaterThan(5);
+    expect(endRounds).toBeLessThan(15);
+  });
+
+  function casterWith(fp: number, talents: TalentObject[]){
+    const creature = makeCreature({ base: fp, max: fp, current: fp });
+    creature.classes = [{ getSpells: () => talents } as any];
+    creature.feats = [];
+    creature.skills = [];
+    return creature;
+  }
+
+  function power(id: number, cost: number, maxCR: number, item?: any){
+    installSpells({ ...TwoDAManager.datatables.get('spells').rows, [id]: spellRow({ __rowlabel: String(id), forcepoints: String(cost) }) });
+    const spell = new TalentSpell(id);
+    spell.category = 1;
+    spell.maxCR = maxCR;
+    if(item) spell.setItem(item);
+    return spell;
+  }
+
+  test('GetCreatureTalentBest/Random skip powers the creature cannot pay for (item powers excepted)', () => {
+    const expensive = power(20, 30, 1);
+    const cheap = power(21, 5, 2);
+    expect(casterWith(10, [expensive, cheap]).getTalentBest(1, 5)).toBe(cheap);
+    expect(casterWith(40, [expensive, cheap]).getTalentBest(1, 5)).toBe(expensive);
+    expect(casterWith(10, [expensive]).getRandomTalent(1, 1)).toBeUndefined();
+    expect(casterWith(40, [expensive]).getRandomTalent(1, 1)).toBe(expensive);
+    const armband = power(22, 50, 0, { id: 5 });
+    expect(casterWith(0, [armband]).getTalentBest(1, 5)).toBe(armband);
+  });
+});
+
+describe('force power success bookkeeping', () => {
+  test('a cast interrupted before impact is "used" but not "successful"; a new cast starts unsuccessful', () => {
+    const caster = makeCreature({ base: 40, max: 40, current: 40 });
+    const target = makeCreature();
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(1);
+    expect(GetWasForcePowerSuccessful.kotor.call({} as any, caster)).toBe(1);
+
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    tick([caster, target], 0.3);
+    expect(GetWasForcePowerSuccessful.kotor.call({} as any, caster)).toBe(0);
+    let seen: any;
+    caster.combatData.combatState = true;
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){
+      seen = { used: GetLastForcePowerUsed.kotor.call({} as any, caster), ok: GetWasForcePowerSuccessful.kotor.call({} as any, caster) };
+    } }) } as any;
+    // Another power lands on the caster mid-conjure (impacts flag their target), then the caster is stunned.
+    caster.combatData.lastForcePowerSuccess = true;
+    const stun = jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    tick([caster, target], 0.1);
+    stun.mockReturnValue(false);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(1);
+    expect(seen).toEqual({ used: SPELL_ID, ok: 0 });
+  });
+});
+
+describe('creature location casts and range', () => {
+  test('a creature walks into range before a location cast lands', () => {
+    installSpells({ [SPELL_ID]: spellRow({ range: 'S' }) });
+    const caster = makeCreature();
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(200, 0, 0), 0, 0, 0, 0);
+    caster.actionQueue.process(0.05);
+    expect(caster.actionQueue[0]).toBeInstanceOf(ActionMoveToPoint);
+    expect((caster.actionQueue[0] as ActionMoveToPoint).getParameter(0)).toBe(200);
+    expect((caster.actionQueue[0] as ActionMoveToPoint).getParameter(6)).toBe(10);
+    expect(impactRuns).toHaveLength(0);
+    // Arrived: drop the move and let the cast resolve.
+    caster.actionQueue.shift();
+    caster.position.set(195, 0, 0);
+    tick([caster]);
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].location).toEqual({ x: 200, y: 0, z: 0 });
+  });
+});
+
+describe('item-granted powers', () => {
+  function armband(charges: number, maxCharges: number){
+    const item = Object.create(ModuleItem.prototype) as ModuleItem;
+    item.id = nextId++;
+    item.objectType = ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem;
+    item.charges = charges;
+    item.maxCharges = maxCharges;
+    objects.set(item.id, item);
+    return item;
+  }
+
+  function useArmband(caster: ModuleCreature, target: ModuleCreature, item: ModuleItem){
+    const power = new TalentSpell(SPELL_ID);
+    power.setItem(item);
+    power.useTalentOnObject(target, caster);
+  }
+
+  test('stays free after the round action is lost (save/load) because the action carries the item', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    useArmband(caster, target, armband(0, 0));
+    caster.actionQueue.process(0.05); // ActionCombat -> ActionCastSpell
+    expect(caster.actionQueue[0]).toBeInstanceOf(ActionCastSpell);
+    caster.combatRound.action = undefined;
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(1);
+    expect(caster.getFP()).toBe(0);
+  });
+
+  test('charge-based items spend a charge per use and refuse when empty', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const shield = armband(2, 2);
+    for(let i = 0; i < 3; i++){
+      useArmband(caster, target, shield);
+      tick([caster, target], 4);
+    }
+    expect(impactRuns).toHaveLength(2);
+    expect(shield.charges).toBe(0);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('items without charges are unlimited and untouched', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const band = armband(3, 0);
+    useArmband(caster, target, band);
+    tick([caster, target], 4);
+    useArmband(caster, target, band);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(2);
+    expect(band.charges).toBe(3);
+  });
+
+  test("a script cast of another spell does not borrow a queued item power's free talent", () => {
+    installSpells({ [SPELL_ID]: spellRow(), 8: spellRow({ __rowlabel: '8' }) });
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    const queued = new CombatRoundAction(caster);
+    queued.actionType = CombatActionType.CAST_SPELL;
+    queued.target = target;
+    const free = new TalentSpell(SPELL_ID);
+    free.setItem(armband(0, 0));
+    queued.setSpell(free);
+    caster.combatRound.action = queued;
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, 8, target, 0, 0, 0, 0, 0);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(0);
+  });
+});
+
+describe('party slot templates', () => {
+  function setup(){
+    const state = GameState as any;
+    state.FactionManager = { factions: new Map() };
+    state.AppearanceManager = { GetCreatureAppearanceById: (): any => undefined };
+    state.module.area.creatures = [];
+    state.PartyManager = PartyManager;
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const utc = new GFFObject();
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'ForcePoints')).setValue(30);
+    utc.RootNode.addField(new GFFField(GFFDataType.SHORT, 'CurrentForce')).setValue(30);
+    PartyManager.NPCS = { 0: { available: true, canSelect: true, spawned: false, template: utc } } as any;
+    PartyManager.party = [];
+    return utc;
+  }
+
+  test('switching away from an NPC PC then spawning that NPC gives a new object that stays registered', () => {
+    const utc = setup();
+    const asPC = new ModuleCreature(utc);
+    asPC.initProperties();
+    asPC.npcId = 0;
+    expect(asPC.id).toBeGreaterThan(0);
+    PartyManager.Player = asPC;
+    PartyManager.ActualPlayerTemplate = new GFFObject();
+    PartyManager.SwitchPlayerCharacter(-1);
+    const template = PartyManager.NPCS[0].template;
+    expect(template.RootNode.hasField('ObjectId')).toBe(false);
+    expect(template.RootNode.hasField('ActionList')).toBe(false);
+    expect(asPC.template.RootNode.hasField('ObjectId')).toBe(true);
+
+    const spawned = new ModuleCreature(template);
+    spawned.initProperties();
+    expect(spawned.id).not.toBe(asPC.id);
+    GameState.ModuleObjectManager.RemoveObjectById(asPC.id); // what oldPC.destroy() does
+    expect(GameState.ModuleObjectManager.GetObjectById(spawned.id)).toBe(spawned);
+  });
+
+  test('StripInstanceFields removes identity/runtime fields at any depth and keeps the rest', () => {
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(7);
+    gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'ActionList'));
+    gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'PerceptionList'));
+    gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'CombatRoundData'));
+    gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'AreaId')).setValue(3);
+    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'CurrentForce')).setValue(12);
+    const items = gff.RootNode.addField(new GFFField(GFFDataType.LIST, 'ItemList'));
+    const itemStruct = new GFFStruct(0);
+    itemStruct.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(8);
+    itemStruct.addField(new GFFField(GFFDataType.RESREF, 'TemplateResRef')).setValue('g_a_shield');
+    items.addChildStruct(itemStruct);
+    PartyManager.StripInstanceFields(gff.RootNode);
+    expect(gff.RootNode.getFields().map((f) => f.getLabel())).toEqual(['CurrentForce', 'ItemList']);
+    expect(itemStruct.getFields().map((f) => f.getLabel())).toEqual(['TemplateResRef']);
+  });
+
+  test('a destroyed live object is not snapshotted; a slot moduleObject outside the party is', () => {
+    setup();
+    const npc = makeCreature({ base: 30, max: 30, current: 30 });
+    npc.npcId = 0;
+    npc.subtractFP(9);
+    const original = PartyManager.NPCS[0].template;
+    PartyManager.NPCS[0].moduleObject = npc;
+    npc.destroyed = true;
+    PartyManager.RefreshNPCTemplate(0);
+    expect(PartyManager.NPCS[0].template).toBe(original);
+    npc.destroyed = false;
+    PartyManager.RefreshNPCTemplate(0);
+    expect(PartyManager.NPCS[0].template).not.toBe(original);
+    expect(PartyManager.NPCS[0].template.RootNode.getFieldByLabel('CurrentForce').getValue()).toBe(21);
+  });
 });
