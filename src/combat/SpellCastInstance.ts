@@ -44,17 +44,27 @@ export class SpellCastInstance {
 
   impacted: boolean = false;
   completed: boolean = false;
-  conjureTime = 3000;
+  conjureTime: number = 0;
   conjuring: boolean = false;
   castTime: number = 0;
   private disposed = false;
   private handEffectTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(caster: ModuleObject, target: ModuleObject, spell: TalentSpell){
-    this.context = caster.context;
+    this.context = caster?.context;
     this.owner = caster;
     this.target = target;
     this.spell = spell;
+    this.impactscript = spell?.impactscript || '';
+    this.casthandvisual = spell?.casthandvisual || '';
+    // spells.2da conjtime/casttime are milliseconds: conjure, then cast (projectile flight), then impact.
+    this.conjureTime = SpellCastInstance.ParseMilliseconds(spell?.conjtime);
+    this.castTime = SpellCastInstance.ParseMilliseconds(spell?.casttime);
+  }
+
+  static ParseMilliseconds(value: unknown): number {
+    const ms = Number(value);
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
   }
 
   init(){
@@ -120,7 +130,7 @@ export class SpellCastInstance {
       this.castTime -= 1000 * delta;
     }else{
       this.conjuring = false;
-      if(this.spell.range == 'L') this.impact();
+      this.impact();
       this.completed = true;
     }
     this.casthandmodel?.update(delta);
@@ -131,12 +141,23 @@ export class SpellCastInstance {
     if(this.disposed || this.impacted) return;
     this.impacted = true;
 
-    if(this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = true;
-    if(this.target?.combatData) this.target.combatData.lastForcePowerSuccess = true;
+    if(this.owner?.combatData){
+      this.owner.combatData.lastForcePowerSuccess = true;
+      // Re-assert: a combat round may have begun (and cleared it) between cast start and impact.
+      this.owner.combatData.lastSpellTarget = this.target;
+    }
+    if(this.target?.combatData){
+      this.target.combatData.lastForcePowerSuccess = true;
+      this.target.combatData.lastSpellAttacker = this.owner;
+    }
 
     if(this.impactscript){
       const instance = GameState.NWScript.Load(this.impactscript);
       if(instance){
+        if(this.spell){
+          this.spell.oCaster = this.owner;
+          this.spell.oTarget = this.target;
+        }
         instance.talent = this.spell;
         instance.run(this.owner, 0);
       }

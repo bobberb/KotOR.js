@@ -1054,7 +1054,6 @@ export class CheatConsoleManager {
 
       player.setHP(maxHP);
       player.setFP(maxFP);
-      player.forcePoints = maxFP;
 
       return true;
     }

@@ -7,7 +7,7 @@ import { OdysseyModel3D } from "@/three/odyssey";
 import { TwoDAManager } from "@/managers/TwoDAManager";
 import { ActionType } from "@/enums/actions/ActionType";
 import { ActionCombat } from "@/actions/ActionCombat";
-import { CombatRoundAction, SpellCastInstance } from "@/combat";
+import { CombatRoundAction } from "@/combat/CombatRoundAction";
 import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
 import { CombatActionType } from "@/enums/combat/CombatActionType";
 import { TalentObjectType } from "@/enums/engine/TalentObjectType";
@@ -169,6 +169,16 @@ export class TalentSpell extends TalentObject {
     return 'castoutlp1';
   }
 
+  /** spells.2da `forcehostile`: `****` parses to -1, any other value marks a power usable on enemies. */
+  isHostile(){
+    return this.forcehostile >= 0;
+  }
+
+  /** spells.2da `forcefriendly`: `****` parses to -1, any other value marks a power usable on self/allies. */
+  isFriendly(){
+    return this.forcefriendly >= 0;
+  }
+
   getCasterAnimation(){
     
   }
@@ -183,22 +193,19 @@ export class TalentSpell extends TalentObject {
     console.log('Talent.useTalentOnObject', this);
     
     oCaster.combatData.lastSpellTarget = oTarget;
-    oTarget.combatData.lastSpellAttacker = oCaster;
+    if(oTarget?.combatData) oTarget.combatData.lastSpellAttacker = oCaster;
     if(this.hostilesetting == 1){
       oCaster.resetExcitedDuration();
     }
 
-    const combatAction = new CombatRoundAction();
+    // The SpellCastInstance is created by ActionCastSpell once the round starts.
+    const combatAction = new CombatRoundAction(oCaster);
     combatAction.actionType = CombatActionType.CAST_SPELL;
     combatAction.target = oTarget;
     combatAction.setSpell(this);
     combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
     combatAction.animationName = this.getConjureAnimation();
     combatAction.animationTime = 1500;
-
-    combatAction.addSpellInstance(
-      new SpellCastInstance(combatAction.owner, combatAction.target, this)
-    );
 
     oCaster.combatRound.addAction(combatAction);
 

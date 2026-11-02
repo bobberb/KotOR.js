@@ -1,29 +1,34 @@
 import { Action } from "@/actions/Action";
-import { SpellCastInstance } from "@/combat";
-import { ModuleObjectType } from "@/enums";
-import { ActionParameterType } from "@/enums/actions/ActionParameterType";
+import { SpellCastInstance } from "@/combat/SpellCastInstance";
+import { CombatRoundAction } from "@/combat/CombatRoundAction";
+import { CombatActionType } from "@/enums/combat/CombatActionType";
+import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { ActionStatus } from "@/enums/actions/ActionStatus";
 import { ActionType } from "@/enums/actions/ActionType";
 import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
-import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { GameState } from "@/GameState";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
-// import { TalentSpell } from "@/talents/TalentSpell";
+import type { TalentSpell } from "@/talents/TalentSpell";
 import { BitWise } from "@/utility/BitWise";
 import type { ModuleObject } from "@/module/ModuleObject";
+import type { ModuleCreature } from "@/module/ModuleCreature";
 
 /**
  * ActionCastSpell class.
- * 
+ *
  * KotOR JS - A remake of the Odyssey Game Engine that powered KotOR I & II
- * 
+ *
  * @file ActionCastSpell.ts
  * @author KobaltBlu <https://github.com/KobaltBlu>
  * @license {@link https://www.gnu.org/licenses/gpl-3.0.txt|GPLv3}
  */
 export class ActionCastSpell extends Action {
-  
+
   spell: any = {}
+  /** bCheat from ActionCastSpellAtObject: caster need not be able to cast it, so no force point gate or cost. Runtime-only, not saved. */
+  cheat: boolean = false;
+  /** bInstantSpell from ActionCastSpellAtObject: skip conjure and cast time. Runtime-only, not saved. */
+  instant: boolean = false;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -46,61 +51,110 @@ export class ActionCastSpell extends Action {
   }
 
   update(delta: number = 0): ActionStatus {
-    //console.log('ActionCastSpell', this);
     this.target = this.getParameter<ModuleObject>(5);
-    this.spell = new GameState.TalentSpell( this.getParameter<number>(0));
+    const spellId = this.getParameter<number>(0);
+    if(!(this.spell instanceof GameState.TalentSpell) || this.spell.id !== spellId){
+      this.spell = new GameState.TalentSpell(spellId);
+    }
+    const spell: TalentSpell = this.spell;
+    if(!spell) return ActionStatus.FAILED;
 
-    if(this.spell){
-      if(!this.spell.inRange(this.target, this.owner)){
-
-        // (this.owner as any).openSpot = undefined;
-        enqueueMoveToPoint(this.owner, {
-          x: this.target.position.x,
-          y: this.target.position.y,
-          z: this.target.position.z,
-          area: GameState.module.area.id,
-          target: this.target ? this.target.id : ModuleObjectConstant.OBJECT_INVALID,
-          run: true,
-          range: this.spell.getCastRange(),
-          timeout: 30.0,
-          groupId: this.groupId,
-        });
-
-        return ActionStatus.IN_PROGRESS;
-
-      }else{
-        if(BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
-          this.owner.force = 0;
-          this.owner.speed = 0;
-        }
-
-        if(this.owner.combatRound){
-          const combatRound = this.owner.combatRound;
-          if(!combatRound.roundPaused) {
-            
-            combatRound.beginCombatRound();
-            combatRound.pauseRound(this.owner, combatRound.roundLength);
-            if(combatRound.action){
-              combatRound.action.animation = ModuleCreatureAnimState.CASTOUT1;
-            }
-
-            if(combatRound.roundStarted){
-              const spellCastInstance = new SpellCastInstance(this.owner, combatRound.action.target, combatRound.action.spell);
-              this.owner.area.attachSpellInstance(spellCastInstance);
-              spellCastInstance.init();
-
-              return ActionStatus.COMPLETE;
-            }
-
-          }
-          return ActionStatus.IN_PROGRESS;
-        }else{
-          return ActionStatus.FAILED;
-        }
-      }
+    if(this.target && !spell.inRange(this.target, this.owner)){
+      enqueueMoveToPoint(this.owner, {
+        x: this.target.position.x,
+        y: this.target.position.y,
+        z: this.target.position.z,
+        area: GameState.module.area.id,
+        target: this.target.id,
+        run: true,
+        range: spell.getCastRange(),
+        timeout: 30.0,
+        groupId: this.groupId,
+      });
+      return ActionStatus.IN_PROGRESS;
     }
 
-    return ActionStatus.FAILED;
+    // Placeables/triggers have no combat round driving them, so their casts resolve directly.
+    if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
+      this.startSpellInstance(spell);
+      return ActionStatus.COMPLETE;
+    }
+
+    const combatRound = this.owner.combatRound;
+    if(!combatRound) return ActionStatus.FAILED;
+    if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
+
+    if(!this.cheat && !ActionCastSpell.CanAffordSpell(this.owner, spell)){
+      return ActionStatus.FAILED;
+    }
+
+    this.owner.force = 0;
+    this.owner.speed = 0;
+
+    // Script-initiated casts (ActionCastSpellAtObject) bypass ActionCombat, so no round action exists yet.
+    let combatAction = combatRound.action;
+    if(!combatAction || combatAction.actionType != CombatActionType.CAST_SPELL || combatAction.spellId != spell.id){
+      combatAction = new CombatRoundAction(this.owner);
+      combatAction.actionType = CombatActionType.CAST_SPELL;
+      combatAction.target = this.target;
+      combatAction.setSpell(spell);
+      combatAction.isUserAction = this.isUserAction;
+      combatRound.action = combatAction;
+    }
+    combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
+    combatAction.animationName = spell.getConjureAnimation();
+
+    combatRound.beginCombatRound();
+    combatRound.pauseRound(this.owner, combatRound.roundLength);
+    if(!combatRound.roundStarted) return ActionStatus.FAILED;
+
+    if(!this.cheat){
+      const cost = ActionCastSpell.GetSpellForceCost(spell);
+      if(cost > 0) this.owner.subtractFP(cost);
+    }
+
+    this.owner.combatData.lastSpellTarget = this.target;
+    if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
+
+    this.startSpellInstance(spell);
+    return ActionStatus.COMPLETE;
+  }
+
+  private startSpellInstance(spell: TalentSpell){
+    const spellCastInstance = new SpellCastInstance(this.owner, this.target, spell);
+    if(this.instant){
+      spellCastInstance.conjureTime = 0;
+      spellCastInstance.castTime = 0;
+    }
+    if(this.target){
+      spellCastInstance.targetLocation.copy(this.target.position);
+    }else{
+      spellCastInstance.targetLocation.set(
+        this.getParameter<number>(6) || 0,
+        this.getParameter<number>(7) || 0,
+        this.getParameter<number>(8) || 0,
+      );
+    }
+    const area = this.owner.area || GameState.module?.area;
+    area?.attachSpellInstance(spellCastInstance);
+    spellCastInstance.init();
+    return spellCastInstance;
+  }
+
+  /**
+   * Force point cost from the spells.2da `forcepoints` column; `****` parses to -1 and means free.
+   * Alignment / Force Focus cost modifiers are not applied.
+   */
+  static GetSpellForceCost(spell: TalentSpell): number {
+    const cost = Number(spell?.forcepoints);
+    return Number.isFinite(cost) && cost > 0 ? cost : 0;
+  }
+
+  static CanAffordSpell(caster: ModuleObject, spell: TalentSpell): boolean {
+    const cost = ActionCastSpell.GetSpellForceCost(spell);
+    if(cost <= 0) return true;
+    if(!BitWise.InstanceOfObject(caster, ModuleObjectType.ModuleCreature)) return true;
+    return (caster as ModuleCreature).getFP() >= cost;
   }
 
 }

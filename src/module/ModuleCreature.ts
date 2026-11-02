@@ -48,6 +48,7 @@ import { GameEffectDurationType } from "@/enums/effects/GameEffectDurationType";
 import { BitWise } from "@/utility/BitWise";
 import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { PerceptionType } from "@/enums/engine/PerceptionType";
+import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { AudioEmitterType } from "@/enums/audio/AudioEmitterType";
 import { AudioPriorityGroup } from "@/enums/audio/AudioPriorityGroup";
 import { CombatActionType } from "@/enums/combat/CombatActionType";
@@ -1410,27 +1411,24 @@ export class ModuleCreature extends ModuleObject {
   useTalent(talent: TalentObject, oTarget: ModuleObject): Action {
     let action: Action;
     if (talent instanceof TalentObject) {
-      const combatAction = new CombatRoundAction();
-      switch (talent.objectType) {
-        case 1: //FEAT
-          combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
-          combatAction.target = oTarget;
-          combatAction.setFeat(talent as TalentFeat);
-          this.combatRound.addAction(combatAction);
-          break;
-        case 2: //SKILL
-          if (talent.id == 6) { //Security
-            action = new GameState.ActionFactory.ActionUnlockObject();
-            action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
-            this.actionQueue.add(action);
-          }
-          break;
-        case 0: //SPELL
-          combatAction.actionType = CombatActionType.CAST_SPELL;
-          combatAction.setSpell(talent as TalentSpell);
-          combatAction.target = oTarget;
-          this.combatRound.addAction(combatAction);
-          break;
+      // objectType is a TalentObjectType bit mask (TalentObject | subtype), not the NWScript TALENT_TYPE_* index.
+      if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentFeat)) {
+        const combatAction = new CombatRoundAction();
+        combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
+        combatAction.target = oTarget;
+        combatAction.setFeat(talent as TalentFeat);
+        this.combatRound.addAction(combatAction);
+        if (!this.actionQueue.actionTypeExists(ActionType.ActionCombat)) {
+          this.actionQueue.add(new GameState.ActionFactory.ActionCombat(0xFFFF));
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSkill)) {
+        if (talent.id == 6) { //Security
+          action = new GameState.ActionFactory.ActionUnlockObject();
+          action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
+          this.actionQueue.add(action);
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSpell)) {
+        talent.useTalentOnObject(oTarget, this);
       }
     }
     return action;
@@ -2610,7 +2608,9 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getFP() {
-    return this.forcePoints;
+    // Mirrors getHP: currentForce is relative to the base pool (forcePoints); max adds bonuses. setFP/addFP/subtractFP all write currentForce.
+    const max = this.maxForcePoints ?? this.forcePoints ?? 0;
+    return (max + (this.currentForce || 0)) - (this.forcePoints || 0);
   }
 
   getMaxFP() {
@@ -2849,8 +2849,16 @@ export class ModuleCreature extends ModuleObject {
     }
   }
 
+  /**
+   * Force power save DC. KotOR 1 community mechanics references (GameFAQs mechanics FAQs, Deadly Stream)
+   * give DC = 5 + caster level + Wisdom modifier; unverified against the TSL engine, which may differ
+   * (e.g. Force Focus / alignment bonuses are not modelled here).
+   * Caster level is the sum of spellcaster (Jedi) class levels, falling back to character level for
+   * creatures that cast without a spellcaster class.
+   */
   getSpellSaveDC() {
-    return 10 + this.getSpellCasterLevel();
+    const casterLevel = this.getSpellCasterLevel() || this.getTotalClassLevel();
+    return 5 + casterLevel + CombatRound.GetMod(this.getWIS());
   }
 
   getSpellCasterLevel() {
