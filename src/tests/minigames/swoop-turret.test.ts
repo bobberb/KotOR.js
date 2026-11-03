@@ -953,13 +953,13 @@ describe("review round 2", () => {
 });
 
 describe("review round 2: stepping", () => {
-  test("a long frame is simulated in steps, so a fast swoop cannot skip an obstacle", async () => {
+  test("a long frame cannot skip an obstacle: player collisions are swept along each step", async () => {
     const mg = swoopGame({ Minimum_Speed: 100, Maximum_Speed: 100 });
-    await addObstacle(mg, "mgs_rock01", 50);
+    await addObstacle(mg, "mgs_rock01", 37);
     const hits = fakeScript();
     mg.player.scripts.OnHitObstacle = hits as any;
     mg.initMiniGameObjects();
-    mg.tick(1); // 100 units in one frame; steps of 0.25 land on y=50
+    mg.tick(1); // steps end at y=25 and y=50; the rock at 37 lies between them
     expect(hits.calls).toBe(1);
   });
 
@@ -969,5 +969,156 @@ describe("review round 2: stepping", () => {
     mg.initMiniGameObjects();
     tickFor(mg, 1);
     expect(mg.enemies[0].loopsCompleted).toBe(5);
+  });
+});
+
+describe("review round 3", () => {
+  beforeEach(() => { (GameState as any).State = EngineState.RUNNING; });
+
+  const fighter = (y: number) => ({ Track: `trk_${y}`, Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 });
+
+  test("a bullet hits the nearest target along its path, whatever the list order", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 1, Speed: 600 })] }, [fighter(8), fighter(4)]);
+    mg.enemies[0].setTrack(makeTrack(0, 8, 0)); // listed first, further away
+    mg.enemies[1].setTrack(makeTrack(0, 4, 0));
+    mg.initMiniGameObjects();
+    mg.player.fire();
+    mg.tick(1 / 60); // a 10-unit path through both
+    expect(mg.enemies.map((e) => e.hit_points)).toEqual([10, 6]);
+  });
+
+  test("an obstacle in front shields the fighter behind it", async () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 1, Speed: 600 })] }, [fighter(8)]);
+    mg.enemies[0].setTrack(makeTrack(0, 8, 0));
+    const rock = await addObstacle(mg, "mgt_rock", 4);
+    const rockHits = fakeScript();
+    rock.scripts.OnHitBullet = rockHits as any;
+    mg.initMiniGameObjects();
+    mg.player.fire();
+    mg.tick(1 / 60);
+    expect([rockHits.calls, mg.enemies[0].hit_points]).toEqual([1, 10]);
+  });
+
+  test("a lethal crash ends in OnDeath: no brake, speed reset or invulnerability afterwards", async () => {
+    const mg = swoopGame({ Minimum_Speed: 5, Maximum_Speed: 20, Accel_Secs: 0, Bump_Damage: 3, Hit_Points: 3, Invince_Period: 2 });
+    await addObstacle(mg, "mgs_rock01", 5);
+    const order: string[] = [];
+    mg.player.scripts.OnDeath = fakeScript(() => order.push("OnDeath")) as any;
+    mg.player.scripts.OnBrake = fakeScript(() => order.push("OnBrake")) as any;
+    mg.player.speed = 20;
+    mg.player.gear = 4;
+    mg.initMiniGameObjects();
+    tickFor(mg, 0.5);
+    expect(order).toEqual(["OnDeath"]);
+    expect([mg.player.alive, mg.player.gear, mg.player.invince]).toEqual([false, 4, 0]);
+  });
+
+  test("the outer handler's event model name comes back after a nested event", async () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 50, Accel_Secs: 0 });
+    await addObstacle(mg, "mgs_accel01", 10);
+    let after: unknown[] = [];
+    mg.player.scripts.OnHitObstacle = fakeScript((self) => {
+      routine("kotor", OnObstacleHit, self); // nests OnAccelerate (the player's own model: none)
+      after = [routine("kotor", GetLastEvent, self), routine("kotor", GetLastEventModelName, self)];
+    }) as any;
+    mg.player.scripts.OnAccelerate = fakeScript((self) => expect(routine("kotor", GetLastEventModelName, self)).toBe("")) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    expect(after).toEqual(["OnHitObstacle", "mgs_accel01"]);
+  });
+
+  test("a nested event's script instance still gets the bullet of the enclosing hit", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, [fighter(10)]);
+    const damage: any = fakeScript();
+    mg.enemies[0].scripts.OnDamage = damage;
+    mg.initMiniGameObjects();
+    const bullet = mg.player.gunBanks[0].fire()!;
+    mg.enemies[0].onHitBullet(bullet);
+    expect(damage.calls).toBe(1);
+    expect(damage.mgBullet).toBe(bullet);
+  });
+
+  test("a held swoop shift key needs a release after a pause before it shifts again", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 50, Accel_Secs: 100 });
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    processMiniGameAction("shoot", pressedAndHeld, 0.1);
+    expect(mg.player.gear).toBe(1);
+    (GameState as any).State = EngineState.PAUSED;
+    processMiniGameAction("shoot", held, 0.1);
+    (GameState as any).State = EngineState.RUNNING;
+    tickFor(mg, 1);
+    processMiniGameAction("shoot", pressedAndHeld, 0.1); // still held from before the pause
+    expect(mg.player.gear).toBe(1);
+    processMiniGameAction("shoot", released, 0.1);
+    processMiniGameAction("shoot", pressedAndHeld, 0.1);
+    expect(mg.player.gear).toBe(2);
+  });
+
+  test("HP adjustments made by a delayed action are reported to it", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, [fighter(10)]);
+    (GameState as any).module.timeManager = { getFutureTimeFromSeconds: () => ({ pauseDay: 0, pauseTime: 0 }) };
+    runtime.gameState.GameEventFactory = { EventTimedEvent };
+    mg.initMiniGameObjects();
+    const enemy = mg.enemies[0];
+    let seen: unknown;
+    const delayed: any[] = [];
+    enemy.scripts.OnHitBullet = fakeScript((self) => {
+      runtime.kotor[7].action.call({ caller: self, delayCommands: delayed }, [1, { offset: 0, script: {
+        setCaller() {}, seekTo() {},
+        runScript() { routine("kotor", 590, enemy, enemy, -2, 0); seen = routine("kotor", GetLastHPChange, enemy); },
+      } }]);
+    }) as any;
+    enemy.onHitBullet(mg.player.gunBanks[0].fire()!);
+    delayed[0].execute();
+    expect([seen, enemy.hit_points]).toEqual([-2, 8]);
+  });
+
+  test("GameState.RestoreEnginePlayMode makes a held fire key need a fresh press", () => {
+    // The real GameState class, loaded with its engine imports stubbed (routine harness loader).
+    const { GameState: RealGameState } = runtime.load(require("path").resolve(__dirname, "../../GameState"));
+    const resumeInput = jest.fn();
+    RealGameState.module = { area: { miniGame: { resumeInput } } };
+    RealGameState.SetEngineMode = jest.fn();
+    RealGameState.RestoreEnginePlayMode();
+    expect(resumeInput).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("review round 3: sweep edge cases", () => {
+  test("a point-blank target that contains the muzzle is hit before anything further along", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 1, Speed: 600 })] }, [
+      { Track: "a", Sphere_Radius: 2, Hit_Points: 10, Max_HPs: 10 },
+      { Track: "b", Sphere_Radius: 0.1, Hit_Points: 10, Max_HPs: 10 },
+    ]);
+    mg.enemies[0].setTrack(makeTrack(0, 0.5, 0)); // contains the muzzle at the origin; its far edge is at y=2.5
+    mg.enemies[1].setTrack(makeTrack(0, 1.2, 0)); // entered at y=1.1, before the first one's exit
+    mg.initMiniGameObjects();
+    mg.player.fire();
+    mg.tick(1 / 60);
+    expect(mg.enemies.map((e) => e.hit_points)).toEqual([6, 10]);
+  });
+
+  test("the jump back to the track start after a lap does not sweep through the course", async () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 });
+    mg.player.trackLength = 100;
+    await addObstacle(mg, "mgs_rock01", 50);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 2.5); // one lap: passes y=50 once, then resets from 100 to 0
+    expect([mg.player.loopsCompleted, hits.calls]).toEqual([1, 1]);
+  });
+});
+
+describe("review round 3: sub-steps", () => {
+  test("a long frame still moves short-lived bullets before they expire", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 0.5, Rate_Of_Fire: 1, Speed: 20 })] },
+      [{ Track: "t", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.enemies[0].setTrack(makeTrack(0, 3, 0));
+    mg.initMiniGameObjects();
+    mg.player.fire();
+    mg.tick(1); // one 1 s step would expire the 0.5 s bullet before it moved
+    expect(mg.enemies[0].hit_points).toBe(6);
   });
 });

@@ -26,9 +26,9 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
   timed event (`EventTimedEvent.miniGameContext`, runtime only, never saved). The delayed action reads that
   snapshot even if later events have changed the live record, which is put back afterwards. `AssignCommand` runs
   synchronously, so it already runs inside the event.
-- **Time stepping.** `tick` splits a frame into steps of at most 0.25 s, so a long frame cannot skip collisions or
-  laps. A frame longer than 1 s only advances 1 s, which drops a hitch such as a backgrounded tab the way a pause
-  would.
+- **Time stepping.** `tick` splits a frame into steps of at most 0.25 s, so bullets, heartbeats and laps advance
+  normally through a long frame. Collisions are swept within each step, so a long frame cannot skip one either. A
+  frame longer than 1 s only advances 1 s, which drops a hitch such as a backgrounded tab the way a pause would.
 - **Input.** Minigame input is ignored while the game is paused. After a pause, or when a menu closes back into the
   minigame (`GameState.RestoreEnginePlayMode` → `resumeInput`), a fire/shift key still held must be released and
   pressed again before it acts.
@@ -51,7 +51,11 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
 - **Collisions** are done in world space. The player and followers ride their track's `modelhook`; obstacles sit
   at their LYT position (default radius 1; `SWMG_SetSphereRadius` overrides). Entering a sphere fires the player's
   `OnHitFollower`/`OnHitObstacle`, then the other object's `OnHitFollower`, once per contact, until the spheres
-  separate. Bullets use a swept segment-vs-sphere test, so fast bullets cannot pass through a target between frames.
+  separate.
+  - Player contacts are swept: the player's path over each step is tested against each sphere. The one exception is
+    the jump back to the track start after a lap, where only the new position is tested.
+  - Bullets are swept too, and stop at the first sphere their path enters (nearest along the path, so an obstacle in
+    front shields what is behind it). A target that already contains the bullet is hit first.
 
 ## Swoop racing (Type 1)
 
@@ -64,7 +68,8 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
   - A boost above the cap bleeds back down at `Accel_Secs`.
 - **Default obstacle/follower hit.** Anything named `*accel*`/`*boost*` is an accelerator pad: speed goes to
   `Maximum_Speed` and `OnAccelerate` fires. Anything else is a crash unless the swoop is invulnerable:
-  `Bump_Damage`, speed back to `Minimum_Speed` in first gear, `Invince_Period` of invulnerability, `OnBrake`.
+  `Bump_Damage`, speed back to `Minimum_Speed` in first gear, `Invince_Period` of invulnerability, `OnBrake`. If
+  the bump damage is lethal, the crash ends with `OnDeath`: no speed reset, invulnerability or `OnBrake` follows.
 - **Steering** (`MGActionLeft/Right`, keyboard or gamepad held state) sets an input that is consumed every frame.
   - The steering rate defaults to ARE `LateralAccel` until a script calls `SWMG_SetLateralAccelerationPerSecond`.
   - Lateral speed is capped by ARE `MovementPerSec` when it is set.

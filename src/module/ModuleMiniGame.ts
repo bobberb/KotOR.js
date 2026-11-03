@@ -179,6 +179,8 @@ export class ModuleMiniGame {
   private step(delta: number){
     this.elapsed += delta;
 
+    const from = this.player.getWorldSphere().center.clone();
+    const loopsBefore = this.player.loopsCompleted;
     this.player.update(delta);
 
     for(const enemy of this.enemies.slice()){
@@ -190,7 +192,8 @@ export class ModuleMiniGame {
     }
 
     if(this.type == MiniGameType.SWOOPRACE){
-      this.updatePlayerCollisions();
+      // A lap reset teleports the swoop back to the start: don't sweep across the whole course.
+      this.updatePlayerCollisions(this.player.loopsCompleted === loopsBefore ? from : undefined);
     }
 
     this.updateHeartbeats(delta);
@@ -325,16 +328,19 @@ export class ModuleMiniGame {
    * (`mgContact`) so the default response runs once per contact. Airborne players
    * clear obstacles.
    */
-  updatePlayerCollisions(){
+  updatePlayerCollisions(from?: THREE.Vector3){
     const player = this.player;
     if(!player || !player.alive){ return; }
-    const center = player.getWorldSphere().center;
     const radius = player.getCollisionRadius();
+    // Swept: the player's path over this step, so a long step cannot pass through an object.
+    const path = new THREE.Line3((from ?? player.getWorldSphere().center).clone(), player.getWorldSphere().center.clone());
+    const closest = new THREE.Vector3();
+    const reaches = (sphere: THREE.Sphere) =>
+      path.closestPointToPoint(sphere.center, true, closest).distanceTo(sphere.center) <= radius + sphere.radius;
 
     for(const enemy of this.enemies.slice()){
       const enemySphere = enemy.getWorldSphere();
-      const touching = enemy.alive && !player.isAirborne() &&
-        center.distanceTo(enemySphere.center) <= (radius + enemySphere.radius);
+      const touching = enemy.alive && !player.isAirborne() && reaches(enemySphere);
       if(touching && !enemy.collided){
         enemy.collided = true;
         (enemy as any).mgContact = ++this.contactSerial;
@@ -349,8 +355,7 @@ export class ModuleMiniGame {
 
     for(const obstacle of this.obstacles.slice()){
       const obstacleSphere = obstacle.getWorldSphere();
-      const touching = !player.isAirborne() &&
-        center.distanceTo(obstacleSphere.center) <= (radius + obstacleSphere.radius);
+      const touching = !player.isAirborne() && reaches(obstacleSphere);
       if(touching && !obstacle.collided){
         obstacle.collided = true;
         (obstacle as any).mgContact = ++this.contactSerial;

@@ -84,6 +84,33 @@ export class ModuleMGGunBullet extends ModuleObject {
     };
   }
 
+  /** The target whose sphere this frame's path (directionLine) enters first, if any. */
+  findFirstHit(): IBulletTarget | undefined {
+    const start = this.directionLine.start;
+    const length = this.directionLine.distance();
+    const ray = new THREE.Ray(start.clone(), this.directionLine.delta(new THREE.Vector3()).normalize());
+    const entry = new THREE.Vector3();
+    let best: IBulletTarget | undefined;
+    let bestDistance = Infinity;
+    for(const target of this.getTargets()){
+      const sphere = target.getWorldSphere();
+      if(!(sphere.radius > 0)){ continue; }
+      let distance: number;
+      if(sphere.containsPoint(start)){
+        distance = 0;
+      }else if(length > 0 && ray.intersectSphere(sphere, entry)){
+        distance = start.distanceTo(entry);
+      }else{
+        continue;
+      }
+      if(distance <= length && distance < bestDistance){
+        best = target;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
   /** Advance one frame. Returns false once the bullet is spent (lifespan over or it hit something). */
   update(delta = 0){
     this.life += delta;
@@ -105,20 +132,17 @@ export class ModuleMGGunBullet extends ModuleObject {
       this.model.position.copy(this.position);
     }
 
-    // Swept test along this frame's path so fast bullets cannot tunnel through a target.
-    for(const target of this.getTargets()){
-      const sphere = target.getWorldSphere();
-      if(!(sphere.radius > 0)){ continue; }
-      this.directionLine.closestPointToPoint(sphere.center, true, this.directionLinePoint);
-      if(this.directionLinePoint.distanceTo(sphere.center) <= sphere.radius){
-        this.life = Infinity;
-        if(this.collision_sound){
-          GameState.guiAudioEmitter?.playSoundFireAndForget(this.collision_sound);
-        }
-        target.onHitBullet(this);
-        this.destroyBullet();
-        return false;
+    // Swept test along this frame's path so fast bullets cannot tunnel through a target;
+    // the bullet stops at the first sphere it enters along the path.
+    const hit = this.findFirstHit();
+    if(hit){
+      this.life = Infinity;
+      if(this.collision_sound){
+        GameState.guiAudioEmitter?.playSoundFireAndForget(this.collision_sound);
       }
+      hit.onHitBullet(this);
+      this.destroyBullet();
+      return false;
     }
 
     if(this.model instanceof OdysseyModel3D) this.model.update(delta);

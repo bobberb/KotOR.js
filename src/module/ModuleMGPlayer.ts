@@ -495,6 +495,7 @@ export class ModuleMGPlayer extends ModuleObject {
     }
     if(this.invince > 0){ return; }
     this.getMiniGame()?.applyDamage(this, this.bump_damage || 0);
+    if(!this.alive){ return; } // a lethal crash ends with OnDeath, not a brake
     this.speed = this.speed_min;
     this.gear = 0;
     this.startInvulnerability();
