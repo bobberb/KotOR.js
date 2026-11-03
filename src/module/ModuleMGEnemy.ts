@@ -182,7 +182,7 @@ export class ModuleMGEnemy extends ModuleObject {
       bank.update(delta);
       bank.targetting = this.alive && !this.trigger && !!player?.alive && bank.canSee(player);
       if(bank.targetting){
-        bank.fire();
+        bank.fire(player);
       }
     }
 

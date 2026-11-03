@@ -3,6 +3,7 @@ import { GameEventType } from "@/enums/events/GameEventType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { GFFDataType } from "@/enums/resource/GFFDataType";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
+import type { IMiniGameEventContext } from "@/module/ModuleMiniGame";
 import { GFFField } from "@/resource/GFFField";
 import { GFFStruct } from "@/resource/GFFStruct";
 import { BitWise } from "@/utility/BitWise";
@@ -19,6 +20,8 @@ import { GameEvent } from "@/events/GameEvent";
  */
 export class EventTimedEvent extends GameEvent {
   offset: number;
+  /** Minigame event context captured by DelayCommand inside a minigame handler (runtime only, not saved). */
+  miniGameContext?: IMiniGameEventContext;
 
   constructor(){
     super();
@@ -64,6 +67,11 @@ export class EventTimedEvent extends GameEvent {
     if(!this.script){ return; }
     this.script.setCaller(this.getCaller());
     this.script.seekTo(this.offset);
+    const miniGame = GameState.module?.area?.miniGame;
+    if(this.miniGameContext && miniGame){
+      miniGame.runInContext(this.miniGameContext, () => this.script.runScript());
+      return;
+    }
     this.script.runScript();
   }
 

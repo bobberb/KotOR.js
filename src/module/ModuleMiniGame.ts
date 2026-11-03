@@ -85,7 +85,12 @@ export class ModuleMiniGame {
   /** Seconds the minigame has been ticking (unpaused). */
   elapsed: number = 0;
 
+  /** Context of the handler being run; the empty base context outside any handler. */
   context: IMiniGameEventContext = ModuleMiniGame.EmptyContext();
+  /** Number of minigame handlers on the stack (0 = no event is being handled). */
+  private contextDepth: number = 0;
+  /** Serial of the latest contact; colliding objects carry `mgContact` for the contact they are in. */
+  private contactSerial: number = 0;
 
   private obstacleTemplates: GFFObject[] = [];
   private heartbeatTimers: Map<ModuleObject, number> = new Map();
@@ -108,6 +113,8 @@ export class ModuleMiniGame {
       GFFObject.FromStruct(struct.getFieldByLabel('Player').getChildStructs()[0])
     );
     this.player.miniGame = this;
+    // ARE LateralAccel is the swoop's steering rate until a script sets one (SWMG_SetLateralAccelerationPerSecond).
+    this.player.accel_lateral_secs = this.lateralAccel || 0;
 
     const enemies = struct.getFieldByLabel('Enemies').getChildStructs();
     for(let i = 0; i < enemies.length; i++){
@@ -179,9 +186,10 @@ export class ModuleMiniGame {
 
   /**
    * Run an object's minigame script with the event context SWMG_GetLast* reads.
-   * When the object has no script for the event, `fallback` (the engine default,
-   * also reachable from scripts through SWMG_OnBulletHit/OnObstacleHit/OnDamage/OnDeath)
-   * runs instead.
+   * Each event gets a fresh context (nothing carries over from the enclosing event or
+   * from calls made outside any handler). When the object has no script for the
+   * event, `fallback` (the engine default, also reachable from scripts through
+   * SWMG_OnBulletHit/OnObstacleHit/OnDamage/OnDeath) runs instead.
    */
   dispatchEvent(
     object: ModuleObject,
@@ -190,32 +198,50 @@ export class ModuleMiniGame {
     fallback?: () => void
   ): boolean {
     if(!object){ return false; }
-    const previous = this.context;
     // Hit events name the model that was hit into (or the bullet); other events name the object's own model.
-    const other: any = context.obstacleHit ?? context.followerHit;
+    const other: any = context.obstacleHit === object ? context.followerHit : (context.obstacleHit ?? context.followerHit);
     const modelName = context.bullet ? (context.bullet.model_name || '').toLowerCase()
       : other ? (other.getEventModelName?.() ?? '')
       : ((object as any).getEventModelName?.() ?? '');
-    this.context = {
-      ...previous,
+    const eventContext: IMiniGameEventContext = {
+      ...ModuleMiniGame.EmptyContext(),
       event: scriptKey,
       modelName,
       ...context,
     };
-    try{
+    return this.runInContext(eventContext, () => {
       const instance = object.scripts?.[scriptKey];
       if(!instance){
         fallback?.();
         return false;
       }
-      instance.mgFollower = this.context.followerHit;
-      instance.mgObstacle = this.context.obstacleHit;
-      instance.mgBullet = this.context.bullet;
+      instance.mgFollower = eventContext.followerHit;
+      instance.mgObstacle = eventContext.obstacleHit;
+      instance.mgBullet = eventContext.bullet;
       instance.run(object, 0);
       return true;
+    });
+  }
+
+  /** Run `body` with `context` as the current event context, restoring the previous one afterwards. */
+  runInContext<T>(context: IMiniGameEventContext, body: () => T): T {
+    const previous = this.context;
+    this.context = context;
+    this.contextDepth++;
+    try{
+      return body();
     }finally{
+      this.contextDepth--;
       this.context = previous;
     }
+  }
+
+  /**
+   * Snapshot of the running handler's context, for work a script schedules from inside
+   * it (DelayCommand), so SWMG_GetLast* still describe that event when it runs.
+   */
+  captureContext(): IMiniGameEventContext | undefined {
+    return this.contextDepth > 0 ? { ...this.context } : undefined;
   }
 
   /** Shared damage path for bullets, obstacle bumps and scripts. Returns true if damage was applied. */
@@ -230,12 +256,17 @@ export class ModuleMiniGame {
     return true;
   }
 
-  /** Set or adjust hit points from script. Death fires once if the result is <= 0. */
+  /**
+   * Set or adjust hit points from script. Death fires once if the result is <= 0.
+   * Inside a handler the change is reported by SWMG_GetLastHPChange; outside one it is not recorded.
+   */
   adjustHitPoints(target: IMiniGameCombatant, amount: number = 0, absolute: boolean = false): number {
     if(!target){ return 0; }
     const before = target.hit_points || 0;
     target.hit_points = absolute ? amount : before + amount;
-    this.context.hpChange = target.hit_points - before;
+    if(this.contextDepth > 0){
+      this.context.hpChange = target.hit_points - before;
+    }
     if(target.hit_points <= 0 && target.alive && (target.max_hps > 0 || before > 0)){
       this.kill(target);
     }
@@ -251,7 +282,9 @@ export class ModuleMiniGame {
   /**
    * Swoop collisions: entering a follower's or obstacle's sphere fires the player's
    * OnHitFollower/OnHitObstacle, then the other object's OnHitFollower. Each contact
-   * fires once until the spheres separate again. Airborne players clear obstacles.
+   * fires once until the spheres separate again, and carries a contact serial
+   * (`mgContact`) so the default response runs once per contact. Airborne players
+   * clear obstacles.
    */
   updatePlayerCollisions(){
     const player = this.player;
@@ -265,6 +298,7 @@ export class ModuleMiniGame {
         center.distanceTo(enemySphere.center) <= (radius + enemySphere.radius);
       if(touching && !enemy.collided){
         enemy.collided = true;
+        (enemy as any).mgContact = ++this.contactSerial;
         player.onHitFollower(enemy);
         if(this.enemies.includes(enemy)){
           enemy.onHitFollower(player);
@@ -280,6 +314,7 @@ export class ModuleMiniGame {
         center.distanceTo(obstacleSphere.center) <= (radius + obstacleSphere.radius);
       if(touching && !obstacle.collided){
         obstacle.collided = true;
+        (obstacle as any).mgContact = ++this.contactSerial;
         player.onHitObstacle(obstacle);
         if(this.obstacles.includes(obstacle)){
           obstacle.onHitFollower(player);
@@ -332,9 +367,6 @@ export class ModuleMiniGame {
       const track = this.tracks.find(o => o.track === player.trackName);
       if(track?.model){
         player.setTrack(track.model);
-        if(this.type == MiniGameType.SWOOPRACE){
-          player.initTrackLength(GameState.module?.area?.rooms || []);
-        }
       }else{
         console.warn(`ModuleMiniGame.loadMGPlayer: Failed to resolve track [${player.trackName}]`);
       }

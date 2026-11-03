@@ -29,10 +29,11 @@ export function gffStruct(fields: Fields): GFFStruct {
   return struct;
 }
 
-export function miniGameStruct(type: number, player: Fields, enemies: Fields[] = []): GFFStruct {
+export function miniGameStruct(type: number, player: Fields, enemies: Fields[] = [], are: Fields = {}): GFFStruct {
   return gffStruct({
     Bump_Plane: 0, CameraViewAngle: 50, DOF: 0, DoBumping: 0, Far_Clip: 500,
     LateralAccel: 0, MovementPerSec: 0, Music: 0, Near_Clip: 0.5, Type: type, UseInertia: 0,
+    ...are,
     Player: [player],
     Enemies: enemies,
   });

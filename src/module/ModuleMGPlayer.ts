@@ -35,6 +35,8 @@ export class ModuleMGPlayer extends ModuleObject {
   /** Swoop gear count; each gear unlocks an equal slice of Minimum_Speed..Maximum_Speed. */
   static readonly GEAR_COUNT = 5;
   static readonly JUMP_GRAVITY = 9.8;
+  /** Upshifting is allowed once speed reaches this fraction of the current gear's top speed. */
+  static readonly SHIFT_WINDOW = 0.9;
 
   readonly supportsRuntimeStatePersistence: boolean = false;
 
@@ -59,7 +61,6 @@ export class ModuleMGPlayer extends ModuleObject {
   speed_max: number;
   accel_secs: number;
   accel_lateral_secs: number;
-  lateralForce: number;
   invince: number;
   gear: number;
   gunTimer: number;
@@ -80,6 +81,22 @@ export class ModuleMGPlayer extends ModuleObject {
   bump_damage: number;
   cameraRotate: any;
   num_loops: number;
+
+  /** Tunnel limits as authored (degrees for turret rotation, track units for swoop lateral offset). */
+  tunnelRaw: { neg: { x: number; y: number; z: number; }; pos: { x: number; y: number; z: number; }; } = {
+    neg: { x: 0, y: 0, z: 0 }, pos: { x: 0, y: 0, z: 0 },
+  };
+
+  /** Swoop steering: -1/0/1 from input this frame, current lateral velocity, lane centre on the track. */
+  lateralInput: number = 0;
+  lateralVelocity: number = 0;
+  laneOriginX: number = 0;
+
+  /** Gear-shift key state, so a held key (or OS key repeat) shifts once per press. */
+  shiftHeld: boolean = false;
+
+  /** Contacts whose default obstacle response already ran: object -> contact serial. */
+  handledContacts: Map<ModuleObject, number> = new Map();
 
   /** Swoop track progress: distance along the track, its length, and lap timing. */
   trackDistance: number = 0;
@@ -115,7 +132,6 @@ export class ModuleMGPlayer extends ModuleObject {
     this.speed_max = 0;
     this.accel_secs = 0;
     this.accel_lateral_secs = 0;
-    this.lateralForce = 0;
     this.invince = 0;
 
     this.gear = 0;
@@ -153,6 +169,7 @@ export class ModuleMGPlayer extends ModuleObject {
   setTrack(model = new OdysseyObject3D()){
     console.log('track', model);
     this.track = model;
+    this.laneOriginX = model?.position?.x || 0;
     this.rotation.reorder('YZX');
 
     this.rotate('x', 0);
@@ -205,28 +222,28 @@ export class ModuleMGPlayer extends ModuleObject {
   }
 
   /** Top speed reachable in the current gear; boosts may exceed it and decay back. */
-  getGearMaxSpeed(): number {
+  getGearMaxSpeed(gear: number = this.gear): number {
     if(!(this.speed_max > 0)){ return Infinity; }
     const band = (this.speed_max - this.speed_min) / ModuleMGPlayer.GEAR_COUNT;
-    return this.speed_min + band * (this.gear + 1);
+    return this.speed_min + band * (gear + 1);
   }
 
-  /**
-   * Swoop courses run along world +Y (the direction updateSwoop moves the track), so
-   * one loop is the distance from the track's start to the far end of the area's
-   * room geometry. An explicitly set trackLength wins.
-   */
-  initTrackLength(rooms: { model?: THREE.Object3D }[] = []){
-    if(this.trackLength > 0 || !this.track){ return; }
-    const bounds = new THREE.Box3();
-    for(const room of rooms){
-      if(room?.model){
-        bounds.expandByObject(room.model);
-      }
-    }
-    if(!bounds.isEmpty() && bounds.max.y > this.track.position.y){
-      this.trackLength = bounds.max.y - this.track.position.y;
-    }
+  /** The track model's own animation carries the rider when it has one (as for followers). */
+  isTrackAnimated(): boolean {
+    const track: any = this.track;
+    return track instanceof OdysseyModel3D &&
+      !!(track.animationManager?.currentAnimation || track.odysseyAnimations?.length);
+  }
+
+  /** Max lateral speed: ARE MovementPerSec when set, else the lateral acceleration value. */
+  getMaxLateralSpeed(): number {
+    const movementPerSec = this.getMiniGame()?.movementPerSec || 0;
+    return movementPerSec > 0 ? movementPerSec : (this.accel_lateral_secs || 0);
+  }
+
+  /** Steering input for this frame: -1 left, 1 right. Consumed by the next update. */
+  steer(direction: number){
+    this.lateralInput = Math.max(-1, Math.min(1, direction || 0));
   }
 
   update(delta: number = 0){
@@ -279,8 +296,9 @@ export class ModuleMGPlayer extends ModuleObject {
 
   /**
    * Swoop physics: speed climbs at Accel_Secs toward the current gear's top speed
-   * (boosts above it bleed off at the same rate), steering input is consumed once
-   * per frame, and every track length travelled is one OnTrackLoop.
+   * (boosts above it bleed off at the same rate); steering follows the ARE
+   * LateralAccel/MovementPerSec/UseInertia settings and stays inside TunnelX; the
+   * track animation (or, without one, an explicit trackLength) drives OnTrackLoop.
    */
   updateSwoop(delta: number){
     if(this.speed < this.speed_min){
@@ -297,11 +315,12 @@ export class ModuleMGPlayer extends ModuleObject {
       this.speed = this.speed_max;
     }
 
-    this.forceVector.set(this.lateralForce * delta, this.speed * delta, 0);
+    this.updateLateralVelocity(delta);
+
+    const animated = this.isTrackAnimated();
+    this.forceVector.set(this.lateralVelocity * delta, animated ? 0 : this.speed * delta, 0);
     this.forceVector.add(this.externalForce);
     this.externalForce.set(0, 0, 0);
-    // Steering is re-applied by the input processor every frame the key is held.
-    this.lateralForce = 0;
 
     if(this.jumpHeight > 0 || this.jumpVelocity > 0){
       const previousHeight = this.jumpHeight;
@@ -315,7 +334,13 @@ export class ModuleMGPlayer extends ModuleObject {
     }
 
     this.track.position.add(this.forceVector);
+    this.clampLateral();
     this.track.updateMatrixWorld();
+
+    if(animated){
+      this.advanceTrackAnimation(delta);
+      return;
+    }
 
     this.trackDistance += this.forceVector.y;
     if(this.trackLength > 0){
@@ -325,6 +350,56 @@ export class ModuleMGPlayer extends ModuleObject {
         this.track.updateMatrixWorld();
         this.completeLoop();
       }
+    }
+  }
+
+  /**
+   * Without inertia the swoop slides sideways at full lateral speed while steering and
+   * stops when released; with UseInertia it accelerates/decelerates at LateralAccel.
+   */
+  updateLateralVelocity(delta: number){
+    const input = this.lateralInput;
+    this.lateralInput = 0;
+    const maxSpeed = this.getMaxLateralSpeed();
+    if(!this.getMiniGame()?.useInertia){
+      this.lateralVelocity = input * maxSpeed;
+      return;
+    }
+    const accel = this.accel_lateral_secs || 0;
+    if(input){
+      this.lateralVelocity += input * accel * delta;
+    }else if(this.lateralVelocity > 0){
+      this.lateralVelocity = Math.max(0, this.lateralVelocity - accel * delta);
+    }else{
+      this.lateralVelocity = Math.min(0, this.lateralVelocity + accel * delta);
+    }
+    this.lateralVelocity = Math.max(-maxSpeed, Math.min(maxSpeed, this.lateralVelocity));
+  }
+
+  /** Keep the swoop inside TunnelXNeg..TunnelXPos (track units from the lane centre) unless X is infinite. */
+  clampLateral(){
+    const neg = this.tunnelRaw.neg.x, pos = this.tunnelRaw.pos.x;
+    if(this.tunnelInfinite.x || (neg === 0 && pos === 0) || neg > pos){ return; }
+    const offset = this.track.position.x - this.laneOriginX;
+    const clamped = Math.max(neg, Math.min(pos, offset));
+    if(clamped !== offset){
+      this.track.position.x = this.laneOriginX + clamped;
+      this.lateralVelocity = 0;
+    }
+  }
+
+  /** Play the track animation looped at a rate proportional to speed; each wrap is one lap. */
+  advanceTrackAnimation(delta: number){
+    const track: any = this.track;
+    if(!track.animationManager?.currentAnimation){
+      track.playAnimation(0, true);
+    }
+    const rate = this.speed_max > 0 ? this.speed / this.speed_max : 1;
+    const before = track.animationManager?.currentAnimationState?.elapsedCount || 0;
+    track.update(delta * rate);
+    const after = track.animationManager?.currentAnimationState?.elapsedCount || 0;
+    for(let i = before; i < after; i++){
+      this.completeLoop();
     }
   }
 
@@ -382,9 +457,16 @@ export class ModuleMGPlayer extends ModuleObject {
    * Engine default for OnHitObstacle/OnHitFollower (SWMG_OnObstacleHit): accelerator
    * pads boost to top speed; anything else is a crash unless invulnerable: bump
    * damage, drop to minimum speed in first gear, then the invulnerability period.
+   * Runs at most once per contact, so the player's and the obstacle's scripts can
+   * both call the default without doubling it.
    */
   defaultObstacleHit(object?: ModuleObject){
-    if(!object || !this.alive){ return; }
+    if(!object || object === this || !this.alive){ return; }
+    const contact = (object as any).mgContact as number | undefined;
+    if(contact !== undefined){
+      if(this.handledContacts.get(object) === contact){ return; }
+      this.handledContacts.set(object, contact);
+    }
     if(this.isAccelerator(object)){
       this.boost();
       return;
@@ -402,11 +484,28 @@ export class ModuleMGPlayer extends ModuleObject {
     this.onAccelerate();
   }
 
-  shiftGear(): boolean {
+  /**
+   * Upshift only once speed is within SHIFT_WINDOW of the current gear's top speed,
+   * so shifting has to be timed rather than mashed.
+   */
+  canShiftUp(): boolean {
     if(!this.alive || this.gear >= ModuleMGPlayer.GEAR_COUNT - 1){ return false; }
+    const gearMax = this.getGearMaxSpeed();
+    return !isFinite(gearMax) || this.speed >= gearMax * ModuleMGPlayer.SHIFT_WINDOW;
+  }
+
+  shiftGear(): boolean {
+    if(!this.canShiftUp()){ return false; }
     this.gear++;
     this.onAccelerate();
     return true;
+  }
+
+  /** Shift on the press, not while held: OS key repeat must not keep shifting. */
+  setShiftInput(held: boolean): boolean {
+    const shifted = held && !this.shiftHeld ? this.shiftGear() : false;
+    this.shiftHeld = !!held;
+    return shifted;
   }
 
   shoot(){
@@ -440,42 +539,16 @@ export class ModuleMGPlayer extends ModuleObject {
     }
   }
 
+  /** Turret aim: clamp each axis to its tunnel limits unless TunnelInfinite frees that axis. */
   rotate(axis = 'x', amount = 0){
-
-    switch(axis){
-      case 'x':
-
-        this.rotation.x += amount;
-
-        if(this.rotation.x > this.tunnel.pos.x)
-          this.rotation.x = this.tunnel.pos.x;
-
-        if(this.rotation.x < this.tunnel.neg.x)
-          this.rotation.x = this.tunnel.neg.x;
-
-      break;
-      case 'y':
-
-        this.rotation.y += amount;
-
-        if(this.rotation.y > this.tunnel.pos.y)
-          this.rotation.y = this.tunnel.pos.y;
-
-        if(this.rotation.y < this.tunnel.neg.y)
-          this.rotation.y = this.tunnel.neg.y;
-
-      break;
-      case 'z':
-
-        this.rotation.z += amount;
-
-        if(this.rotation.z > this.tunnel.pos.z)
-          this.rotation.z = this.tunnel.pos.z;
-
-        if(this.rotation.z < this.tunnel.neg.z)
-          this.rotation.z = this.tunnel.neg.z;
-
-      break;
+    if(axis !== 'x' && axis !== 'y' && axis !== 'z'){ return; }
+    const key = axis as 'x' | 'y' | 'z';
+    this.rotation[key] += amount;
+    if(!this.tunnelInfinite?.[key]){
+      if(this.rotation[key] > this.tunnel.pos[key])
+        this.rotation[key] = this.tunnel.pos[key];
+      if(this.rotation[key] < this.tunnel.neg[key])
+        this.rotation[key] = this.tunnel.neg[key];
     }
 
     this.rotation.x = Utility.NormalizeRadian(this.rotation.x);
@@ -1016,6 +1089,11 @@ export class ModuleMGPlayer extends ModuleObject {
 
     if(this.template.RootNode.hasField('TunnelZPos'))
       this.tunnel.pos.z = THREE.MathUtils.degToRad(this.template.getFieldByLabel('TunnelZPos').getValue());
+
+    for(const axis of ['x', 'y', 'z'] as const){
+      this.tunnelRaw.neg[axis] = THREE.MathUtils.radToDeg(this.tunnel.neg[axis]);
+      this.tunnelRaw.pos[axis] = THREE.MathUtils.radToDeg(this.tunnel.pos[axis]);
+    }
 
     // Some retail templates spell the label with a lowercase L ("Tunnellnfinite").
     const infiniteLabel = ['TunnelInfinite', 'Tunnellnfinite'].find((label) => this.template.RootNode.hasField(label));

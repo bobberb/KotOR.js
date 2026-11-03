@@ -61,12 +61,20 @@ export function mgDefaultOnBulletHit(caller: unknown){
   (caller as MGObject).damage(miniGame.context.bulletHitDamage);
 }
 
-/** Engine default for OnHitObstacle/OnHitFollower: accelerator boost or crash (see ModuleMGPlayer.defaultObstacleHit). */
+/**
+ * Engine default for OnHitObstacle/OnHitFollower: accelerator boost or crash (see
+ * ModuleMGPlayer.defaultObstacleHit), resolved from the caller's side of the hit:
+ * the player's script names the thing it hit; an obstacle's or follower's script is
+ * itself the thing the player hit.
+ */
 export function mgDefaultOnObstacleHit(caller: unknown){
   const miniGame = mgGetMiniGame();
-  if(!miniGame){ return; }
-  const player = BitWise.InstanceOfObject(caller, ModuleObjectType.ModuleMGPlayer) ? caller as ModuleMGPlayer : miniGame.player;
-  player?.defaultObstacleHit(miniGame.context.obstacleHit ?? miniGame.context.followerHit);
+  const player = miniGame?.player;
+  if(!player){ return; }
+  const other = caller === player
+    ? (miniGame.context.obstacleHit ?? miniGame.context.followerHit)
+    : (mgIsObject(caller) ? caller as ModuleObject : undefined);
+  player.defaultObstacleHit(other);
 }
 
 export function mgDefaultOnDamage(caller: unknown){
@@ -908,9 +916,11 @@ export const SWMG_SetPlayerOrigin = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [vectorParam<Vec>("vOrigin")] as const,
   kotor(this: NWScriptInstance, vOrigin) {
-    const track = mgPlayer()?.track;
+    const player = mgPlayer();
+    const track = player?.track;
     if (track && vOrigin) {
       track.position.set(vOrigin.x || 0, vOrigin.y || 0, vOrigin.z || 0);
+      player.laneOriginX = vOrigin.x || 0;
       track.updateMatrixWorld();
     }
   },

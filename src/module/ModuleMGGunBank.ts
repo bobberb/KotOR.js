@@ -94,7 +94,15 @@ export class ModuleMGGunBank extends ModuleObject {
     direction.set(0, 1, 0).applyQuaternion(quaternion);
   }
 
-  /** True when a bullet fired now would travel through the target's collision sphere within sensing range. */
+  /** Firing cone half-angle in radians: the widest of Horiz_Spread, Vert_Spread and Inaccuracy (degrees). */
+  getSpreadAngle(): number {
+    return THREE.MathUtils.degToRad(Math.max(0, this.horizSpread || 0, this.vertSpread || 0, this.inaccuracy || 0));
+  }
+
+  /**
+   * True when the target's collision sphere is inside the bank's firing cone (the
+   * barrel axis widened by the bank's spread) and within sensing range.
+   */
   canSee(target: ModuleObject & { getWorldSphere(): THREE.Sphere }): boolean {
     if(!target){ return false; }
     const sphere = target.getWorldSphere();
@@ -102,14 +110,23 @@ export class ModuleMGGunBank extends ModuleObject {
     const position = new THREE.Vector3();
     const direction = new THREE.Vector3();
     this.getMuzzle(position, direction);
-    if(this.sensingRadius > 0 && position.distanceTo(sphere.center) - sphere.radius > this.sensingRadius){
+    const toTarget = sphere.center.clone().sub(position);
+    const distance = toTarget.length();
+    if(this.sensingRadius > 0 && distance - sphere.radius > this.sensingRadius){
       return false;
     }
-    return new THREE.Ray(position, direction).intersectsSphere(sphere);
+    if(distance <= sphere.radius){ return true; }
+    if(direction.dot(toTarget) <= 0){ return false; }
+    const sphereHalfAngle = Math.asin(Math.min(1, sphere.radius / distance));
+    return direction.angleTo(toTarget) <= sphereHalfAngle + this.getSpreadAngle();
   }
 
-  /** Fire one bullet if the bank is ready. Returns the spawned bullet. */
-  fire(): ModuleMGGunBullet | undefined {
+  /**
+   * Fire one bullet if the bank is ready. Returns the spawned bullet. With a target
+   * (enemy fire) the shot is aimed at it, deviating randomly by up to Inaccuracy;
+   * otherwise it leaves along the barrel axis.
+   */
+  fire(target?: { getWorldSphere(): THREE.Sphere }): ModuleMGGunBullet | undefined {
     if(!this.proto_bullet || this.fireTimer > 0){
       return undefined;
     }
@@ -127,6 +144,16 @@ export class ModuleMGGunBank extends ModuleObject {
     const bullet = new ModuleMGGunBullet( this.bulletTemplate, this );
     bullet.copyStats(this.proto_bullet);
     this.getMuzzle(bullet.position, bullet.direction, bullet.quaternion);
+    if(target){
+      const aim = target.getWorldSphere().center.clone().sub(bullet.position).normalize();
+      const error = THREE.MathUtils.degToRad(Math.max(0, this.inaccuracy || 0)) * Math.random();
+      if(error > 0){
+        const axis = new THREE.Vector3().randomDirection().cross(aim).normalize();
+        if(axis.lengthSq() > 0) aim.applyAxisAngle(axis, error);
+      }
+      bullet.direction.copy(aim);
+      bullet.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), aim);
+    }
     this.bullets.push(bullet);
     bullet.loadModel().then((model) => {
       if(model && bullet.life < bullet.lifespan){
