@@ -55,6 +55,9 @@ import { TURN_SPEED_SLOW } from "@/engine/TurnSpeeds";
 import { actionParameterToStruct } from "@/actions/actionParameterStructs";
 
 
+/** Trap detection key shared by every party member (see getTrapDetectorFactionId). */
+export const TRAP_DETECTOR_PARTY = -2;
+
 /**
 * ModuleObject class.
 * 
@@ -265,6 +268,12 @@ export class ModuleObject {
   trapType: number;
   trapFlag: boolean;
   ownerDemolitions: number = -1;
+  /** Factions that have detected this trap; detection is shared by a faction (the party is one). */
+  trapDetectedByFactions: Set<number> = new Set();
+  trapCreatorId: number = ModuleObjectConstant.OBJECT_INVALID;
+  lastTrapDetected: ModuleObject;
+  lastLocked: ModuleObject;
+  lastUnlocked: ModuleObject;
 
   notBlastable: boolean = false;
 
@@ -1962,12 +1971,85 @@ export class ModuleObject {
     //Trigger Geomerty
     trigger.vertices[0] = new THREE.Vector3(-2,  2, 0);
     trigger.vertices[1] = new THREE.Vector3(-2, -2, 0);
-    trigger.vertices[2] = new THREE.Vector3( 2,  2, 0);
+    trigger.vertices[2] = new THREE.Vector3( 2, -2, 0);
     trigger.vertices[3] = new THREE.Vector3( 2,  2, 0);
 
     trigger.load();
 
     this.area.triggers.push(trigger);
+  }
+
+  /**
+   * Detection key for a detector: the whole party shares TRAP_DETECTOR_PARTY
+   * (the PC is faction 0 while companions keep their UTC faction), anyone
+   * else their faction id.
+   */
+  getTrapDetectorFactionId(detector: ModuleObject): number {
+    // PartyManager.party, not isPM: isPM can be stale after a member leaves.
+    if(detector && (GameState.PartyManager?.party || []).indexOf(detector as any) >= 0){
+      return TRAP_DETECTOR_PARTY;
+    }
+    const id = detector?.faction?.id ?? detector?.factionId;
+    return typeof id === 'number' && !isNaN(id) ? id : -1;
+  }
+
+  isTrapDetectedBy(detector: ModuleObject): boolean {
+    if(!detector) return false;
+    return this.trapDetectedByFactions.has(this.getTrapDetectorFactionId(detector));
+  }
+
+  /**
+   * Whether this object is a trap that can still be found: a trapped door or
+   * placeable (TrapFlag set). ModuleTrigger overrides this for mines.
+   */
+  isTrapActive(): boolean {
+    return !this.destroyed && !!this.trapFlag;
+  }
+
+  /** @returns false when refused (detecting a trap that is not active) */
+  setTrapDetectedBy(detector: ModuleObject, detected = true): boolean {
+    if(!detector) return false;
+    if(detected && !this.isTrapActive()) return false;
+    const factionId = this.getTrapDetectorFactionId(detector);
+    if(detected){
+      this.trapDetectedByFactions.add(factionId);
+      detector.lastTrapDetected = this;
+    }else{
+      this.trapDetectedByFactions.delete(factionId);
+    }
+    return true;
+  }
+
+  /** SetTrapDisabled: the trap stays in place, disarmed, and nobody knows about it any more. */
+  disableTrap(){
+    this.trapFlag = false;
+    this.trapDetectedByFactions.clear();
+  }
+
+  /** Engine-local TrapDetectedBy list (faction / party detection keys). */
+  saveTrapDetectedBy(root: GFFStruct){
+    const detectedBy = root.addField( new GFFField(GFFDataType.LIST, 'TrapDetectedBy') );
+    for(const factionId of this.trapDetectedByFactions){
+      const struct = new GFFStruct();
+      struct.addField( new GFFField(GFFDataType.INT, 'FactionId') ).setValue(factionId);
+      detectedBy.addChildStruct(struct);
+    }
+  }
+
+  loadTrapDetectedBy(root: GFFStruct){
+    if(!root?.hasField('TrapDetectedBy')) return;
+    this.trapDetectedByFactions.clear();
+    for(const struct of root.getFieldByLabel('TrapDetectedBy').getChildStructs()){
+      if(struct.hasField('FactionId')){
+        this.trapDetectedByFactions.add(struct.getFieldByLabel('FactionId').getValue());
+      }
+    }
+    if(!this.isTrapActive()) this.trapDetectedByFactions.clear();
+  }
+
+  getTrapCreator(): ModuleObject {
+    if(this.trapCreatorId == undefined || this.trapCreatorId == ModuleObjectConstant.OBJECT_INVALID) return undefined;
+    return GameState.ModuleObjectManager?.GetObjectById?.(this.trapCreatorId);
   }
 
   //---------------//

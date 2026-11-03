@@ -16,8 +16,15 @@ const preservation = fixture("upstreamPreservedBodies.json");
  * by a behavioral test below instead. GetFortitude/Will/ReflexSavingThrow: saves
  * are derived at runtime (ModuleCreature.getTotal*Save()), so the stored
  * *SaveThrow field upstream returns is only the miscellaneous bonus.
+ * GetNearestTrapToObject (488): upstream read the VM arguments in the wrong
+ * order ([oTarget, nTrapDetected] was taken as [mask, oTarget]) so it always
+ * returned OBJECT_INVALID, ignored nTrapDetected, and tested raw trapFlag.
+ * Now: nearest armed trap (isObjectTrapped) to oTarget, detected by oTarget's
+ * side when nTrapDetected is TRUE. SetTrapDisabled (555): also
+ * clears the trap's detection (ModuleTrigger.disableTrap) so a disabled trap is
+ * not left visible and targetable. Both pinned in traps-security.test.ts.
  */
-const DELIBERATE_DIVERGENCES = new Set([491, 492, 493]);
+const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 555]);
 
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });

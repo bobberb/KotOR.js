@@ -3,6 +3,7 @@ import type { ModuleRoom } from "@/module/ModuleRoom";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { GameState } from "@/GameState";
 import { SSFType } from "@/enums/resource/SSFType";
+import { SWSecurityRules, UnlockResult } from "@/engine/rules/SWTrapRules";
 import { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { CExoLocString } from "@/resource/CExoLocString";
 import { GFFObject } from "@/resource/GFFObject";
@@ -74,6 +75,7 @@ export class ModuleDoor extends ModuleObject {
   lockable: boolean;
   locked: boolean;
   openLockDC: number;
+  lastUnlockAttempt: UnlockResult;
   paletteID: number;
   ref: number;
   static: boolean;
@@ -422,6 +424,7 @@ export class ModuleDoor extends ModuleObject {
   lock(object: ModuleObject){
     if(this.locked){ return; }
     this.locked = true;
+    this.lastLocked = object;
     
     const onLock = this.scripts[ModuleObjectScript.DoorOnLock];
     if(onLock){
@@ -432,6 +435,7 @@ export class ModuleDoor extends ModuleObject {
   unlock(object: ModuleObject){
     if(!this.locked){ return; }
     this.locked = false;
+    this.lastUnlocked = object;
     
     const onUnlock = this.scripts[ModuleObjectScript.DoorOnUnlock];
     if(onUnlock){
@@ -439,27 +443,23 @@ export class ModuleDoor extends ModuleObject {
     }
   }
 
+  /**
+   * Unlock with the key (KeyRequired) or a Security check (SWSecurityRules.unlockAttempt),
+   * then use the door. On failure OnFailToOpen is signalled once.
+   * @returns false when the door stays locked
+   */
   attemptUnlock(object: ModuleObject){
     if(!BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleObject)){
       return false;
     }
-    
-    const nSecuritySkill = object.getSkillLevel(SkillType.SECURITY);
-    if(this.isLocked() && !this.keyRequired && nSecuritySkill >= 1){
-      let d20 = 20;//d20 rolls are auto 20's outside of combat
-      let skillCheck = (((object.getWIS()/2) + nSecuritySkill) + d20) - this.openLockDC;
-      if(skillCheck >= 1 && nSecuritySkill >= 1){
-        this.unlock(object);
-        if(BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature)){
-          object.playSoundSet(SSFType.UNLOCK_SUCCESS);
-        }
-      }else{
-        if(BitWise.InstanceOf(object?.objectType, ModuleObjectType.ModuleCreature)){
-          object.playSoundSet(SSFType.UNLOCK_FAIL);
-        }
+
+    if(this.isLocked()){
+      const result = SWSecurityRules.unlockAttempt(this, object);
+      if(result.outcome != 'unlocked' && result.outcome != 'key'){
+        return false;
       }
     }
-        
+
     this.use(object);
     return true;
   }
@@ -1150,6 +1150,8 @@ export class ModuleDoor extends ModuleObject {
     if(this.template.RootNode.hasField('TrapFlag'))
       this.trapFlag = !!this.template.RootNode.getFieldByLabel('TrapFlag').getValue();
 
+    this.loadTrapDetectedBy(this.template.RootNode);
+
     if(this.template.RootNode.hasField('TrapOneShot'))
       this.trapOneShot = !!this.template.getFieldByLabel('TrapOneShot').getValue();
 
@@ -1342,6 +1344,7 @@ export class ModuleDoor extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetectable') ).setValue(this.trapDetectable);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmable') ).setValue(this.trapDisarmable);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue(this.trapFlag);
+    this.saveTrapDetectedBy(gff.RootNode);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'UseTweakColor') ).setValue(this.useTweakColor ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue(this.trapOneShot);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapType') ).setValue(this.trapType);

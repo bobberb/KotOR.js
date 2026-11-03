@@ -126,16 +126,8 @@ export class ActionUnlockObject extends Action {
       this.timer -= delta;
 
       if(this.timer <= 0){
-        const unlocked = (this.target as any).attemptUnlock(this.owner);
-        if(!unlocked){
-          const event = new GameState.GameEventFactory.EventSignalEvent();
-          event.setCaller(this.getOwner());
-          event.setObject(this.target);
-          event.setDay(GameState.module.timeManager.pauseDay);
-          event.setTime(GameState.module.timeManager.pauseTime);
-          event.eventType = SignalEventType.OnFailToOpen;
-          GameState.module.addEvent(event);
-        }
+        // attemptUnlock signals OnFailToOpen itself on failure (once, for every caller).
+        (this.target as any).attemptUnlock(this.owner);
         return ActionStatus.COMPLETE;
       }
       

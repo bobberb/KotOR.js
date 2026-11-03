@@ -55,6 +55,7 @@ import { CombatRound, CombatRoundAction } from "@/combat";
 import { GameEffectFactory } from "@/effects/GameEffectFactory";
 import type { Action } from "@/actions/Action";
 import { ModuleTriggerType } from "@/enums/module/ModuleTriggerType";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 import { EngineDebugType } from "@/enums/engine/EngineDebugType";
 import { TextSprite3D } from "@/engine/TextSprite3D";
 import { UIIconTimerType } from "@/enums/engine/UIIconTimerType";
@@ -972,15 +973,16 @@ export class ModuleCreature extends ModuleObject {
       }
     }
 
-    for(let i = 0, triglen = this.area.triggers.length; i < triglen; i++){
-      const trig = this.area.triggers[i];
-      if(trig.type != ModuleTriggerType.TRAP){ continue; }
-      if(trig.trapDetected){ continue; }
-      const actionFlag = new GameState.ActionFactory.ActionFlagMine();
-      actionFlag.setParameter(0, ActionParameterType.DWORD, trig);
-      this.actionQueue.addFront(actionFlag);
-    }
-    
+    this.updateTrapDetection();
+
+  }
+
+  /**
+   * Passive mine detection: party members only, Awareness vs TrapDetectDC
+   * within range (SWTrapRules.passiveDetect).
+   */
+  updateTrapDetection(){
+    return SWTrapRules.passiveDetect(this, this.area?.triggers || []);
   }
 
   updateCombat(delta = 0){
