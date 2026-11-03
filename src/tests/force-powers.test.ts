@@ -70,6 +70,8 @@ import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { ModuleItemCostTable } from '@/enums/module/ModuleItemCostTable';
 import { ActionStatus } from '@/enums/actions/ActionStatus';
 import { ModuleCreatureAnimState } from '@/enums/module/ModuleCreatureAnimState';
+import { ActionFactory } from '@/actions/ActionFactory';
+import { ActionParameterType } from '@/enums/actions/ActionParameterType';
 
 const SPELL_ID = 7;
 const SPELL_COST = 10;
@@ -604,10 +606,12 @@ describe('fake casts (animation only)', () => {
     (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
     const action = caster.actionQueue[0] as ActionCastSpell;
     expect(action.fake).toBe(true);
+    const anim = jest.spyOn(caster, 'setAnimationState');
     tick([caster, target], 0.2);
-    expect(caster.combatRound.action?.actionType).toBe(CombatActionType.CAST_SPELL);
-    expect(caster.combatRound.action?.animationName).toBeTruthy();
+    expect(anim).toHaveBeenCalledWith(ModuleCreatureAnimState.CASTOUT1);
     expect(spellInstances).toHaveLength(1);
+    // The action holds the queue until the visuals finish.
+    expect(caster.actionQueue[0]).toBe(action);
     tick([caster, target]);
     expect(GameState.NWScript.Load).not.toHaveBeenCalled();
     expect(impactRuns).toHaveLength(0);
@@ -636,7 +640,6 @@ describe('fake casts (animation only)', () => {
     const target = makeCreature();
     (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
     tick([caster, target], 0.2);
-    expect(caster.combatRound.roundStarted).toBe(true);
     expect(spellInstances).toHaveLength(1);
     tick([caster, target]);
     expect(impactRuns).toHaveLength(0);
@@ -649,6 +652,136 @@ describe('fake casts (animation only)', () => {
     tick([caster], 0.2);
     expect(spellInstances).toHaveLength(1);
     tick([caster]);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('a fake cast never starts a combat round or touches combat bookkeeping', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const other = makeCreature();
+    caster.combatData.combatState = true;
+    caster.combatData.lastSpellTarget = other;
+    caster.combatData.lastAttackTarget = other;
+    const priorPower = new TalentSpell(SPELL_ID);
+    caster.combatData.lastForcePowerUsed = priorPower;
+    let endRounds = 0;
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){ endRounds++; } }) } as any;
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 0.2);
+    expect(caster.combatRound.roundStarted).toBe(false);
+    tick([caster, target], 6);
+    expect(caster.combatRound.roundStarted).toBe(false);
+    expect(endRounds).toBe(0);
+    expect(caster.combatData.lastSpellTarget).toBe(other);
+    expect(caster.combatData.lastAttackTarget).toBe(other);
+    expect(caster.combatData.lastForcePowerUsed).toBe(priorPower);
+    expect(target.combatData.lastSpellAttacker).toBeUndefined();
+  });
+
+  test('a fake cast whose visuals are torn down (area unloaded) releases the queue', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 0.2);
+    const instance = spellInstances.pop();
+    instance.dispose();
+    tick([caster, target], 0.1);
+    expect(caster.actionQueue).toHaveLength(0);
+  });
+
+  test('a fake cast leaves a pending real round action for the same power alone', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const pending = new CombatRoundAction(caster);
+    pending.actionType = CombatActionType.CAST_SPELL;
+    pending.target = target;
+    pending.setSpell(new TalentSpell(SPELL_ID));
+    caster.combatRound.action = pending;
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target]);
+    expect(caster.combatRound.action).toBe(pending);
+    expect(impactRuns).toHaveLength(0);
+  });
+
+  test('a fake cast still waits for a running real cast round before playing', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 1);
+    expect(spellInstances).toHaveLength(1); // the real cast only
+    tick([caster, target], 6);
+    expect(impactRuns).toHaveLength(1);
+    expect(caster.actionQueue).toHaveLength(0);
+  });
+});
+
+describe('script flags survive a save/load of the queued action', () => {
+  function saveAndReload(caster: ModuleCreature){
+    const list = caster.actionQueueToActionList();
+    caster.actionQueue.clear();
+    const gff = new GFFObject();
+    gff.RootNode.addField(list);
+    const reloaded = new GFFObject(gff.getExportBuffer());
+    for(const struct of reloaded.RootNode.getFieldByLabel('ActionList').getChildStructs()){
+      caster.actionQueue.add(ActionFactory.FromStruct(struct));
+    }
+  }
+
+  test('a fake cast stays fake: no impact, no FP', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    saveAndReload(caster);
+    expect((caster.actionQueue[0] as ActionCastSpell).fake).toBe(true);
+    tick([caster, target]);
+    expect(spellInstances).toHaveLength(0);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('a cheat cast stays cheat at 0 FP; an instant cast stays instant', () => {
+    const caster = makeCreature({ base: 0, max: 0, current: 0 });
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 1, 0, 0, 1);
+    saveAndReload(caster);
+    const action = caster.actionQueue[0] as ActionCastSpell;
+    expect([action.cheat, action.instant, action.fake]).toEqual([true, true, false]);
+    tick([caster, target], 0.2);
+    expect(impactRuns).toHaveLength(1);
+    expect(caster.getFP()).toBe(0);
+  });
+
+  test('a retail action (param 3 = 0) has no flags', () => {
+    const action = new ActionCastSpell();
+    action.setParameter(3, ActionParameterType.INT, 0);
+    expect([action.cheat, action.instant, action.fake]).toEqual([false, false, false]);
+    action.cheat = true;
+    action.fake = true;
+    action.cheat = false;
+    expect([action.cheat, action.instant, action.fake]).toEqual([false, false, true]);
+  });
+});
+
+describe('force power success belongs to the caster', () => {
+  test("a power landing on a creature does not mark the target's own last power successful", () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    target.combatData.lastForcePowerSuccess = false;
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(1);
+    expect(GetWasForcePowerSuccessful.kotor.call({} as any, caster)).toBe(1);
+    expect(GetWasForcePowerSuccessful.kotor.call({} as any, target)).toBe(0);
+  });
+
+  test('a script-queued cast by a dead caster spends nothing and lands nothing', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    caster.currentHitPoints = -50;
+    tick([caster, target]);
     expect(impactRuns).toHaveLength(0);
     expect(caster.getFP()).toBe(20);
   });
@@ -991,7 +1124,7 @@ describe('force power success bookkeeping', () => {
     caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){
       seen = { used: GetLastForcePowerUsed.kotor.call({} as any, caster), ok: GetWasForcePowerSuccessful.kotor.call({} as any, caster) };
     } }) } as any;
-    // Another power lands on the caster mid-conjure (impacts flag their target), then the caster is stunned.
+    // Something else sets the flag mid-conjure (e.g. a script), then the caster is stunned.
     caster.combatData.lastForcePowerSuccess = true;
     const stun = jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
     tick([caster, target], 0.1);

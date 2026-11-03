@@ -47,8 +47,6 @@ export class CombatRoundAction {
   projectilePath: ProjectilePath = ProjectilePath.DEFAULT;
   overrideSpellId: number = -1;
   overrideSpell: TalentSpell;
-  /** ActionCastFakeSpellAt*: animation only, so the round records no spell bookkeeping. */
-  fake: boolean = false;
 
   item: ModuleItem;
   activePropertyIndex: number = -1;

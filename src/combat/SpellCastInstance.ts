@@ -219,7 +219,6 @@ export class SpellCastInstance {
       this.owner.combatData.lastSpellTarget = this.target;
     }
     if(this.target?.combatData){
-      this.target.combatData.lastForcePowerSuccess = true;
       this.target.combatData.lastSpellAttacker = this.owner;
     }
 
@@ -233,6 +232,11 @@ export class SpellCastInstance {
     }
     instance.talent = this.spell;
     instance.run(this.owner, 0);
+  }
+
+  /** Done for the purposes of whoever waits on it: completed, or torn down (e.g. area unloaded). */
+  isFinished(){
+    return this.completed || this.disposed;
   }
 
   dispose(){

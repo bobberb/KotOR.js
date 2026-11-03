@@ -31,12 +31,42 @@ import * as THREE from "three";
 export class ActionCastSpell extends Action {
 
   spell: any = {}
-  /** bCheat from ActionCastSpellAtObject: caster need not be able to cast it, so no force point gate or cost. Runtime-only, not saved. */
-  cheat: boolean = false;
-  /** bInstantSpell from ActionCastSpellAtObject: skip conjure and cast time. Runtime-only, not saved. */
-  instant: boolean = false;
-  /** ActionCastFakeSpellAt*: conjure/cast animation and visuals only; no force point gate or cost, no impact script. Runtime-only, not saved. */
-  fake: boolean = false;
+  /** The visuals-only instance of a fake cast; the action completes when it finishes. */
+  fakeInstance: SpellCastInstance | undefined;
+
+  /**
+   * Script flags live in high bits of param 3 ("unknown, always 0" in retail saves) so they survive a save/load
+   * of the queued action; a retail 0 means no flags.
+   */
+  static FLAG_CHEAT = 0x10000;
+  static FLAG_INSTANT = 0x20000;
+  static FLAG_FAKE = 0x40000;
+
+  private getFlag(flag: number): boolean {
+    const param = this.parameters[3];
+    return param?.type === ActionParameterType.INT && ((Number(param.value) || 0) & flag) === flag;
+  }
+
+  private setFlag(flag: number, on: boolean){
+    const param = this.parameters[3];
+    const current = param?.type === ActionParameterType.INT ? (Number(param.value) || 0) : 0;
+    this.setParameter(3, ActionParameterType.INT, on ? (current | flag) : (current & ~flag));
+  }
+
+  /** bCheat from ActionCastSpellAt*: caster need not be able to cast it, so no force point gate or cost. */
+  get cheat(){ return this.getFlag(ActionCastSpell.FLAG_CHEAT); }
+  set cheat(on: boolean){ this.setFlag(ActionCastSpell.FLAG_CHEAT, on); }
+
+  /** bInstantSpell from ActionCastSpellAt*: skip conjure and cast time. */
+  get instant(){ return this.getFlag(ActionCastSpell.FLAG_INSTANT); }
+  set instant(on: boolean){ this.setFlag(ActionCastSpell.FLAG_INSTANT, on); }
+
+  /**
+   * ActionCastFakeSpellAt*: conjure/cast animation and visuals only. No force points, no impact script, and no
+   * combat round or combat bookkeeping (the caster may be an out-of-combat cutscene actor).
+   */
+  get fake(){ return this.getFlag(ActionCastSpell.FLAG_FAKE); }
+  set fake(on: boolean){ this.setFlag(ActionCastSpell.FLAG_FAKE, on); }
   /** Consecutive walks toward the cast point that ended no closer than they started. */
   stalledApproaches: number = 0;
   /** 2D distance to the cast point when the last walk was queued. */
@@ -82,6 +112,14 @@ export class ActionCastSpell extends Action {
       this.startSpellInstance(spell);
       return ActionStatus.COMPLETE;
     }
+
+    // A fake cast holds the queue until its visuals finish, like a real cast's paused round would.
+    if(this.fakeInstance){
+      return this.fakeInstance.isFinished() ? ActionStatus.COMPLETE : ActionStatus.IN_PROGRESS;
+    }
+
+    // A dead caster casts nothing (and pays nothing); the engine normally clears its queue on death.
+    if(this.owner.isDead()) return ActionStatus.FAILED;
 
     const combatRound = this.owner.combatRound;
     if(!combatRound) return ActionStatus.FAILED;
@@ -129,6 +167,16 @@ export class ActionCastSpell extends Action {
       return ActionStatus.IN_PROGRESS;
     }
 
+    if(this.fake){
+      // Visuals only: no combat round (which would clear or report combat bookkeeping and fire OnEndRound),
+      // no pending round action touched, no force points.
+      this.owner.force = 0;
+      this.owner.speed = 0;
+      this.owner.setAnimationState(ModuleCreatureAnimState.CASTOUT1);
+      this.fakeInstance = this.startSpellInstance(spell);
+      return ActionStatus.IN_PROGRESS;
+    }
+
     // Menu/talent casts arrive via ActionCombat with their round action (and the talent it carries) already set.
     const queued = combatRound.action;
     const reuseQueued = !!queued && queued.actionType == CombatActionType.CAST_SPELL && queued.spellId == spell.id;
@@ -138,8 +186,8 @@ export class ActionCastSpell extends Action {
     const itemRequested = !!castSpell.item || this.hasSourceItemId();
     const item = (castSpell.item || this.getSourceItem()) as ModuleItem | undefined;
     if(item && !castSpell.item) castSpell.setItem(item);
-    const paysForcePoints = !this.cheat && !this.fake && !itemRequested;
-    const usesItemCharge = !this.cheat && !this.fake && itemRequested;
+    const paysForcePoints = !this.cheat && !itemRequested;
+    const usesItemCharge = !this.cheat && itemRequested;
     if(
       (paysForcePoints && !ActionCastSpell.CanAffordSpell(this.owner, castSpell)) ||
       // The power comes from the item: refuse when it is gone, no longer equipped by the caster, or out of charges.
@@ -161,7 +209,6 @@ export class ActionCastSpell extends Action {
       combatAction.isUserAction = this.isUserAction;
       combatRound.action = combatAction;
     }
-    combatAction.fake = this.fake;
     combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
     combatAction.animationName = castSpell.getConjureAnimation();
 
@@ -175,12 +222,10 @@ export class ActionCastSpell extends Action {
       ActionCastSpell.ConsumeItemCharge(item, spell.id);
     }
 
-    if(!this.fake){
-      // Cleared until the power actually lands (SpellCastInstance.applyImpact sets it).
-      this.owner.combatData.lastForcePowerSuccess = false;
-      this.owner.combatData.lastSpellTarget = this.target;
-      if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
-    }
+    // Cleared until the power actually lands (SpellCastInstance.applyImpact sets it).
+    this.owner.combatData.lastForcePowerSuccess = false;
+    this.owner.combatData.lastSpellTarget = this.target;
+    if(this.target?.combatData) this.target.combatData.lastSpellAttacker = this.owner;
 
     this.startSpellInstance(castSpell);
     return ActionStatus.COMPLETE;

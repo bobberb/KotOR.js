@@ -214,7 +214,7 @@ export class CombatRound {
         if(this.action.feat){
           combatData.lastCombatFeatUsed = this.action.feat;
         }
-      }else if(this.action.actionType == CombatActionType.CAST_SPELL && !this.action.fake){
+      }else if(this.action.actionType == CombatActionType.CAST_SPELL){
         combatData.lastAttackAction = ActionType.ActionCastSpell;
         combatData.lastAttemptedSpellTarget = this.action.target;
         if(this.action.spell){
