@@ -1073,7 +1073,7 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
     expect(impactRuns).toHaveLength(1);
     expect(impactRuns[0].spellTarget).toBe(target);
     expect(moves).toHaveLength(expectedMoves);
-    if(expectedMoves) expect(moves[0].getParameter(6)).toBeCloseTo(4.5);
+    if(expectedMoves) expect(moves[0].getParameter(6)).toBeCloseTo(1);
   });
 
   test('a walk that keeps ending out of range gives up after a few attempts instead of looping', () => {
@@ -1086,11 +1086,79 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
     jest.spyOn(ActionMoveToPoint.prototype, 'update').mockReturnValue(ActionStatus.COMPLETE);
     ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0, 0, 0, 0);
     tick([caster], 6);
-    expect(moves).toHaveLength(ActionCastSpell.MAX_APPROACH_ATTEMPTS);
+    expect(moves).toHaveLength(3);
     expect(impactRuns).toHaveLength(0);
     expect(caster.actionQueue).toHaveLength(0);
     expect(caster.getFP()).toBe(20);
     expect(endRounds).toBe(1);
+  });
+
+  test('walks that gain ground do not count against the cast; only stalled ones do', () => {
+    const caster = makeCreature();
+    const moves = countMoves(caster);
+    // Each walk "arrives" after carrying the caster 3 m toward a point 40 m away (a winding path), so the
+    // cast needs many walks; none of them stalls.
+    jest.spyOn(ActionMoveToPoint.prototype, 'update').mockImplementation(function(this: ActionMoveToPoint){
+      this.owner.position.x += 3;
+      return ActionStatus.COMPLETE;
+    });
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0, 0, 0, 0);
+    tick([caster], 6);
+    expect(moves.length).toBeGreaterThan(3);
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  /** The target flees along +x at a fraction of the caster's run speed while the caster chases. */
+  function chaseTick(caster: ModuleCreature, target: ModuleCreature, seconds: number, speedFraction: number, delta = 0.05){
+    for(let t = 0; t < seconds - 1e-9; t += delta){
+      target.position.x += RUN_SPEED * speedFraction * delta;
+      walkTick([caster, target], delta, delta);
+    }
+  }
+
+  test.each([
+    ['S', 10, 0.8, 'script'], ['S', 10, 0.9, 'menu'],
+    ['M', 15, 0.8, 'menu'], ['M', 15, 0.9, 'script'],
+    ['L', 28, 0.8, 'script'], ['L', 28, 0.9, 'menu'],
+  ])('range %s: catches a target fleeing at %s/%s of run speed in one walk (%s)', (rangeKey, range, fraction, path) => {
+    installSpells({ [SPELL_ID]: spellRow({ range: String(rangeKey) }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    target.position.set(Number(range) + 4, 0, 1);
+    const moves = countMoves(caster);
+    const castAt: number[] = [];
+    const attach = (GameState.module.area as any).attachSpellInstance;
+    (GameState.module.area as any).attachSpellInstance = (instance: SpellCastInstance) => {
+      castAt.push(Math.hypot(target.position.x - caster.position.x, target.position.y - caster.position.y));
+      attach(instance);
+    };
+    if(path === 'menu') new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    else ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    chaseTick(caster, target, 20, Number(fraction));
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].spellTarget).toBe(target);
+    expect(moves).toHaveLength(1);
+    expect(castAt).toHaveLength(1);
+    expect(castAt[0]).toBeLessThanOrEqual(Number(range));
+    expect(caster.getFP()).toBe(20 - SPELL_COST);
+  });
+
+  test('a second queued cast does not walk the caster while the first is conjuring', () => {
+    const caster = makeCreature({ base: 40, max: 40, current: 40 });
+    const target = makeCreature();
+    target.position.set(9, 0, 0);
+    const walksWhilePaused: boolean[] = [];
+    const addFront = caster.actionQueue.addFront.bind(caster.actionQueue);
+    jest.spyOn(caster.actionQueue, 'addFront').mockImplementation((action: any) => {
+      if(action instanceof ActionMoveToPoint) walksWhilePaused.push(caster.combatRound.roundPaused);
+      return addFront(action);
+    });
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    chaseTick(caster, target, 12, 0.6);
+    expect(impactRuns).toHaveLength(2);
+    expect(walksWhilePaused.length).toBeGreaterThan(0);
+    expect(walksWhilePaused.every((paused) => !paused)).toBe(true);
   });
 });
 
@@ -1271,15 +1339,20 @@ describe('item-granted powers', () => {
     expect(band.charges).toBe(1);
   });
 
-  test('iprp_chargecost: single use', () => {
+  test.each([
+    ['no charge counter', 0, 0],
+    ['charges left over', 5, 0],
+    ['a charge counter', 5, 5],
+  ])('iprp_chargecost: single use on an item with %s is spent after one use', (_label, charges, maxCharges) => {
     const caster = makeCreature();
     const target = makeCreature();
-    const stim = withCastSpellCost(armband(0, 0), 0);
+    const stim = withCastSpellCost(armband(charges, maxCharges), 0);
     for(let i = 0; i < 2; i++){
       useArmband(caster, target, stim);
       tick([caster, target], 4);
     }
     expect(impactRuns).toHaveLength(1);
+    expect(stim.charges).toBe(0);
   });
 
   test('iprp_chargecost: uses/day and unlimited rows spend no charges', () => {

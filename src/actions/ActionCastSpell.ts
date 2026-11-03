@@ -11,6 +11,7 @@ import { GameState } from "@/GameState";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
 import type { TalentSpell } from "@/talents/TalentSpell";
 import { BitWise } from "@/utility/BitWise";
+import { Utility } from "@/utility/Utility";
 import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleCreature } from "@/module/ModuleCreature";
 import type { ModuleItem } from "@/module/ModuleItem";
@@ -36,9 +37,14 @@ export class ActionCastSpell extends Action {
   instant: boolean = false;
   /** ActionCastFakeSpellAt*: conjure/cast animation and visuals only; no force point gate or cost, no impact script. Runtime-only, not saved. */
   fake: boolean = false;
-  /** Walks queued to get into range for this cast. */
-  approachAttempts: number = 0;
-  static MAX_APPROACH_ATTEMPTS = 3;
+  /** Consecutive walks toward the cast point that ended no closer than they started. */
+  stalledApproaches: number = 0;
+  /** 2D distance to the cast point when the last walk was queued. */
+  approachStartDistance: number | undefined;
+  static MAX_STALLED_APPROACHES = 3;
+  static APPROACH_PROGRESS_EPSILON = 0.25;
+  /** Range for walks toward an object; arrival is decided by the walk's stopWhen (a move restored from a save lacks it and walks close). */
+  static OBJECT_MOVE_RANGE = 1.0;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -77,30 +83,44 @@ export class ActionCastSpell extends Action {
       return ActionStatus.COMPLETE;
     }
 
-    const castPoint = this.target
-      ? this.target.position
+    const combatRound = this.owner.combatRound;
+    if(!combatRound) return ActionStatus.FAILED;
+    // Wait out the current cast's round before walking: a queued cast must not move the caster mid-conjure.
+    if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
+
+    const target = this.target;
+    const castPoint = target
+      ? target.position
       : new THREE.Vector3(this.getParameter<number>(6) || 0, this.getParameter<number>(7) || 0, this.getParameter<number>(8) || 0);
-    if(this.target != this.owner && !spell.isPointInRange(this.owner, castPoint)){
-      // Walks that keep ending out of range (unreachable point, blocked walkmesh) fail the cast instead of looping forever.
-      if(this.approachAttempts >= ActionCastSpell.MAX_APPROACH_ATTEMPTS) return this.refuse(spell);
-      this.approachAttempts++;
-      enqueueMoveToPoint(this.owner, {
+    if(target != this.owner && !spell.isPointInRange(this.owner, castPoint)){
+      // Only walks that ended no closer than they started count against the cast (unreachable point, blocked
+      // walkmesh); chasing a target that keeps moving away is fine as long as each walk gains ground.
+      const distance = Utility.Distance2D(this.owner.position, castPoint);
+      if(this.approachStartDistance !== undefined){
+        this.stalledApproaches = distance < this.approachStartDistance - ActionCastSpell.APPROACH_PROGRESS_EPSILON
+          ? 0
+          : this.stalledApproaches + 1;
+      }
+      if(this.stalledApproaches >= ActionCastSpell.MAX_STALLED_APPROACHES) return this.refuse(spell);
+      this.approachStartDistance = distance;
+      const approachRange = spell.getApproachRange();
+      const move = enqueueMoveToPoint(this.owner, {
         x: castPoint.x,
         y: castPoint.y,
         z: castPoint.z,
         area: GameState.module.area.id,
-        target: this.target ? this.target.id : ModuleObjectConstant.OBJECT_INVALID,
+        target: target ? target.id : ModuleObjectConstant.OBJECT_INVALID,
         run: true,
-        range: spell.getApproachRange(!!this.target),
+        // A move toward an object would otherwise stop near a stand-off point computed from where the target
+        // was, which a fleeing target has already left; the live stopWhen below is the real arrival test.
+        range: target ? ActionCastSpell.OBJECT_MOVE_RANGE : approachRange,
         timeout: 30.0,
         groupId: this.groupId,
       });
+      // Stop the walk the moment the (possibly moving) target is within approach range.
+      move.stopWhen = () => spell.isPointInRange(this.owner, target ? target.position : castPoint, approachRange);
       return ActionStatus.IN_PROGRESS;
     }
-
-    const combatRound = this.owner.combatRound;
-    if(!combatRound) return ActionStatus.FAILED;
-    if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
 
     // Menu/talent casts arrive via ActionCombat with their round action (and the talent it carries) already set.
     const queued = combatRound.action;

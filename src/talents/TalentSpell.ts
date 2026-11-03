@@ -240,20 +240,17 @@ export class TalentSpell extends TalentObject {
    * ActionMoveToPoint arrives on 2D distance, so cast range is measured in 2D too; a 3D check would
    * re-queue the same move forever whenever the target sits higher or lower than the caster.
    */
-  isPointInRange(oCaster: ModuleObject, point: THREE.Vector3){
-    const range = this.getCastRange();
+  isPointInRange(oCaster: ModuleObject, point: THREE.Vector3, range: number = this.getCastRange()){
     if(!Number.isFinite(range)) return true;
     return Utility.Distance2D(oCaster.position, point) <= range;
   }
 
   /**
-   * ActionMoveToPoint range to request so that arriving satisfies isPointInRange.
-   * A point move arrives within `range` of the point, so 0.9 x cast range is enough.
-   * An object move stands off 0.9 x range from the target and may stop within `range` of that stand-off
-   * point, i.e. up to 1.9 x range from the target, so it asks for 0.45 x cast range (arrives within 0.855 x).
+   * Distance a walk into range stops at: slightly inside cast range, so a target that keeps moving for the
+   * frame between "arrived" and "cast" is still in range when the cast starts.
    */
-  getApproachRange(toObject = false){
-    return this.getCastRange() * (toObject ? 0.45 : 0.9);
+  getApproachRange(){
+    return this.getCastRange() * 0.9;
   }
 
   getCastRange(){

@@ -27,6 +27,11 @@ export class ActionMoveToPoint extends Action {
   target_position: THREE.Vector3 = new THREE.Vector3();
   real_target_position: THREE.Vector3 = new THREE.Vector3();
   last_path_target_position: THREE.Vector3 = new THREE.Vector3();
+  /**
+   * Optional live arrival test checked every frame before moving (e.g. "the target is now in cast range").
+   * Runtime-only: a move restored from a save has none and arrives on its range parameter as usual.
+   */
+  stopWhen?: () => boolean;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -48,6 +53,14 @@ export class ActionMoveToPoint extends Action {
   update(delta: number = 0): ActionStatus {
     if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature))
       return ActionStatus.FAILED;
+
+    if(this.stopWhen?.()){
+      this.owner.setAnimationState(ModuleCreatureAnimState.IDLE);
+      this.owner.force = 0;
+      this.owner.speed = 0;
+      this.setComputedPath(undefined);
+      return ActionStatus.COMPLETE;
+    }
 
     this.target_position.set(
       this.getParameter<number>(0),
