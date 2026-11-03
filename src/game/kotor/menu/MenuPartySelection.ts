@@ -388,14 +388,14 @@ export class MenuPartySelection extends GameMenu {
    * @returns number
    */
   getCurrentMemberCount() {
-    return GameState.PartyManager.CurrentMembers.length;
+    return GameState.PartyManager.GetCompanionMemberCount();
   }
 
   /**
    * Updates the count of the current members.
    */
   updateCount() {
-    this.LBL_COUNT.setText((GameState.PartyManager.MaxNPCCount - GameState.PartyManager.CurrentMembers.length).toString());
+    this.LBL_COUNT.setText((GameState.PartyManager.MaxNPCCount - this.getCurrentMemberCount()).toString());
   }
 
   async initPortraits() {
@@ -430,7 +430,8 @@ export class MenuPartySelection extends GameMenu {
       return false;
     }
 
-    return GameState.PartyManager.IsNPCInParty(npcId) && !this.isNPCRequired(npcId);
+    // The companion in control is the Player; it can't be dropped from the party here.
+    return GameState.PartyManager.IsNPCInParty(npcId) && !GameState.PartyManager.IsControlledNPC(npcId) && !this.isNPCRequired(npcId);
   }
 
   /**
@@ -443,9 +444,10 @@ export class MenuPartySelection extends GameMenu {
     }
 
     return !GameState.PartyManager.IsNPCInParty(npcId) &&
+      !GameState.PartyManager.IsControlledNPC(npcId) &&
       !this.isNPCRequired(npcId) &&
       this.isSelectable(npcId) &&
-      GameState.PartyManager.CurrentMembers.length < GameState.PartyManager.MaxNPCCount;
+      this.getCurrentMemberCount() < GameState.PartyManager.MaxNPCCount;
   }
 
   updateSelectedNPCInfo() {

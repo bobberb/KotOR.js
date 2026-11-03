@@ -912,6 +912,78 @@ describe('AddPartyMember (574)', () => {
     expect(PartyManager.party).toEqual([]);
   });
 
+  function recruit(tag: string){
+    const c = creature({ tag });
+    c.clearAllActions = jest.fn();
+    c.template = utc(tag);
+    return c;
+  }
+
+  test('adding the same creature to the same slot twice is a no-op', () => {
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    const mission = recruit('mission');
+    const zaalbar = recruit('zaalbar');
+    expect(add(2, mission)).toBe(1);
+    expect(add(3, zaalbar)).toBe(1);
+    PartyManager.CurrentMembers[0].isLeader = true;
+    expect(add(2, mission)).toBe(1);
+    expect(PartyManager.party.filter((p) => p === mission).length).toBe(1);
+    // Untouched: same order, leader flag kept, its actions not cleared a second time.
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 3 }]);
+    expect(mission.clearAllActions).toHaveBeenCalledTimes(1);
+  });
+
+  test('re-slotting a member moves it: one party entry, the old slot unbound', () => {
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    const mission = recruit('mission');
+    add(2, mission);
+    expect(add(5, mission)).toBe(1);
+    expect(PartyManager.party.filter((p) => p === mission).length).toBe(1);
+    expect(mission.npcId).toBe(5);
+    expect(PartyManager.CurrentMembers.map((m) => m.memberID)).toEqual([5]);
+    expect(PartyManager.NPCS[2].moduleObject).toBeUndefined();
+    expect(PartyManager.NPCS[5].moduleObject).toBe(mission);
+  });
+
+  test('a slot held by a different party creature is refused', () => {
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    const mission = recruit('mission');
+    const zaalbar = recruit('zaalbar');
+    add(2, mission);
+    expect(add(2, zaalbar)).toBe(0);
+    expect(zaalbar.npcId).toBeUndefined();
+    expect(PartyManager.party.filter((p) => p.npcId === 2)).toEqual([mission]);
+  });
+
+  test('a full party (leader + 2 companions) refuses a third companion', () => {
+    const protagonist = creature({ npcId: -1, tag: 'revan' });
+    PartyManager.Player = protagonist;
+    PartyManager.party = [protagonist];
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    expect(add(1, recruit('a'))).toBe(1);
+    expect(add(2, recruit('b'))).toBe(1);
+    const c = recruit('c');
+    expect(add(3, c)).toBe(0);
+    expect(PartyManager.party.length).toBe(3);
+    expect(PartyManager.CurrentMembers.length).toBe(2);
+    expect(c.npcId).toBeUndefined();
+  });
+
+  test('the Player and the slot of the companion in control are refused', () => {
+    const atton = creature({ npcId: 2, tag: 'atton' });
+    PartyManager.Player = atton;
+    PartyManager.party = [atton];
+    const add = routine(partyRoutines.AddPartyMember, 'kotor');
+    expect(add(4, atton)).toBe(0);
+    expect(atton.npcId).toBe(2);
+    expect(add(2, recruit('clone'))).toBe(0);
+    // Even before the Player is placed in the party array (area load in progress).
+    PartyManager.party = [];
+    const clone = recruit('clone');
+    expect(add(2, clone)).toBe(0);
+    expect(clone.npcId).toBeUndefined();
+  });
+
   test('PT_CONTROLLED_NP is the companion the player switched into; party leadership is PT_IS_LEADER\'s job', async () => {
     const protagonist = Object.assign(Object.create(ModulePlayer.prototype), creature({ npcId: -1 }));
     const companion = creature({ npcId: 6 });

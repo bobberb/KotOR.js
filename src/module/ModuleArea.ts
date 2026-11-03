@@ -1808,8 +1808,16 @@ export class ModuleArea extends ModuleObject {
         player.npcId = GameState.PartyManager.GetLoadedPlayerNPCId(player.template);
         
         player.load();
-        // No companion slot means this is the protagonist, whatever IsPC an older save left on it.
-        if(player.npcId < 0){ player.isPC = 1; }
+        // No companion slot and the protagonist's own template: an older save may lack IsPC on it.
+        // Any other slotless template (a possessed droid, a cutscene stand-in) is not the protagonist.
+        if(player.npcId < 0 && !player.isPC){
+          const actual = GameState.PartyManager.ActualPlayerTemplate;
+          if(!actual || actual === GameState.PartyManager.PlayerTemplate){
+            player.isPC = 1;
+          }else{
+            console.warn('ModuleArea.loadPlayer: slotless player is not the protagonist template; leaving IsPC 0', player.getTag?.());
+          }
+        }
         // GameState.currentLeader = player;
         GameState.PartyManager.Player = player;
       

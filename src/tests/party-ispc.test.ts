@@ -192,6 +192,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     state.getCurrentPlayer = () => PartyManager.party[0] ?? PartyManager.Player;
     state.group = { party: { add: jest.fn() } };
     (CurrentGame as any).gameinprogress_dir = 'gip';
+    state.FactionManager.RemoveCreatureFromFaction = jest.fn();
     jest.spyOn(GFFObject.prototype, 'export').mockImplementation(function(this: GFFObject, _file: string, onExport?: Function){
       exported = this.getExportBuffer();
       onExport?.();
@@ -303,15 +304,160 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(companion.npcId).toBe(2);
   });
 
-  /** GameState.LoadModule: module.save() runs PartyManager.Save(), module.dispose() drops the player, the next area rebuilds it. */
+  function realArea(){
+    const { ModuleArea } = loadSourceWithStubs('module/ModuleArea.ts', {
+      '@/GameState': { GameState },
+      '@/module/ModuleCreature': { ModuleCreature },
+      '@/module/ModulePlayer': { ModulePlayer },
+      '@/resource/GFFField': { GFFField },
+      '@/enums/resource/GFFDataType': { GFFDataType },
+    });
+    const area = Object.create(ModuleArea.prototype);
+    area.miniGame = undefined;
+    area.creatures = [];
+    area.getSpawnLocation = () => ({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 1, z: 0 } });
+    return area;
+  }
+
+  /**
+   * GameState.LoadModule: module.save() runs PartyManager.Save(), module.dispose() drops the player,
+   * then the next area runs its real loadPlayer and loadParty.
+   */
   async function moduleTransition(){
     PartyManager.Save();
     PartyManager.Player = undefined;
     PartyManager.party = [];
-    await areaLoadPlayer();
-    PartyManager.party = [PartyManager.Player];
+    (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValue({ userData: {} } as never);
+    jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+    const THREE = jest.requireActual('three') as typeof import('three');
+    jest.spyOn(PartyManager, 'GetSpawnLocation').mockImplementation(() => ({ position: new THREE.Vector3(), getFacing: () => 0 }) as any);
+    jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
+    const area = realArea();
+    await area.loadPlayer();
+    await area.loadParty();
+    // Back to the suite default: a later SwitchPlayerCharacter must not run its async model callback.
+    (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
     return PartyManager.Player;
   }
+
+  const roster = () => PartyManager.party.map((p) => p.getTag() + ':' + p.npcId + (p === PartyManager.Player ? '(P)' : ''));
+
+  test('a transition with a companion in control loads it once, with the other companions', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
+    const atton = PartyManager.SwitchPlayerCharacter(2)!;
+    const bao = new ModuleCreature(PartyManager.NPCS[5].template); bao.load(); bao.npcId = 5; bao.isPM = true;
+    PartyManager.party = [atton, bao];
+    PartyManager.CurrentMembers = [{ isLeader: false, memberID: 5 }];
+
+    await moduleTransition();
+    expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 5 }]);
+
+    // and again: the duplicate must not come back on the next transition
+    await moduleTransition();
+    expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
+  });
+
+  test('a transition with a companion in control, alone, loads just that companion', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.party = [PartyManager.SwitchPlayerCharacter(2)!];
+    PartyManager.CurrentMembers = [];
+    await moduleTransition();
+    expect(roster()).toEqual(['atton:2(P)']);
+  });
+
+  test('a save that still lists the controlled companion in PT_MEMBERS does not spawn it twice', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.PlayerTemplate = creatureTemplate('atton', 0);
+    PartyManager.ControlledNPC = 2;
+    PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }];
+    PartyManager.Player = undefined;
+    PartyManager.party = [];
+    (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValue({ userData: {} } as never);
+    jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+    const THREE = jest.requireActual('three') as typeof import('three');
+    jest.spyOn(PartyManager, 'GetSpawnLocation').mockImplementation(() => ({ position: new THREE.Vector3(), getFacing: () => 0 }) as any);
+    jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
+    const area = realArea();
+    await area.loadPlayer();
+    await area.loadParty();
+    expect(roster()).toEqual(['atton:2(P)']);
+  });
+
+  test('neither RemoveNPCById nor the party selection screen can drop the companion in control', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
+    const atton = PartyManager.SwitchPlayerCharacter(2)!;
+    const destroy = jest.spyOn(atton, 'destroy').mockImplementation(() => {});
+    PartyManager.party = [atton];
+    PartyManager.Save();
+    expect(PartyManager.CurrentMembers).toEqual([]);
+
+    const { MenuPartySelection } = loadSourceWithStubs('game/kotor/menu/MenuPartySelection.ts', { '@/GameState': { GameState } });
+    const menu = Object.create(MenuPartySelection.prototype);
+    menu.isNPCRequired = () => false;
+    menu.isSelectable = () => true;
+    // The screen must not offer to add the companion already in control...
+    expect(menu.canAdd(2)).toBe(false);
+    expect(menu.canAdd(5)).toBe(true);
+    // ...and the manager must refuse it too.
+    await PartyManager.AddNPCById(2);
+    expect(PartyManager.CurrentMembers).toEqual([]);
+
+    // A save written before Save() excluded the Player can still list it.
+    PartyManager.CurrentMembers.push({ isLeader: false, memberID: 2 });
+    expect(menu.canRemove(2)).toBe(false);
+    expect(menu.getCurrentMemberCount()).toBe(0);
+    PartyManager.RemoveNPCById(2, false);
+    expect(PartyManager.party).toEqual([atton]);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  test('switching into a companion already in the party takes over that creature, no duplicate', () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
+    PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
+    const exile = PartyManager.Player;
+    jest.spyOn(exile, 'destroy').mockImplementation(() => {});
+    jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
+    // An older companion template that still says IsPC=1: in control it must save 0.
+    const attonPM = new ModuleCreature(creatureTemplate('atton', 1)); attonPM.load(); attonPM.npcId = 2; attonPM.isPM = true;
+    expect(attonPM.isPC).toBe(1);
+    const baoPM = new ModuleCreature(PartyManager.NPCS[5].template); baoPM.load(); baoPM.npcId = 5; baoPM.isPM = true;
+    PartyManager.party = [exile, attonPM, baoPM];
+    PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+
+    expect(PartyManager.SwitchPlayerCharacter(2)).toBe(attonPM);
+    expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
+    expect(attonPM.isPC).toBe(0);
+    expect(exile.destroy).toHaveBeenCalled();
+    expect(PartyManager.CurrentMembers.map((m) => m.memberID)).toEqual([5]);
+    expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
+
+    // companion -> companion: the previous one steps into the member's slot
+    expect(PartyManager.SwitchPlayerCharacter(5)).toBe(baoPM);
+    expect(roster()).toEqual(['bao:5(P)', 'atton:2']);
+    expect(PartyManager.CurrentMembers.map((m) => m.memberID)).toEqual([2]);
+    expect(PartyManager.GetControlledNPC()).toBe(5);
+  });
+
+  test('a slotless player whose template is not the protagonist\'s keeps IsPC 0 and cannot overwrite pc.utc', async () => {
+    PartyManager.ResetPartyTableState();
+    PartyManager.ControlledNPC = -1;
+    PartyManager.PlayerTemplate = creatureTemplate('droid_t3', 0);
+    const exile = PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+    PartyManager.Player = undefined;
+    await areaLoadPlayer();
+    expect(PartyManager.Player.isPC).toBe(0);
+    expect(PartyManager.IsProtagonist(PartyManager.Player)).toBe(false);
+    PartyManager.Player.save();
+    expect(PartyManager.ActualPlayerTemplate === exile).toBe(true);
+  });
 
   test('a companion in control stays that companion across a real module transition (fresh game)', async () => {
     PartyManager.ResetPartyTableState();

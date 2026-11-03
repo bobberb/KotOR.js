@@ -641,7 +641,7 @@ export class PartyManager {
   }
 
   static async AddNPCById(npcId = 0){
-    if(PartyManager.IsNPCInParty(npcId)){
+    if(PartyManager.IsNPCInParty(npcId) || PartyManager.IsControlledNPC(npcId)){
       return;
     }
 
@@ -664,6 +664,11 @@ export class PartyManager {
     console.log('RemoveNPCById', npcId, leaveInWorld);
     const partyMember = PartyManager.GetPartyMemberByNPCId(npcId);
     if(!partyMember){
+      return;
+    }
+    // The companion in control is the Player: it leaves control through SwitchPlayerCharacter, not removal.
+    if(partyMember === PartyManager.Player){
+      console.warn('RemoveNPCById: refusing to remove the companion in control', npcId);
       return;
     }
 
@@ -946,6 +951,20 @@ export class PartyManager {
   }
 
   /**
+   * Companions in CurrentMembers, not counting the companion in control (it is the Player)
+   */
+  static GetCompanionMemberCount(){
+    return PartyManager.CurrentMembers.filter((m) => !PartyManager.IsControlledNPC(m?.memberID)).length;
+  }
+
+  /**
+   * True when NPC slot npcId is the companion the player is controlling (SwitchPlayerCharacter)
+   */
+  static IsControlledNPC(npcId: number){
+    return PartyManager.IsValidNPCSlot(npcId) && PartyManager.GetControlledNPC() === npcId;
+  }
+
+  /**
    * The protagonist carries IsPC and no NPC slot. Not `instanceof ModulePlayer`: a save made while a
    * companion was in control reloads that companion as the ModulePlayer. Not "no NPC slot" alone:
    * plain world creatures in the party (followers, script-spawned allies) have no slot either.
@@ -1203,8 +1222,32 @@ export class PartyManager {
     if(!PartyManager.IsValidNPCSlot(slot)){
       return false;
     }
-
     creature = creature as ModuleCreature;
+    const occupant = PartyManager.party.find((pm) => pm?.npcId == slot);
+    if(occupant && occupant !== creature){
+      return false;
+    }
+    if(creature === PartyManager.Player || PartyManager.IsControlledNPC(slot)){
+      return false;
+    }
+    const alreadyInParty = PartyManager.party.includes(creature);
+    // Retail party size: the leader plus MaxNPCCount (2) companions. Unverified whether retail returns
+    // FALSE here or silently refuses; either way a full party never grows.
+    const companions = PartyManager.party.filter((pm) => pm && pm !== PartyManager.Player).length;
+    if(!alreadyInParty && companions >= PartyManager.MaxNPCCount){
+      return false;
+    }
+    if(alreadyInParty && creature.npcId == slot){
+      return true;
+    }
+    if(alreadyInParty && PartyManager.IsValidNPCSlot(creature.npcId)){
+      // Re-slotting a member: drop its old binding so the old slot neither loads it nor keeps it.
+      PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
+      if(PartyManager.NPCS[creature.npcId]?.moduleObject === creature){
+        PartyManager.NPCS[creature.npcId].moduleObject = undefined;
+      }
+    }
+
     creature.npcId = slot;
     creature.isPC = 0;
     if(!PartyManager.IsNPCInParty(slot)){
@@ -1216,6 +1259,9 @@ export class PartyManager {
     //PartyManager.NPCS[nID].canSelect = true;
     PartyManager.NPCS[slot].template = creature.template;
     PartyManager.NPCS[slot].moduleObject = creature;
+    if(alreadyInParty){
+      return true;
+    }
     //Add the creature to the party array
     PartyManager.party.push(creature);
     //Check to see if the creature needs to be removed from the creatures array
@@ -1238,6 +1284,11 @@ export class PartyManager {
     if(oldPC instanceof ModuleCreature && PartyManager.IsProtagonist(oldPC)){
       PartyManager.ActualPlayerTemplate = oldPC.save();
       CurrentGame.WriteFile('pc.utc', PartyManager.ActualPlayerTemplate.getExportBuffer());
+    }
+
+    const member = npcId >= 0 ? PartyManager.party.find((pm) => pm && pm !== oldPC && pm.npcId == npcId) : undefined;
+    if(member){
+      return PartyManager.TakeControlOfMember(oldPC, member);
     }
 
     if(npcId == -1){
@@ -1283,13 +1334,53 @@ export class PartyManager {
       return undefined;
     }
   }
+  /**
+   * SwitchPlayerCharacter onto a companion already in the party: take over that creature instead of
+   * spawning a second copy. A companion previously in control steps into the member's party slot; the
+   * protagonist leaves the world (pc.utc was written by the caller), as it does for any switch.
+   */
+  static TakeControlOfMember(oldPC: ModuleCreature, member: ModuleCreature): ModuleCreature {
+    const memberIndex = PartyManager.party.indexOf(member);
+    const oldIndex = PartyManager.party.indexOf(oldPC);
+    const npcId = member.npcId;
+
+    PartyManager.Player = member;
+    PartyManager.ControlledNPC = npcId;
+    member.isPC = 0;
+    member.clearAllActions();
+    PartyManager.RemoveCurrentMemberByNPCId(npcId);
+
+    const oldIsCompanion = BitWise.InstanceOfObject(oldPC, ModuleObjectType.ModuleCreature) && PartyManager.IsValidNPCSlot(oldPC.npcId);
+    if(oldIndex >= 0 && oldIsCompanion){
+      PartyManager.party[oldIndex] = member;
+      PartyManager.party[memberIndex] = oldPC;
+      if(!PartyManager.IsNPCInParty(oldPC.npcId)){
+        PartyManager.CurrentMembers.push({ isLeader: false, memberID: oldPC.npcId });
+      }
+    }else{
+      PartyManager.party.splice(memberIndex, 1);
+      if(oldIndex >= 0){
+        PartyManager.party[PartyManager.party.indexOf(oldPC)] = member;
+      }else{
+        PartyManager.party.unshift(member);
+      }
+      if(BitWise.InstanceOfObject(oldPC, ModuleObjectType.ModuleCreature)){
+        oldPC.destroy();
+      }
+    }
+    PartyManager.UpdateLeader();
+    return member;
+  }
+
   static Save(){
     // Module transitions dispose the player and rebuild it from PlayerTemplate; this tells loadPlayer which companion it was.
     PartyManager.ControlledNPC = PartyManager.GetControlledNPC();
     PartyManager.SyncPlayerStateTemplates();
 
     const npcs = PartyManager.party.filter( (pm) => pm instanceof ModuleCreature && pm.npcId >= 0 );
-    PartyManager.CurrentMembers = npcs.map((pm) => {
+    // The companion in control is the Player, rebuilt by ModuleArea.loadPlayer; listing it here too would
+    // make loadParty spawn a second copy (Export leaves it out of PT_MEMBERS for the same reason).
+    PartyManager.CurrentMembers = npcs.filter((pm) => pm !== PartyManager.Player).map((pm) => {
       return {
         isLeader: PartyManager.party[0] == pm,
         memberID: pm.npcId
@@ -1441,6 +1532,10 @@ export class PartyManager {
    * @returns void
    */
   static async LoadPartyMember(nIdx: number = 0){
+    if(PartyManager.IsControlledNPC(PartyManager.CurrentMembers[nIdx]?.memberID)){
+      // Already in the world as the Player (saves written before Save() excluded it).
+      return;
+    }
     const npc = PartyManager.NPCS[PartyManager.CurrentMembers[nIdx].memberID];
     const template = npc.template;
     template.RootNode.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameState.ModuleObjectManager.GetNextPlayerId() );
