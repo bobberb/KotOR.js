@@ -47,6 +47,8 @@ export const DelayCommand = defineAction({
     timedEvent.setTime(futureTime.pauseTime);
     timedEvent.setNWScript(aActionToDelay.script);
     timedEvent.setInstructionPtr(aActionToDelay.offset);
+    // Delayed actions from a minigame handler still read that event's SWMG_GetLast* values.
+    timedEvent.miniGameContext = GameState.module?.area?.miniGame?.captureContext?.();
 
     if (this.subRoutine instanceof NWScriptSubroutine) {
       this.delayCommands.push(timedEvent);

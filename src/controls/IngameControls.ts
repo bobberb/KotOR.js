@@ -5,7 +5,6 @@ import { Utility } from "@/utility/Utility";
 import { EngineMode } from "@/enums/engine/EngineMode";
 import { EngineState } from "@/enums/engine/EngineState";
 import { KeyMapAction } from "@/enums/controls/KeyMapAction";
-import { MiniGameType } from "@/enums/engine/MiniGameType";
 import { FollowerCamera } from "@/engine/FollowerCamera";
 import { BitWise } from "@/utility/BitWise";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
@@ -15,6 +14,7 @@ import { Keyboard } from "@/controls/Keyboard";
 import { GamePad } from "@/controls/GamePad";
 import { Mouse } from "@/controls/Mouse";
 import { KeyMapper } from "@/controls/KeyMapper";
+import { processMiniGameAction } from "@/controls/MiniGameControls";
 import { AnalogInput } from "@/controls/AnalogInput";
 import { TGAObject } from "@/resource/TGAObject";
 import { GameFileSystem } from "@/utility/GameFileSystem";
@@ -641,75 +641,17 @@ export class IngameControls {
       }
     });
 
-    KeyMapper.Actions[KeyMapAction.MGActionUp].setProcessor( (keymap, delta = 0) => {
-      if(!keymap.keyboardInput?.down && !keymap.gamepadInput?.pressed) return;
-      if(GameState.State != EngineState.RUNNING) return;
-      switch(GameState.module.area.miniGame.type){
-        case MiniGameType.SWOOPRACE:
-
-        break;
-        case MiniGameType.TURRET:
-          GameState.module.area.miniGame.player.rotate('x', 1 * delta);
-        break;
-      }
-    });
-
-    KeyMapper.Actions[KeyMapAction.MGActionDown].setProcessor( (keymap, delta = 0) => {
-      if(!keymap.keyboardInput?.down && !keymap.gamepadInput?.pressed) return;
-      if(GameState.State != EngineState.RUNNING) return;
-      switch(GameState.module.area.miniGame.type){
-        case MiniGameType.SWOOPRACE:
-        
-        break;
-        case MiniGameType.TURRET:
-          GameState.module.area.miniGame.player.rotate('x', -1 * delta);
-        break;
-      }
-    });
-
-    KeyMapper.Actions[KeyMapAction.MGActionLeft].setProcessor( (keymap, delta = 0) => {
-      if(!keymap.keyboardInput?.down && !keymap.gamepadInput?.pressed) return;
-      if(GameState.State != EngineState.RUNNING) return;
-      switch(GameState.module.area.miniGame.type){
-        case MiniGameType.SWOOPRACE:
-          GameState.module.area.miniGame.player.lateralForce = -GameState.module.area.miniGame.player.accel_lateral_secs;
-        break;
-        case MiniGameType.TURRET:
-          GameState.module.area.miniGame.player.rotate('z', 1 * delta);
-        break;
-      }
-    });
-
-    KeyMapper.Actions[KeyMapAction.MGActionRight].setProcessor( (keymap, delta = 0) => {
-      if(!keymap.keyboardInput?.down && !keymap.gamepadInput?.pressed) return;
-      if(GameState.State != EngineState.RUNNING) return;
-      switch(GameState.module.area.miniGame.type){
-        case MiniGameType.SWOOPRACE:
-          GameState.module.area.miniGame.player.lateralForce = GameState.module.area.miniGame.player.accel_lateral_secs;
-        break;
-        case MiniGameType.TURRET:
-          GameState.module.area.miniGame.player.rotate('z', -1 * delta);
-        break;
-      }
-    });
+    KeyMapper.Actions[KeyMapAction.MGActionUp].setProcessor( (keymap, delta = 0) => processMiniGameAction('up', keymap, delta) );
+    KeyMapper.Actions[KeyMapAction.MGActionDown].setProcessor( (keymap, delta = 0) => processMiniGameAction('down', keymap, delta) );
+    KeyMapper.Actions[KeyMapAction.MGActionLeft].setProcessor( (keymap, delta = 0) => processMiniGameAction('left', keymap, delta) );
+    KeyMapper.Actions[KeyMapAction.MGActionRight].setProcessor( (keymap, delta = 0) => processMiniGameAction('right', keymap, delta) );
 
     KeyMapper.Actions[KeyMapAction.PauseMinigame].setProcessor( (keymap) => {
       if(!keymap.keyboardInput?.pressed && !keymap.gamepadInput?.pressed) return;
       GameState.State = ( GameState.State == EngineState.PAUSED ? EngineState.RUNNING : EngineState.PAUSED );
     });
 
-    KeyMapper.Actions[KeyMapAction.MGshoot].setProcessor( (keymap) => {
-      if(!keymap.keyboardInput?.pressed && !keymap.gamepadInput?.pressed) return;
-      if(GameState.State != EngineState.RUNNING) return;
-      switch(GameState.module.area.miniGame.type){
-        case MiniGameType.TURRET:
-          GameState.module.area.miniGame.player.fire();
-        break;
-        case MiniGameType.SWOOPRACE:
-          GameState.module.area.miniGame.player.jump();
-        break;
-      }
-    });
+    KeyMapper.Actions[KeyMapAction.MGshoot].setProcessor( (keymap, delta = 0) => processMiniGameAction('shoot', keymap, delta) );
 
     KeyMapper.Actions[KeyMapAction.GUI].setProcessor( (keymap) => {
       if(!keymap.keyboardInput?.pressed && !keymap.gamepadInput?.pressed) return;

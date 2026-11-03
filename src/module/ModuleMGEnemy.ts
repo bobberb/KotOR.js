@@ -11,6 +11,8 @@ import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { MDLLoader } from "@/loaders";
 import { ModuleMGGunBank } from "@/module/ModuleMGGunBank";
 import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
+import type { ModuleMiniGame } from "@/module/ModuleMiniGame";
+import type { ModuleMGGunBullet } from "@/module/ModuleMGGunBullet";
 
 /**
 * ModuleMGEnemy class.
@@ -26,6 +28,8 @@ import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
 */
 export class ModuleMGEnemy extends ModuleObject {
   readonly supportsRuntimeStatePersistence: boolean = false;
+
+  miniGame?: ModuleMiniGame;
 
   gunBanks: ModuleMGGunBank[] = [];
   models: OdysseyModel3D[] = [];
@@ -50,12 +54,19 @@ export class ModuleMGEnemy extends ModuleObject {
   bump_damage: any;
   cameraName: any;
   cameraRotate: any;
-  max_hps: any;
+  max_hps: number;
   maximum_speed: any;
   minimum_speed: any;
-  num_loops: any;
+  num_loops: number;
   trackName: any;
+  /** Trigger followers (e.g. swoop accelerator pads) only raise hit events; they never shoot. */
+  trigger: boolean = false;
+  loopsCompleted: number = 0;
+  /** The track animation wrapped in the previous update / this step shows the jump back to the start. */
+  trackWrappedLastUpdate: boolean = false;
+  trackPoseJump: boolean = false;
 
+  /** True while the player is inside this follower's sphere (hit events fire on entry). */
   collided: boolean = false;
 
   constructor(template: GFFObject){
@@ -102,17 +113,29 @@ export class ModuleMGEnemy extends ModuleObject {
 
   }
 
+  getMiniGame(): ModuleMiniGame | undefined {
+    return this.miniGame ?? GameState.module?.area?.miniGame;
+  }
+
+  getCollisionRadius(): number {
+    return this.sphere_radius || 0;
+  }
+
+  /** Collision sphere in world space; followers ride their track's modelhook. */
+  getWorldSphere(): THREE.Sphere {
+    this.container.getWorldPosition(this.sphere.center);
+    this.sphere.radius = this.getCollisionRadius();
+    return this.sphere;
+  }
+
+  getEventModelName(): string {
+    return this.models[0]?.name || this.modelProps[0]?.model?.replace(/\0[\s\S]*$/g,'').toLowerCase() || '';
+  }
+
   update(delta: number = 0){
 
     this.invince -= delta;
     if(this.invince < 0) this.invince = 0;
-
-    this.sphere.radius = this.sphere_radius;
-    // this.model.getWorldPosition(this.position);
-    this.sphere.center.copy(this.position);
-
-    this.sphere_geom.scale.setScalar(this.sphere_radius);
-    this.sphere_geom.position.copy(this.sphere.center);
 
     for(let i = 0; i < this.animationManagers.length; i++){
       const aManager = this.animationManagers[i];
@@ -123,29 +146,13 @@ export class ModuleMGEnemy extends ModuleObject {
       let child_model = this.models[i];
       if(child_model instanceof OdysseyModel3D && child_model.bonesInitialized && child_model.visible){
 
-        if(this.hit_points > 0){
+        if(this.alive){
           if(!child_model.animationManager.currentAnimation || (child_model.animationManager.currentAnimation.name != 'Ready_01' && child_model.animationManager.currentAnimation.name != 'damage')){
             child_model.playAnimation('Ready_01', false);
-          }
-        }else if(!this.alive && !this.died){
-          child_model.playAnimation('die', false);
-          this.died = true;
-        }else{
-          if(!child_model.animationManager.currentAnimation){
-            //child_model.visible = false;
           }
         }
 
         child_model.update(delta);
-      }
-    }
-
-    if(this.hit_points <= 0 && this.alive){
-      this.alive = false;
-      console.log('MGEnemy death', this);
-      const onDeath = this.scripts[ModuleObjectScript.MGEnemyOnDeath];
-      if(onDeath){
-        onDeath.run(this);
       }
     }
 
@@ -159,50 +166,72 @@ export class ModuleMGEnemy extends ModuleObject {
       }else if(!this.alive && this.track.animationManager.currentAnimation){
         this.track.stopAnimation();
       }
+      const wrapsBefore = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
       this.track.update(delta);
+      const wrapsAfter = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
+      // The manager poses before advancing its clock: the visible jump is the update after a wrap.
+      this.trackPoseJump = this.trackWrappedLastUpdate;
+      this.trackWrappedLastUpdate = wrapsAfter > wrapsBefore;
+      // A loop is credited when the follower visibly jumps back to its track start.
+      if(this.alive && this.trackPoseJump){
+        this.loopsCompleted++;
+        this.onTrackLoop();
+      }
     }
-        
+
+    this.getWorldSphere();
+    this.sphere_geom.scale.setScalar(this.sphere_radius || 0);
+    this.sphere_geom.position.copy(this.sphere.center);
+
+    const player = this.getMiniGame()?.player;
     for(let i = 0; i < this.gunBanks.length; i++){
-      this.gunBanks[i].update(delta);
-      if(this.alive){
-        this.container.getWorldPosition(GameState.raycaster.ray.origin);
-        this.container.getWorldDirection(GameState.raycaster.ray.direction);
-        if(GameState.raycaster.ray.intersectsSphere(GameState.module.area.miniGame.player.sphere)){
-          this.gunBanks[i].fire();
-        }
+      const bank = this.gunBanks[i];
+      bank.update(delta);
+      bank.targetting = this.alive && !this.trigger && !!player?.alive && bank.canSee(player);
+      if(bank.targetting){
+        bank.fire(player);
       }
     }
 
   }
 
   updatePaused(delta: number = 0){
-    
+
   }
 
   damage(damage = 0){
-    if(this.alive){
-      this.hit_points -= damage;
-      let model: OdysseyModel3D
-      for(let i = 0; i < this.models.length; i++){
-        model = this.models[i];
-        if(model instanceof OdysseyModel3D){
-          if(model.bonesInitialized && model.visible){
-            model.playAnimation('damage', false);
-          }
-        }
-      }
-      this.onDamaged();
-    }
+    this.getMiniGame()?.applyDamage(this, damage);
   }
 
   adjustHitPoints(nHP = 0, nAbsolute = 0){
-    this.hit_points += nHP;
+    return this.getMiniGame()?.adjustHitPoints(this, nHP, !!nAbsolute) ?? this.hit_points;
   }
 
   startInvulnerability(){
     this.invince = this.invince_period || 0;
   }
 
+  playModelAnimation(name: string){
+    for(const model of this.models){
+      if(model instanceof OdysseyModel3D && model.bonesInitialized && model.visible){
+        model.playAnimation(name, false);
+      }
+    }
+  }
+
+  /** Engine default for OnDamage (SWMG_OnDamage). */
+  defaultOnDamage(){
+    this.playModelAnimation('damage');
+  }
+
+  /** Engine default for OnDeath (SWMG_OnDeath): death animation, stop following the track. */
+  defaultOnDeath(){
+    this.died = true;
+    this.playModelAnimation('die');
+    if(this.track instanceof OdysseyModel3D && this.track.animationManager?.currentAnimation){
+      this.track.stopAnimation();
+    }
+  }
   playAnimation(name = '', n1 = 0, n2 = 0, n3 = 0){
     //I think n3 may be loop
     for(let i = 0; i < this.models.length; i++){
@@ -270,8 +299,9 @@ export class ModuleMGEnemy extends ModuleObject {
       });
       try{
         this.models.push(model);
-        this.container.add(model);  
+        this.container.add(model);
         model.name = item.model;
+        this.listenForAnimEvents(model);
 
       }catch(e){
         console.error(e);
@@ -294,59 +324,49 @@ export class ModuleMGEnemy extends ModuleObject {
     return this.container.getObjectByName('gunbank'+bankID) as THREE.Object3D;
   }
 
-  onAnimEvent(){
-    const onAnimEvent = this.scripts[ModuleObjectScript.MGEnemyOnAnimEvent];
-    if(!onAnimEvent){ return; }
-    onAnimEvent.run(this, 0);
+  onAnimEvent(event: string = '', modelName: string = this.getEventModelName()){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnAnimEvent, { event, modelName });
   }
 
   onCreate(){
-    const onCreate = this.scripts[ModuleObjectScript.MGEnemyOnCreate];
-    if(!onCreate){ return; }
-    onCreate.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnCreate);
   }
 
   onDamaged(){
-    const onDamage = this.scripts[ModuleObjectScript.MGEnemyOnDamage];
-    if(!onDamage){ return true; }
-    onDamage.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnDamage, {}, () => this.defaultOnDamage());
     return true;
   }
 
-  onFire(){
-    const onFire = this.scripts[ModuleObjectScript.MGEnemyOnFire];
-    if(!onFire){ return; }
-    onFire.run(this, 0);
+  onFire(bullet?: ModuleMGGunBullet){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnFire, bullet ? {
+      bulletFiredDamage: bullet.damage_amt,
+      bulletFiredTarget: bullet.target_type,
+    } : {});
   }
 
   onAccelerate(){
-    const onAccelerate = this.scripts[ModuleObjectScript.MGEnemyOnAccelerate];
-    if(!onAccelerate){ return; }
-    onAccelerate.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnAccelerate);
   }
 
-  onHitBullet(){
-    const onHitBullet = this.scripts[ModuleObjectScript.MGEnemyOnHitBullet];
-    if(!onHitBullet){ return; }
-    onHitBullet.run(this, 0);
+  onHitBullet(bullet: ModuleMGGunBullet){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnHitBullet, bullet.getHitContext(this), () => this.damage(bullet.damage_amt));
   }
 
-  onHitFollower(){
-    const onHitFollower = this.scripts[ModuleObjectScript.MGEnemyOnHitFollower];
-    if(!onHitFollower){ return; }
-    onHitFollower.run(this, 0);
+  /** The player ran into this follower. */
+  onHitFollower(player?: ModuleObject){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnHitFollower, { followerHit: player, hitTarget: this });
   }
 
-  onHitObstacle(){
-    const onHitObstacle = this.scripts[ModuleObjectScript.MGEnemyOnHitObstacle];
-    if(!onHitObstacle){ return; }
-    onHitObstacle.run(this, 0);
+  onHitObstacle(obstacle?: ModuleObject){
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnHitObstacle, { obstacleHit: obstacle });
   }
 
   onTrackLoop(){
-    const onTrackLoop = this.scripts[ModuleObjectScript.MGEnemyOnTrackLoop];
-    if(!onTrackLoop){ return; }
-    onTrackLoop.run(this, 0);
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnTrackLoop);
+  }
+
+  listenForAnimEvents(model: THREE.Object3D){
+    model?.addEventListener?.('playEvent', (e: any) => this.onAnimEvent(e?.event || '', model.name || ''));
   }
 
   loadScripts (){
@@ -437,6 +457,7 @@ export class ModuleMGEnemy extends ModuleObject {
     if(this.template.RootNode.hasField('Track'))
       this.trackName = this.template.getFieldByLabel('Track').getValue().replace(/\0[\s\S]*$/g,'').toLowerCase();
 
+    this.trigger = this.template.RootNode.hasField('Trigger') ? !!this.template.getFieldByLabel('Trigger').getValue() : false;
 
     if(this.template.RootNode.hasField('Models')){
       let models = this.template.getFieldByLabel('Models').getChildStructs();
@@ -448,6 +469,11 @@ export class ModuleMGEnemy extends ModuleObject {
         });
       }
     }
+
+    // Followers have no Name field; scripts identify them by their (first) model name.
+    this.name = this.template.RootNode.hasField('Name')
+      ? this.template.getFieldByLabel('Name').getValue().replace(/\0[\s\S]*$/g,'').toLowerCase()
+      : (this.modelProps[0]?.model || '').replace(/\0[\s\S]*$/g,'').toLowerCase();
 
     if(this.template.RootNode.hasField('Gun_Banks')){
       const gun_banks = this.template.getFieldByLabel('Gun_Banks').getChildStructs();

@@ -26,8 +26,14 @@ const preservation = fixture("upstreamPreservedBodies.json");
  * ActionCastFakeSpellAtObject (501): marks its ActionCastSpell as fake so it
  * plays animations only, with no FP cost, impact script or combat round
  * (pinned in force-powers.test.ts).
+ * SWMG_OnBulletHit/OnObstacleHit/OnDeath/OnDamage (591/592/598/605): upstream bodies
+ * were commented-out no-ops; they now run the engine default handlers.
+ * SWMG_SetFollowerHitPoints (604): upstream ran the caller's OnDamage instead of
+ * setting the follower's hit points. SWMG_Get/SetGunBankBulletModel (625/632):
+ * upstream returned/overwrote the bullet GFF template instead of the model name.
+ * Pinned by src/tests/minigames/swoop-turret-routines.test.ts.
  */
-const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 501, 555]);
+const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 501, 555, 591, 592, 598, 604, 605, 625, 632]);
 
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });
