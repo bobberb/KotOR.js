@@ -1179,31 +1179,72 @@ describe('module locals and tokens survive the IFO save/load', () => {
     expect(state.module.getCustomToken(51)).toBe('Revan');
   });
 
-  test('locals keep the object SWVarTable layout: out-of-range indices are ignored with a warning, the save stays 3 + 8 entries', async () => {
+  test('designer-range locals (number 12, boolean 100) survive a save; the table grows only to the highest index set', async () => {
     const module = new Module();
     module.setFromIFO(baseIFO(), false);
+    state.module = module;
+    const self = { caller: module };
+    call(localVarRoutines.SetLocalNumber, self, module, 12, 5);
+    call(localVarRoutines.SetLocalNumber, self, module, 255, 9);
+    call(localVarRoutines.SetLocalBoolean, self, module, 100, 1);
+    call(localVarRoutines.SetLocalBoolean, self, module, 1023, 1);
+    module.setLocalNumber(5, 300);
+
+    const table = module.getSWVarTableSaveStruct();
+    expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(32);
+    expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(256);
+
+    const reloaded = await saveAndReload(module);
+
+    expect(call(localVarRoutines.GetLocalNumber, self, reloaded, 12)).toBe(5);
+    expect(call(localVarRoutines.GetLocalNumber, self, reloaded, 255)).toBe(9);
+    expect(call(localVarRoutines.GetLocalBoolean, self, reloaded, 100)).toBe(1);
+    expect(call(localVarRoutines.GetLocalBoolean, self, reloaded, 1023)).toBe(1);
+    expect(call(localVarRoutines.GetLocalBoolean, self, reloaded, 99)).toBe(0);
+    expect(reloaded.getLocalNumber(5)).toBe(300 & 0xFF);
+  });
+
+  test('a module with only low locals keeps the 3 + 8 layout; indices past the bounds are ignored with a warning', () => {
+    const module = new Module();
     const warn = console.warn as jest.Mock;
-    module.setLocalBoolean(95, true);
-    module.setLocalNumber(7, 4);
-    module.setLocalBoolean(96, true);
-    module.setLocalBoolean(1e6, true);
-    module.setLocalNumber(8, 7);
+    module.setLocalNumber(13, 0);
+    module.setLocalBoolean(2, true);
+    module.setLocalNumber(256, 7);
     module.setLocalNumber(100000, 5);
     module.setLocalNumber(-1, 5);
-    module.setLocalNumber(5, 300);
+    module.setLocalBoolean(1024, true);
+    module.setLocalBoolean(1e6, true);
 
     expect(warn.mock.calls.filter((args) => String(args[0]).includes('Module: local'))).toHaveLength(5);
     const table = module.getSWVarTableSaveStruct();
     expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
+    // A zero at index 13 needs no entry: an absent number reads back as 0.
     expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(8);
+  });
 
-    const reloaded = await saveAndReload(module);
+  test('a creature number local at index 12 survives its own save/load (object SWVarTable)', () => {
+    jest.spyOn(ModuleCreature.prototype, 'loadScripts').mockImplementation(() => {});
+    const npc = creature('trask');
+    npc.setLocalNumber(12, 3);
+    npc.setLocalBoolean(70, true);
 
-    expect(reloaded.getLocalBoolean(95)).toBe(true);
-    expect(reloaded.getLocalNumber(7)).toBe(4);
-    expect(reloaded.getLocalBoolean(96)).toBe(false);
-    expect(reloaded.getLocalNumber(8)).toBe(0);
-    expect(reloaded.getLocalNumber(5)).toBe(300 & 0xFF);
+    const saved = npc.save();
+    const restored = new ModuleCreature(new GFFObject(saved.getExportBuffer()));
+    restored.load();
+
+    expect(restored.getLocalNumber(12)).toBe(3);
+    expect(restored.getLocalBoolean(70)).toBe(true);
+  });
+
+  test('a stray huge index on an object local does not grow its save past the bounds', () => {
+    const npc = creature('trask');
+    npc.setLocalNumber(100000, 1);
+    npc.setLocalBoolean(1e6, true);
+
+    const table = npc.getSWVarTableSaveStruct();
+
+    expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
+    expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(8);
   });
 
   test('loading an IFO replaces the previous module locals', () => {
@@ -1489,5 +1530,51 @@ describe('death screen message and revive without an area', () => {
     tickFor(module, 10);
 
     expect(carth.isDead()).toBe(true);
+  });
+});
+
+describe('the module-caller guards do not shut out placeable, door and trigger scripts', () => {
+  function placeableSelf() {
+    const placeable: any = new ModulePlaceable(new GFFObject());
+    const queued: any[] = [];
+    placeable.actionQueue = { add: (action: any) => queued.push(action), addFront: (action: any) => queued.push(action) };
+    placeable.doCommand = jest.fn();
+    placeable.setFacing = jest.fn();
+    return { placeable, queued };
+  }
+
+  test('a placeable running Action* routines still queues on itself and can face', () => {
+    runningModule();
+    const { placeable, queued } = placeableSelf();
+    const self = { caller: placeable };
+    const action = class { setParameter() {} };
+    state.ActionFactory = { ActionUnlockObject: action, ActionLockObject: action, ActionGiveItem: action, ActionTakeItem: action };
+    const door: any = { objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleDoor };
+    const pc = creature('pc');
+
+    call(itemsLegacyRoutines.ActionGiveItem, self, new FakeItem('x'), pc);
+    call(itemsLegacyRoutines.ActionTakeItem, self, new FakeItem('x'), pc);
+    call(doorRoutines.ActionUnlockObject, self, door);
+    call(doorRoutines.ActionLockObject, self, door);
+    expect(queued).toHaveLength(4);
+    call(scriptingRoutines.ActionDoCommand, self, { script: {}, offset: 0 });
+    expect(placeable.doCommand).toHaveBeenCalledTimes(1);
+    call(movementRoutines.SetFacing, self, 90);
+    expect(placeable.setFacing).toHaveBeenCalledWith(90);
+  });
+
+  test('nearest queries relative to a placeable or trigger still run', () => {
+    runningModule();
+    const { placeable } = placeableSelf();
+    const trigger: any = { objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleTrigger };
+    const found: any = { tag: 'found' };
+    state.ModuleObjectManager.GetNearestObject = jest.fn(() => found);
+    state.ModuleObjectManager.GetNearestObjectByTag = jest.fn(() => found);
+    state.ModuleObjectManager.GetNearestCreature = jest.fn(() => found);
+    const self = { caller: placeable };
+
+    expect(call(queryRoutines.GetNearestObject, self, 1, placeable, 1)).toBe(found);
+    expect(call(queryRoutines.GetNearestObjectByTag, self, 'a', trigger, 1)).toBe(found);
+    expect(call(miscLegacyRoutines.GetNearestCreature, self, 7, 0, trigger, 1, -1, -1, -1, -1)).toBe(found);
   });
 });

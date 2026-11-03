@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { Action } from "@/actions/Action";
 import type { IInventoryAddOptions } from "@/managers/InventoryManager";
+import { buildSWVarTableStruct } from "@/module/SWVarTable";
 import { ActionQueue } from "@/actions/ActionQueue";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { CollisionManager } from "@/engine/CollisionManager";
@@ -3676,32 +3677,9 @@ export class ModuleObject {
    * @returns 
    */
   getSWVarTableSaveStruct(){
-    let swVarTableStruct = new GFFStruct();
-
-    let swVarTableBitArray = swVarTableStruct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
-
-    for(let i = 0; i < 3; i++){
-      let varStruct = new GFFStruct();
-      let value = 0;
-      let offset = 32 * i;
-      for(let j = 0; j < 32; j++){
-        if(this.getLocalBoolean(offset + j) == true){
-          value |= 1 << j;
-        }
-      }
-      value = value >>> 0;
-      varStruct.addField( new GFFField(GFFDataType.DWORD, 'Variable') ).setValue( value );
-      swVarTableBitArray.addChildStruct(varStruct);
-    }
-
-    let swVarTableByteArray = swVarTableStruct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
-
-    for(let i = 0; i < 8; i++){
-      let varStruct = new GFFStruct();
-      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) );
-      swVarTableByteArray.addChildStruct(varStruct);
-    }
-    return swVarTableStruct;
+    // Sized to the highest local set: a fixed 8-byte ByteArray dropped number
+    // locals 8+ (scripts use 12 and up) on every save.
+    return buildSWVarTableStruct(this._locals);
   }
 
   /**

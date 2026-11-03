@@ -11,7 +11,8 @@ function menuClass(name: string) {
   return class {
     manager: any;
     constructor() { built.push(name); }
-    async load() { return this; }
+    // A GUI load takes real time; callers can overlap it.
+    async load() { await new Promise((resolve) => setImmediate(resolve)); return this; }
   };
 }
 
@@ -52,5 +53,15 @@ describe.each([
     const first = await MenuManager.GetMenuCredits();
     expect(await MenuManager.GetMenuCredits()).toBe(first);
     expect(built).toEqual([`${prefix}.MenuCredits`]);
+  });
+
+  test('callers that overlap the first build share it (two StartCreditSequence / death-screen calls)', async () => {
+    state.GameKey = gameKey;
+    const [creditsA, creditsB] = await Promise.all([MenuManager.GetMenuCredits(), MenuManager.GetMenuCredits()]);
+    const [overA, overB] = await Promise.all([MenuManager.GetMenuGameOver(), MenuManager.GetMenuGameOver()]);
+    expect(creditsB).toBe(creditsA);
+    expect(MenuManager.MenuCredits).toBe(creditsA);
+    expect(overB).toBe(overA);
+    expect(built).toEqual([`${prefix}.MenuCredits`, `${prefix}.MenuGameOver`]);
   });
 });

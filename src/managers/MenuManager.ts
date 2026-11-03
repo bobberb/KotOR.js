@@ -263,21 +263,37 @@ export class MenuManager {
    * down with it (LoadInGameMenus loads them through one Promise.all).
    */
   static async GetMenuGameOver(): Promise<KOTOR.MenuGameOver> {
-    if(!MenuManager.MenuGameOver){
-      MenuManager.MenuGameOver = await MenuManager.GameMenuLoader(
-        GameState.GameKey == GameEngineType.TSL ? TSL.MenuGameOver : KOTOR.MenuGameOver
-      ) as KOTOR.MenuGameOver;
-    }
-    return MenuManager.MenuGameOver;
+    return MenuManager.LazyMenu('MenuGameOver',
+      GameState.GameKey == GameEngineType.TSL ? TSL.MenuGameOver : KOTOR.MenuGameOver
+    ) as Promise<KOTOR.MenuGameOver>;
   }
 
   static async GetMenuCredits(): Promise<KOTOR.MenuCredits> {
-    if(!MenuManager.MenuCredits){
-      MenuManager.MenuCredits = await MenuManager.GameMenuLoader(
-        GameState.GameKey == GameEngineType.TSL ? TSL.MenuCredits : KOTOR.MenuCredits
-      ) as KOTOR.MenuCredits;
+    return MenuManager.LazyMenu('MenuCredits',
+      GameState.GameKey == GameEngineType.TSL ? TSL.MenuCredits : KOTOR.MenuCredits
+    ) as Promise<KOTOR.MenuCredits>;
+  }
+
+  static #lazyBuilds: Map<string, Promise<GameMenu>> = new Map();
+
+  /**
+   * Build a menu once and cache it on MenuManager[key]. Callers that arrive
+   * while it is still loading share that build: a second instance would
+   * replace the first in the cache while the first is already on screen.
+   */
+  static LazyMenu(key: 'MenuGameOver' | 'MenuCredits', menuConstructor: any): Promise<GameMenu> {
+    if(MenuManager[key]){ return Promise.resolve(MenuManager[key]); }
+    let build = MenuManager.#lazyBuilds.get(key);
+    if(!build){
+      build = MenuManager.GameMenuLoader(menuConstructor).then((menu) => {
+        MenuManager[key] = menu as any;
+        return menu;
+      }).finally(() => {
+        MenuManager.#lazyBuilds.delete(key);
+      });
+      MenuManager.#lazyBuilds.set(key, build);
     }
-    return MenuManager.MenuCredits;
+    return build;
   }
   
   static async LoadMainGameMenus(){

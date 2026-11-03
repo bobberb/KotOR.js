@@ -33,6 +33,7 @@ import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleCreature } from "@/module/ModuleCreature";
 import type { ModuleItem } from "@/module/ModuleItem";
 import { PartyDeathMonitor } from "@/module/PartyDeathMonitor";
+import { buildSWVarTableStruct, isSWVarIndex, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS } from "@/module/SWVarTable";
 
 type ModuleScriptKeys = 'Mod_OnAcquirItem'|'Mod_OnActvtItem'|'Mod_OnClientEntr'|'Mod_OnClientLeav'|'Mod_OnHeartbeat'|'Mod_OnModLoad'|'Mod_OnModStart'|'Mod_OnPlrDeath'|'Mod_OnPlrDying'|'Mod_OnPlrLvlUp'|'Mod_OnPlrRest'|'Mod_OnSpawnBtnDn'|'Mod_OnUnAqreItem'|'Mod_OnUsrDefined';
 
@@ -619,22 +620,18 @@ export class Module {
   }
 
   /**
-   * Module locals use the same SWVarTable layout as object locals
-   * (ModuleObject.getSWVarTableSaveStruct): 3 BitArray DWORDs and 8 ByteArray
-   * BYTEs. Indices outside that are not stored (warned), so a script index bug
-   * cannot grow the save; number values wrap to a byte on save, as for objects.
+   * Module locals share the object SWVarTable format (see SWVarTable.ts).
+   * Indices past its bounds (1024 booleans, 256 numbers) are ignored with a
+   * warning rather than stored, so a script index bug cannot grow the save.
    */
-  static readonly LOCAL_BOOLEAN_COUNT = 96;
-  static readonly LOCAL_NUMBER_COUNT = 8;
-
-  static isLocalIndex(index: number, count: number, kind: string){
-    if(Number.isInteger(index) && index >= 0 && index < count){ return true; }
-    console.warn(`Module: local ${kind} index ${index} is outside 0-${count - 1}; ignored`);
+  static isLocalIndex(index: number, max: number, kind: string){
+    if(isSWVarIndex(index, max)){ return true; }
+    console.warn(`Module: local ${kind} index ${index} is outside 0-${max - 1}; ignored`);
     return false;
   }
 
   setLocalBoolean(index: number, value: boolean){
-    if(!Module.isLocalIndex(index, Module.LOCAL_BOOLEAN_COUNT, 'boolean')){ return; }
+    if(!Module.isLocalIndex(index, SWVAR_MAX_BOOLEANS, 'boolean')){ return; }
     this._locals.Booleans[index] = !!value;
   }
 
@@ -643,52 +640,19 @@ export class Module {
   }
 
   setLocalNumber(index: number, value: number){
-    if(!Module.isLocalIndex(index, Module.LOCAL_NUMBER_COUNT, 'number')){ return; }
+    if(!Module.isLocalIndex(index, SWVAR_MAX_NUMBERS, 'number')){ return; }
     this._locals.Numbers[index] = value;
   }
 
   setLocalsFromSWVarTable(struct?: GFFStruct){
-    if(!struct){ return; }
-    if(struct.hasField('BitArray')){
-      const words = struct.getFieldByLabel('BitArray').getChildStructs();
-      for(let i = 0; i < Math.min(words.length, Module.LOCAL_BOOLEAN_COUNT / 32); i++){
-        const data = words[i].getFieldByLabel('Variable').getValue() >>> 0;
-        for(let bit = 0; bit < 32; bit++){
-          this._locals.Booleans[bit + (i * 32)] = ((data >>> bit) & 1) == 1;
-        }
-      }
-    }
-    if(struct.hasField('ByteArray')){
-      const bytes = struct.getFieldByLabel('ByteArray').getChildStructs();
-      for(let i = 0; i < Math.min(bytes.length, Module.LOCAL_NUMBER_COUNT); i++){
-        this.setLocalNumber(i, bytes[i].getFieldByLabel('Variable').getValue());
-      }
-    }
+    readSWVarTableStruct(struct,
+      (index, value) => { this._locals.Booleans[index] = value; },
+      (index, value) => { this._locals.Numbers[index] = value; },
+    );
   }
 
   getSWVarTableSaveStruct(){
-    const struct = new GFFStruct();
-    const wordCount = Module.LOCAL_BOOLEAN_COUNT / 32;
-    const byteCount = Module.LOCAL_NUMBER_COUNT;
-    const bitArray = struct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
-    for(let i = 0; i < wordCount; i++){
-      let value = 0;
-      for(let j = 0; j < 32; j++){
-        if(this.getLocalBoolean((32 * i) + j)){
-          value |= 1 << j;
-        }
-      }
-      const varStruct = new GFFStruct();
-      varStruct.addField( new GFFField(GFFDataType.DWORD, 'Variable') ).setValue( value >>> 0 );
-      bitArray.addChildStruct(varStruct);
-    }
-    const byteArray = struct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
-    for(let i = 0; i < byteCount; i++){
-      const varStruct = new GFFStruct();
-      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) & 0xFF );
-      byteArray.addChildStruct(varStruct);
-    }
-    return struct;
+    return buildSWVarTableStruct(this._locals);
   }
 
   tickPaused(delta = 0){
