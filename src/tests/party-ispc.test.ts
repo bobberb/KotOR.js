@@ -861,6 +861,94 @@ describe('a save made while a companion is in control survives save -> load -> s
       expect(PartyManager.party).toEqual([]);
     });
 
+    test('a dropped companion re-created in the same script keeps its object-id registration (real ObjectManager + destroy)', async () => {
+      const { ModuleObjectManager } = jest.requireActual('@/managers/ModuleObjectManager') as any;
+      ModuleObjectManager.Reset();
+      state.ModuleObjectManager = ModuleObjectManager;
+      state.CursorManager = { notifyObjectDestroyed: jest.fn() };
+      (ModuleCreature.prototype.destroy as jest.Mock).mockRestore();
+      await companionOnlySegment();
+      const carth = PartyManager.Player;
+      if((carth as any).debugLabel){ (carth as any).debugLabel.dispose = () => {}; }
+      PartyManager.SwitchPlayerCharacter(7);                   // over capacity: carth (outgoing) retired, destroy pending
+      expect(PartyManager.NPCS[2].template.RootNode.hasField('ObjectId')).toBe(false);
+      const carth2 = PartyManager.SwitchPlayerCharacter(2)!;   // same script: back to carth, rebuilt from the slot template
+      if((carth2 as any).debugLabel){ (carth2 as any).debugLabel.dispose = () => {}; }
+      expect(carth2).not.toBe(carth);
+      await flush();
+      expect(ModuleObjectManager.GetObjectById(carth2.id)).toBe(carth2);
+      await tick();
+      expect(carth.destroyed).toBe(true);
+      expect(ModuleObjectManager.GetObjectById(carth2.id)).toBe(carth2);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('ModuleObjectManager.RemoveObject never unregisters a different object that holds the same id', () => {
+      const { ModuleObjectManager } = jest.requireActual('@/managers/ModuleObjectManager') as any;
+      ModuleObjectManager.Reset();
+      state.CursorManager = { notifyObjectDestroyed: jest.fn() };
+      const live = { id: 42 }, stale = { id: 42 };
+      ModuleObjectManager.ObjectList.set(42, live);
+      ModuleObjectManager.RemoveObject(stale);
+      expect(ModuleObjectManager.GetObjectById(42)).toBe(live);
+      ModuleObjectManager.RemoveObject(live);
+      expect(ModuleObjectManager.GetObjectById(42)).toBeUndefined();
+    });
+
+    test('a dropped companion\'s slot template carries no object id or action queue', async () => {
+      await companionOnlySegment();
+      const carth = PartyManager.Player;
+      carth.template.RootNode.addField(new GFFField(GFFDataType.LIST, 'ActionList'));
+      PartyManager.SwitchPlayerCharacter(7);
+      const t = PartyManager.NPCS[2].template.RootNode;
+      expect([t.hasField('ObjectId'), t.hasField('ActionList'), t.getFieldByLabel('Tag').getValue()]).toEqual([false, false, 'carth']);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('portrait order follows the party after an over-capacity drop', async () => {
+      const { bao, mand } = await companionOnlySegment();
+      const carth = PartyManager.Player;
+      const portrait = (resref: string) => ({ getPortraitGoodEvil: () => resref });
+      (carth as any).portrait = portrait('po_carth'); (bao as any).portrait = portrait('po_bao'); (mand as any).portrait = portrait('po_mand');
+      resolveModels();
+      const hk = PartyManager.SwitchPlayerCharacter(7)!;
+      (hk as any).portrait = portrait('po_hk');
+      PartyManager.UpdateLeader();
+      expect(PartyManager.PortraitOrder).toEqual(['po_hk', 'po_bao', 'po_mand']);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('slotless followers take no seat: switching back keeps them and drops nobody', async () => {
+      const carth = member('carth', 2), bao = member('bao', 4);
+      const follower = member('follower', -1); follower.npcId = undefined;
+      PartyManager.party = [PartyManager.Player, bao, follower];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 4 }];
+      PartyManager.SwitchPlayerCharacter(2); // protagonist out: carth, bao, follower
+      expect(PartyManager.GetOccupiedSeatCount()).toBe(2);
+      PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+      PartyManager.SwitchPlayerCharacter(-1);
+      expect(PartyManager.GetOccupiedSeatCount()).toBe(3);
+      expect(PartyManager.party.map((p) => p.getTag()).sort()).toEqual(['bao', 'carth', 'exile', 'follower']);
+      await tick();
+      expect([carth, bao, follower].some((c) => c.destroyed)).toBe(false);
+    });
+
+    test('AddNPCById and AddPartyMember share one seat rule: followers don\'t count, companions do', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      const carth = member('carth', 2);
+      const follower = member('follower', -1); follower.npcId = undefined;
+      PartyManager.party = [PartyManager.Player, carth, follower];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }];
+      // Two adds in one script, the first not awaited: only the slot count can stop the second.
+      const first = PartyManager.AddNPCById(5);
+      const second = PartyManager.AddNPCById(7);
+      await Promise.all([first, second]);
+      expect(memberIds()).toEqual([2, 5]);
+      expect(PartyManager.party.map((p) => p.getTag()).sort()).toEqual(['bastila', 'carth', 'exile', 'follower']);
+      expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(7)).toBe(0);
+    });
+
     test('switching between companions over capacity drops the outgoing companion, not one a script just added', async () => {
       const { bao, mand } = await companionOnlySegment();
       const carth = PartyManager.Player;

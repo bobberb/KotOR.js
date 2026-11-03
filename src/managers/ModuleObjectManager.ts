@@ -75,7 +75,11 @@ export class ModuleObjectManager {
 
   static RemoveObject(object: ModuleObject){
     if(!object) return;
-    this.RemoveObjectById(object.id);
+    // Only unregister this object: another live object may have taken the id meanwhile (a companion rebuilt from a
+    // template while its retired twin waited for its deferred destroy).
+    if(this.ObjectList.get(object.id) === object){
+      this.RemoveObjectById(object.id);
+    }
     GameState.CursorManager.notifyObjectDestroyed(object);
   }
 

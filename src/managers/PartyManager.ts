@@ -647,7 +647,8 @@ export class PartyManager {
       return;
     }
     // Refuse before listing it: a refused load would otherwise leave a member with no creature behind it.
-    if(PartyManager.GetCompanionMemberCount() >= PartyManager.MaxNPCCount || PartyManager.party.filter(Boolean).length >= PartyManager.MaxSize){
+    // Same seat rule as AddCreatureToParty (AddPartyMember): companions from slot membership, followers don't count.
+    if(PartyManager.GetCompanionMemberCount() >= PartyManager.MaxNPCCount){
       console.warn('AddNPCById: party is full', npcId);
       return;
     }
@@ -972,6 +973,14 @@ export class PartyManager {
    */
   static GetCompanionMemberCount(){
     return PartyManager.CurrentMembers.filter((m) => !PartyManager.IsControlledNPC(m?.memberID)).length;
+  }
+
+  /**
+   * Seats taken in the world party: the Player, the protagonist and every creature holding an NPC slot.
+   * Slotless followers (script-spawned allies) don't take a seat. This is the one rule every capacity check uses.
+   */
+  static GetOccupiedSeatCount(){
+    return PartyManager.party.filter((pm) => pm && (pm === PartyManager.Player || PartyManager.IsValidNPCSlot(pm.npcId) || PartyManager.IsProtagonist(pm))).length;
   }
 
   /**
@@ -1407,7 +1416,7 @@ export class PartyManager {
    * Unverified against retail, which may refuse the switch instead.
    */
   static EnforcePartyCapacity(newPlayer: ModuleCreature, oldPC: ModuleCreature, oldIsProtagonist: boolean, newIsCompanion: boolean){
-    while(PartyManager.party.filter(Boolean).length > PartyManager.MaxSize){
+    while(PartyManager.GetOccupiedSeatCount() > PartyManager.MaxSize){
       let leaving: ModuleCreature;
       if(!oldIsProtagonist && newIsCompanion && PartyManager.party.includes(oldPC)){
         leaving = oldPC;
@@ -1426,13 +1435,17 @@ export class PartyManager {
    * Take a companion out of the world party; its slot stays available with an up-to-date template.
    */
   static DropFromParty(creature: ModuleCreature){
-    creature.save();
+    const template = creature.save();
+    // The retired creature keeps its object id until its deferred destroy; a companion rebuilt from this template
+    // in the meantime must get a fresh id (and no stale queue), or the two would share one registration.
+    template?.RootNode?.removeFieldByLabel?.('ObjectId');
+    template?.RootNode?.removeFieldByLabel?.('ActionList');
     PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
     if(PartyManager.IsValidNPCSlot(creature.npcId)){
       PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
     }
     PartyManager.RetireCreature(creature);
-    PartyManager.RebuildPortraitOrder();
+    // Portraits are rebuilt by the switch that called this (UpdateLeader).
   }
 
   static PendingDestroy: ModuleCreature[] = [];
@@ -1643,7 +1656,7 @@ export class PartyManager {
       console.log('LoadPartyMember', 'Wrong index', nIdx);
       return;
     }
-    if(PartyManager.party.filter(Boolean).length >= PartyManager.MaxSize){
+    if(PartyManager.GetOccupiedSeatCount() >= PartyManager.MaxSize){
       console.warn('LoadPartyMember: party is full', nIdx, PartyManager.CurrentMembers[nIdx]);
       return;
     }
