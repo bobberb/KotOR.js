@@ -440,6 +440,7 @@ export class CharGenManager {
     creature.isPC = 1;
 
     GameState.GlobalVariableManager.Init();
+    GameState.PartyManager.ResetForNewGame();
     GameState.PartyManager.PlayerTemplate = creature.save();
     GameState.PartyManager.ActualPlayerTemplate = GameState.PartyManager.PlayerTemplate;
     GameState.PartyManager.AddPortraitToOrder(creature.getPortraitResRef());

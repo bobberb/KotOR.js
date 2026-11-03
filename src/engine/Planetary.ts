@@ -48,6 +48,18 @@ export class Planetary {
 
   }
 
+  /**
+   * Back to a fresh game's galaxy map: nothing available, selectable or selected
+   */
+  static Reset(){
+    for(const planet of Planetary.planets ?? []){
+      planet.enabled = false;
+      planet.selectable = false;
+    }
+    Planetary.selectedIndex = -1;
+    Planetary.selected = undefined;
+  }
+
   static SetSelectedPlanet( index = 0 ){
     Planetary.selectedIndex = index;
     Planetary.selected = Planetary.planets[index];

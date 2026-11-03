@@ -41,6 +41,15 @@ function moduleForItemEvents(){
 export class InventoryManager {
   static inventory: ModuleItem[] = [];
 
+  static ClearInventory(){
+    const previous = InventoryManager.inventory;
+    InventoryManager.inventory = [];
+    // Destroy the old items so their object-id registrations don't leak.
+    for(const item of previous){
+      try{ item?.destroy?.(); }catch(e){ console.error('InventoryManager.ClearInventory: failed to destroy item', e); }
+    }
+  }
+
   static getInventory( slot = 0, creature?: ModuleCreature ){
     if(!slot){
       return InventoryManager.inventory;

@@ -24,6 +24,8 @@ import { PazaakSideDeckSlots } from "@/enums/minigames/PazaakSideDeckSlots";
 import { type SWPortrait } from "@/engine/rules/SWPortrait";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { BitWise } from "@/utility/BitWise";
+import { ActionType } from "@/enums/actions/ActionType";
+import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
 
 export interface CurrentMember {
   isLeader: boolean,
@@ -45,6 +47,22 @@ export interface PartyNPCList {
 export interface PartyPuppet {
   available: boolean;
   select: boolean;
+  /** NPC_* slot that owns the puppet (AssignPUP); NPC_PLAYER is -1, undefined when unassigned */
+  owner?: number;
+  template?: GFFObject;
+  moduleObject?: ModuleCreature;
+}
+
+/** nwscript FORMATION_* constants (SetFormation, routine 729) */
+export enum PartyFormationPattern {
+  WEDGE = 0,
+  LINE = 1,
+}
+
+export interface PartyFormation {
+  anchor: ModuleCreature;
+  pattern: PartyFormationPattern;
+  position: number;
 }
 
 export interface PartyPuppetList {
@@ -103,6 +121,25 @@ export class PartyManager {
   static SwoopUpgrade2: number = -1;
   static SwoopUpgrade3: number = -1;
 
+  static readonly NPC_PLAYER = -1;
+  static readonly INFLUENCE_MIN = 0;
+  static readonly INFLUENCE_MAX = 100;
+  static readonly INFLUENCE_DEFAULT = 50;
+
+  /** PUP_* ids of the puppets currently in the party (PT_PUPPETS) */
+  static PuppetMembers: number[] = [];
+
+  /** NPC_* id of the companion in control, -1 for the protagonist (PT_CONTROLLED_NP) */
+  static ControlledNPC: number = -1;
+  static XPPool: number = 0;
+  static FollowState: number = 0;
+  static CheatUsed: number = 0;
+  static LastGUIPanel: number = 0;
+
+  static readonly FORMATION_SPACING = 1.5;
+  static readonly FORMATION_MAX_POSITION = 10;
+  static Formations: WeakMap<ModuleCreature, PartyFormation> = new WeakMap();
+
   static #eventListeners: Map<PartyManagerEvent, Function[]> = new Map();
 
   static SyncPlayerStateTemplates(){
@@ -113,7 +150,7 @@ export class PartyManager {
     const currentPlayerTemplate = PartyManager.Player.save();
     PartyManager.PlayerTemplate = currentPlayerTemplate;
 
-    if(PartyManager.Player instanceof ModulePlayer || PartyManager.Player.isPlayer || PartyManager.Player.npcId < 0){
+    if(PartyManager.IsProtagonist(PartyManager.Player)){
       PartyManager.ActualPlayerTemplate = currentPlayerTemplate;
     }else if(!(PartyManager.ActualPlayerTemplate instanceof GFFObject)){
       PartyManager.ActualPlayerTemplate = currentPlayerTemplate;
@@ -125,11 +162,18 @@ export class PartyManager {
    * @returns void
    */
   static Initialize(){
+    PartyManager.ResetPartyTableState();
+  }
+
+  /**
+   * Reset everything PARTYTABLE persists, so a load never inherits the previous session's values
+   */
+  static ResetPartyTableState(){
     PartyManager.MaxPartyCount = GameState.GameKey == GameEngineType.TSL ? 12 : 9;
     PartyManager.MaxPuppetCount = GameState.GameKey == GameEngineType.TSL ? 3 : 0;
 
     for(let i = 0; i < PartyManager.MaxPartyCount; i++){
-      GameState.PartyManager.InfluenceMap.set(i, -1);
+      GameState.PartyManager.InfluenceMap.set(i, PartyManager.INFLUENCE_DEFAULT);
       GameState.PartyManager.NPCS[i] = {
         available: false,
         canSelect: false,
@@ -143,6 +187,22 @@ export class PartyManager {
         select: true
       };
     }
+
+    PartyManager.PuppetMembers = [];
+    PartyManager.Formations = new WeakMap();
+    PartyManager.ChemicalCount = 0;
+    PartyManager.ComponentCount = 0;
+    PartyManager.ControlledNPC = -1;
+    PartyManager.XPPool = 0;
+    PartyManager.FollowState = 0;
+    PartyManager.CheatUsed = 0;
+    PartyManager.LastGUIPanel = 0;
+    PartyManager.aiStyle = 0;
+    PartyManager.SwoopUpgrade1 = -1;
+    PartyManager.SwoopUpgrade2 = -1;
+    PartyManager.SwoopUpgrade3 = -1;
+    GameState.SOLOMODE = false;
+    GameState.disableHealthRegen = false;
   }
 
   /**
@@ -158,24 +218,7 @@ export class PartyManager {
 
     PartyManager.partyTableTemplate = gff;
 
-    PartyManager.MaxPartyCount = GameState.GameKey == GameEngineType.TSL ? 12 : 9;
-    PartyManager.MaxPuppetCount = GameState.GameKey == GameEngineType.TSL ? 3 : 0;
-    
-    for(let i = 0; i < PartyManager.MaxPartyCount; i++){
-      GameState.PartyManager.InfluenceMap.set(i, -1);
-      GameState.PartyManager.NPCS[i] = {
-        available: false,
-        canSelect: false,
-        spawned: false
-      };
-    }
-
-    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
-      GameState.PartyManager.Puppets[i] = {
-        available: false,
-        select: true
-      };
-    }
+    PartyManager.ResetPartyTableState();
 
     if(gff.RootNode.hasField('GlxyMap')){
       GameState.Planetary.LoadStruct(gff.getFieldByLabel('GlxyMap').getChildStructs()[0]);
@@ -215,8 +258,14 @@ export class PartyManager {
     if(gff.RootNode.hasField('PT_AVAIL_PUPS')){
       let avail = gff.getFieldByLabel('PT_AVAIL_PUPS').getChildStructs();
       for(let i = 0; i < avail.length; i++){
-        GameState.PartyManager.Puppets[i].available = !!avail[i].getFieldByLabel('PT_PUP_AVAIL').getValue();
-        GameState.PartyManager.Puppets[i].select = !!avail[i].getFieldByLabel('PT_PUP_SELECT').getValue();
+        const puppet = GameState.PartyManager.Puppets[i];
+        if(!puppet){ continue; }
+        puppet.available = !!avail[i].getFieldByLabel('PT_PUP_AVAIL').getValue();
+        puppet.select = !!avail[i].getFieldByLabel('PT_PUP_SELECT').getValue();
+        if(avail[i].hasField('PT_PUP_OWNER')){
+          const owner = avail[i].getFieldByLabel('PT_PUP_OWNER').getValue();
+          puppet.owner = owner < PartyManager.NPC_PLAYER ? undefined : owner;
+        }
       }
     }
 
@@ -230,23 +279,55 @@ export class PartyManager {
       GameState.PartyManager.ComponentCount = gff.RootNode.getFieldByLabel('PT_ITEM_COMPONEN').getValue();
     }
   
-    //TSL: PT_AVAIL_PUPS
+    //TSL: PT_INFLUENCE
     if(gff.RootNode.hasField('PT_INFLUENCE')){
       const list = gff.getFieldByLabel('PT_INFLUENCE').getChildStructs();
-      for(let i = 0; i < list.length; i++){
-        GameState.PartyManager.InfluenceMap.set(i, list[i].getFieldByLabel('PT_NPC_INFLUENCE').getValue());
+      for(let i = 0; i < list.length && i < PartyManager.MaxPartyCount; i++){
+        const influence = list[i].getFieldByLabel('PT_NPC_INFLUENCE').getValue();
+        // Older kotor.js and Forge saves wrote -1 ("unset") for every slot; clamping that would mean hostile 0.
+        const valid = Number.isFinite(influence) && influence >= PartyManager.INFLUENCE_MIN && influence <= PartyManager.INFLUENCE_MAX;
+        GameState.PartyManager.InfluenceMap.set(i, valid ? influence : PartyManager.INFLUENCE_DEFAULT);
       }
     }
-  
-    //TSL: PT_AVAIL_PUPS
+
+    //TSL: PT_PUPPETS
     if(gff.RootNode.hasField('PT_PUPPETS')){
       const list = gff.getFieldByLabel('PT_PUPPETS').getChildStructs();
       for(let i = 0; i < list.length; i++){
-        //todo
+        const struct = list[i];
+        // Element label is unverified against retail: accept ours, else the struct's only field.
+        const field = struct.hasField('PT_PUPPET_ID') ? struct.getFieldByLabel('PT_PUPPET_ID') : struct.getFields()[0];
+        const pupId = field ? field.getValue() : -1;
+        if(PartyManager.Puppets[pupId] && !PartyManager.PuppetMembers.includes(pupId)){
+          PartyManager.PuppetMembers.push(pupId);
+        }
+      }
+    }
+
+    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+      try{
+        const buffer = await GameFileSystem.readFile( path.join( CurrentGame.gameinprogress_dir, 'availpup'+i+'.utc') );
+        PartyManager.Puppets[i].template = buffer?.length ? new GFFObject(buffer) : undefined;
+      }catch(e){
+        PartyManager.Puppets[i].template = undefined;
       }
     }
 
     GameState.PartyManager.Gold = gff.RootNode.getFieldByLabel('PT_GOLD').getValue();
+
+    const scalar = (label: string, fallback: number): number =>
+      gff.RootNode.hasField(label) ? gff.RootNode.getFieldByLabel(label).getValue() : fallback;
+    PartyManager.ControlledNPC = scalar('PT_CONTROLLED_NP', -1);
+    PartyManager.XPPool = scalar('PT_XP_POOL', 0);
+    PartyManager.aiStyle = scalar('PT_AISTATE', 0);
+    PartyManager.FollowState = scalar('PT_FOLLOWSTATE', 0);
+    PartyManager.CheatUsed = scalar('PT_CHEAT_USED', 0);
+    PartyManager.LastGUIPanel = scalar('PT_LAST_GUI_PNL', 0);
+    GameState.SOLOMODE = !!scalar('PT_SOLOMODE', 0);
+    PartyManager.SwoopUpgrade1 = scalar('PT_SWOOP1', -1);
+    PartyManager.SwoopUpgrade2 = scalar('PT_SWOOP2', -1);
+    PartyManager.SwoopUpgrade3 = scalar('PT_SWOOP3', -1);
+    GameState.disableHealthRegen = !!scalar('PT_DISABLEREGEN', 0);
 
     if(gff.RootNode.hasField('PT_CONTROLLED_NP')){
       console.log('PT_CONTROLLED_NP', gff.RootNode.getFieldByLabel('PT_CONTROLLED_NP').getValue());
@@ -390,7 +471,7 @@ export class PartyManager {
       }
 
       partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'JNL_SortOrder')).setValue(GameState.JournalManager.SortOrder ?? 0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_AISTATE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_AISTATE')).setValue(PartyManager.aiStyle | 0);
       let availNPCSList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_AVAIL_NPCS'));
 
       //TODO: Party Available NPCS
@@ -410,8 +491,22 @@ export class PartyManager {
           const puppetStruct = new GFFStruct();
           puppetStruct.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_AVAIL')).setValue(puppet?.available ? 1 : 0);
           puppetStruct.addField(new GFFField(GFFDataType.BYTE, 'PT_PUP_SELECT')).setValue(puppet?.select ? 1 : 0);
+          // -2: unassigned, since -1 is NPC_PLAYER
+          puppetStruct.addField(new GFFField(GFFDataType.INT, 'PT_PUP_OWNER')).setValue(puppet?.owner ?? -2);
           availPuppetsList.addChildStruct(puppetStruct);
         }
+
+        const puppetsList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_PUPPETS'));
+        for(const pupId of PartyManager.PuppetMembers){
+          const puppetStruct = new GFFStruct();
+          puppetStruct.addField(new GFFField(GFFDataType.DWORD, 'PT_PUPPET_ID')).setValue(pupId);
+          puppetsList.addChildStruct(puppetStruct);
+        }
+
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP1')).setValue(PartyManager.SwoopUpgrade1);
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP2')).setValue(PartyManager.SwoopUpgrade2);
+        partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_SWOOP3')).setValue(PartyManager.SwoopUpgrade3);
+        partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_DISABLEREGEN')).setValue(GameState.disableHealthRegen ? 1 : 0);
 
         partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_ITEM_CHEMICAL')).setValue(GameState.PartyManager.ChemicalCount);
         partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_ITEM_COMPONEN')).setValue(GameState.PartyManager.ComponentCount);
@@ -419,13 +514,13 @@ export class PartyManager {
         const influenceList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_INFLUENCE'));
         for(let i = 0; i < PartyManager.MaxPartyCount; i++){
           const influenceStruct = new GFFStruct();
-          influenceStruct.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(GameState.PartyManager.InfluenceMap.get(i) ?? -1);
+          influenceStruct.addField(new GFFField(GFFDataType.INT, 'PT_NPC_INFLUENCE')).setValue(GameState.PartyManager.InfluenceMap.get(i) ?? PartyManager.INFLUENCE_DEFAULT);
           influenceList.addChildStruct(influenceStruct);
         }
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CHEAT_USED')).setValue(0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CONTROLLED_NP')).setValue( GameState.getCurrentPlayer() == GameState.PartyManager.Player ? -1 : GameState.PartyManager.party.indexOf(GameState.getCurrentPlayer()) );
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CHEAT_USED')).setValue(PartyManager.CheatUsed | 0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_CONTROLLED_NP')).setValue(PartyManager.GetControlledNPC());
       partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_COST_MULT_LIS'));
 
       //TODO: COST MULT LIST
@@ -446,15 +541,17 @@ export class PartyManager {
         );
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_FOLLOWSTATE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_FOLLOWSTATE')).setValue(PartyManager.FollowState | 0);
       partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_GOLD')).setValue(GameState.PartyManager.Gold);
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_LAST_GUI_PNL')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_LAST_GUI_PNL')).setValue(PartyManager.LastGUIPanel | 0);
       let ptMembersList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_MEMBERS'));
 
       let numMembers = 0;
-      for(let i = 0; i < GameState.PartyManager.party.length; i++){
-        let member = GameState.PartyManager.party[i];
-        if(member != GameState.PartyManager.Player){
+      // Every slot member in join order, including a companion in control (flagged PT_IS_LEADER when it leads).
+      const slotMembers = PartyManager.GetSlotMembersInJoinOrder();
+      for(let i = 0; i < slotMembers.length; i++){
+        let member = slotMembers[i];
+        if(PartyManager.IsValidNPCSlot(member.npcId)){
           let memberStruct = new GFFStruct();
           memberStruct.addField( new GFFField(GFFDataType.BYTE, 'PT_IS_LEADER') ).setValue( GameState.getCurrentPlayer() == member ? 1 : 0 );
           memberStruct.addField( new GFFField(GFFDataType.INT, 'PT_MEMBER_ID') ).setValue( member.npcId );
@@ -468,7 +565,7 @@ export class PartyManager {
       PartyManager.WritePazaakCollection(partytable.RootNode);
 
       partytable.RootNode.addField(new GFFField(GFFDataType.DWORD, 'PT_PLAYEDSECONDS')).setValue(GameState.time | 0);
-      partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_SOLOMODE')).setValue(0);
+      partytable.RootNode.addField(new GFFField(GFFDataType.BYTE, 'PT_SOLOMODE')).setValue(GameState.SOLOMODE ? 1 : 0);
 
       const tutorial2DA = GameState.TwoDAManager.datatables.get('tutorial');
       if(tutorial2DA){
@@ -490,7 +587,7 @@ export class PartyManager {
         partytable.RootNode.addField(new GFFField(GFFDataType.VOID, 'PT_TUT_WND_SHOWN')).setData(new Uint8Array(0));
       }
 
-      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_XP_POOL'));
+      partytable.RootNode.addField(new GFFField(GFFDataType.INT, 'PT_XP_POOL')).setValue(PartyManager.XPPool | 0);
 
       partytable.FileType = 'PT  ';
       partytable.export(path.join(directory, 'PARTYTABLE.res'), () => {
@@ -543,7 +640,13 @@ export class PartyManager {
   }
 
   static async AddNPCById(npcId = 0){
-    if(PartyManager.IsNPCInParty(npcId)){
+    if(PartyManager.IsNPCInParty(npcId) || PartyManager.IsControlledNPC(npcId)){
+      return;
+    }
+    // Refuse before listing it: a refused load would otherwise leave a member with no creature behind it.
+    // Same seat rule as AddCreatureToParty (AddPartyMember): companions from slot membership, followers don't count.
+    if(PartyManager.GetCompanionMemberCount() >= PartyManager.MaxNPCCount){
+      console.warn('AddNPCById: party is full', npcId);
       return;
     }
 
@@ -566,6 +669,11 @@ export class PartyManager {
     console.log('RemoveNPCById', npcId, leaveInWorld);
     const partyMember = PartyManager.GetPartyMemberByNPCId(npcId);
     if(!partyMember){
+      return;
+    }
+    // The companion in control is the Player: it leaves control through SwitchPlayerCharacter, not removal.
+    if(partyMember === PartyManager.Player){
+      console.warn('RemoveNPCById: refusing to remove the companion in control', npcId);
       return;
     }
 
@@ -597,11 +705,21 @@ export class PartyManager {
   static GetPartyMemberByNPCId(npcId = 0){
     for(let i = 0; i < PartyManager.party.length; i++){
       const pm = PartyManager.party[i];
-      if(pm.npcId == npcId){
+      if(pm?.npcId == npcId){
         return pm;
       }
     }
     return null;
+  }
+
+  /**
+   * Put a creature in the party at (or as near as possible to) index, never leaving holes:
+   * the party array is what GetPartyMemberCount / GetPartyMemberByIndex and every party loop read.
+   */
+  static PlaceInParty(creature: ModuleCreature, index: number){
+    PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
+    const at = Math.max(0, Math.min(Number.isFinite(index) ? index : PartyManager.party.length, PartyManager.party.length));
+    PartyManager.party.splice(at, 0, creature);
   }
 
   static RemovePartyMemberByNPCId(npcId = 0){
@@ -803,24 +921,375 @@ export class PartyManager {
     return true;
   }
 
+  static IsValidNPCSlot(npcId: number){
+    return Number.isInteger(npcId) && npcId >= 0 && npcId < PartyManager.MaxPartyCount;
+  }
+
+  static ClampInfluence(value: number){
+    return Math.max(PartyManager.INFLUENCE_MIN, Math.min(PartyManager.INFLUENCE_MAX, value | 0));
+  }
+
+  /**
+   * TSL GetInfluence (795): 0 when nNPC is not a CNPC slot
+   */
+  static GetInfluence(npcId: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return 0; }
+    return PartyManager.InfluenceMap.get(npcId) ?? PartyManager.INFLUENCE_DEFAULT;
+  }
+
+  /**
+   * TSL SetInfluence (796): ignored when nNPC is not a CNPC slot or the value is outside 0-100
+   */
+  static SetInfluence(npcId: number, influence: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return; }
+    if(!Number.isFinite(influence) || influence < PartyManager.INFLUENCE_MIN || influence > PartyManager.INFLUENCE_MAX){ return; }
+    PartyManager.InfluenceMap.set(npcId, influence | 0);
+  }
+
+  /**
+   * TSL ModifyInfluence (797): result clamped to 0-100
+   */
+  static ModifyInfluence(npcId: number, modifier: number){
+    if(!PartyManager.IsValidNPCSlot(npcId)){ return; }
+    PartyManager.InfluenceMap.set(npcId, PartyManager.ClampInfluence(PartyManager.GetInfluence(npcId) + (modifier | 0)));
+  }
+
+  /**
+   * NPC_* id of the companion the player controls, -1 for the protagonist
+   */
+  static GetControlledNPC(){
+    const player = PartyManager.Player;
+    if(BitWise.InstanceOfObject(player, ModuleObjectType.ModuleCreature)){
+      return PartyManager.IsValidNPCSlot(player.npcId) ? player.npcId : -1;
+    }
+    return PartyManager.ControlledNPC;
+  }
+
+  /**
+   * Companions in CurrentMembers, not counting the companion in control (it is the Player)
+   */
+  static GetCompanionMemberCount(){
+    return PartyManager.CurrentMembers.filter((m) => !PartyManager.IsControlledNPC(m?.memberID)).length;
+  }
+
+  /**
+   * Seats taken in the world party: the Player, the protagonist and every creature holding an NPC slot.
+   * Slotless followers (script-spawned allies) don't take a seat. This is the one rule every capacity check uses.
+   */
+  static GetOccupiedSeatCount(){
+    return PartyManager.party.filter((pm) => pm && (pm === PartyManager.Player || PartyManager.IsValidNPCSlot(pm.npcId) || PartyManager.IsProtagonist(pm))).length;
+  }
+
+  /**
+   * True when NPC slot npcId is the companion the player is controlling (SwitchPlayerCharacter)
+   */
+  static IsControlledNPC(npcId: number){
+    return PartyManager.IsValidNPCSlot(npcId) && PartyManager.GetControlledNPC() === npcId;
+  }
+
+  /**
+   * The protagonist carries IsPC and no NPC slot. Not `instanceof ModulePlayer`: a save made while a
+   * companion was in control reloads that companion as the ModulePlayer. Not "no NPC slot" alone:
+   * plain world creatures in the party (followers, script-spawned allies) have no slot either.
+   */
+  static IsProtagonist(creature: ModuleCreature){
+    return !!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) && !(creature.npcId >= 0) && !!creature.isPC;
+  }
+
+  /**
+   * NPC slot of the player creature rebuilt from a save's Mod_PlayerList: the companion recorded in
+   * PT_CONTROLLED_NP when the saved player is not the protagonist (IsPC 0), else -1
+   */
+  static GetLoadedPlayerNPCId(template: GFFObject){
+    const isPC = template?.RootNode?.hasField('IsPC') ? !!template.RootNode.getFieldByLabel('IsPC').getValue() : true;
+    if(isPC || !PartyManager.IsValidNPCSlot(PartyManager.ControlledNPC)){ return -1; }
+    return PartyManager.ControlledNPC;
+  }
+
+  /**
+   * Solo mode: followers stay where they are. Turning it on also cancels follow moves already under way.
+   */
+  static SetSoloMode(enabled: boolean){
+    GameState.SOLOMODE = !!enabled;
+    if(!GameState.SOLOMODE){ return; }
+    const leader = PartyManager.party[0];
+    for(const member of PartyManager.party){
+      if(member && member !== leader){
+        PartyManager.CancelFollowLeader(member);
+      }
+    }
+  }
+
+  /**
+   * Drop queued ActionFollowLeader actions and the moves they enqueued (same groupId), and stop in place
+   */
+  static CancelFollowLeader(creature: ModuleCreature){
+    const queue = creature?.actionQueue;
+    if(!queue){ return; }
+    const groups = new Set<number>();
+    for(const action of queue){
+      if(action?.type == ActionType.ActionFollowLeader){ groups.add(action.groupId); }
+    }
+    if(!groups.size){ return; }
+    let index = queue.length;
+    while(index--){
+      const action = queue[index];
+      const isFollow = action?.type == ActionType.ActionFollowLeader;
+      const isFollowMove = action?.type == ActionType.ActionMoveToPoint && groups.has(action.groupId);
+      if(isFollow || isFollowMove){
+        queue.splice(index, 1).forEach((a) => a.dispose?.());
+      }
+    }
+    creature.force = 0;
+    creature.speed = 0;
+    creature.setComputedPath?.(undefined);
+    creature.setAnimationState?.(ModuleCreatureAnimState.IDLE);
+  }
+
+  /**
+   * A stuck, non-controlled party member is warped to its follow slot, except in solo mode where it must stay put
+   */
+  static ShouldWarpStuckMember(creature: ModuleCreature){
+    return creature?.npcId != undefined && !GameState.SOLOMODE && creature != GameState.getCurrentPlayer() && creature.collisionTimer >= 1;
+  }
+
+  /**
+   * Every new game (K1/TSL, Quick/Custom chargen) passes here: drop whatever a previously loaded save
+   * left behind in PARTYTABLE (roster, scalars, journal, message logs, pazaak, tutorials, galaxy map)
+   * and INVENTORY.res. Must run before chargen registers the new protagonist's portrait.
+   */
+  static ResetForNewGame(){
+    PartyManager.ResetPartyTableState();
+    PartyManager.CurrentMembers = [];
+    PartyManager.party = [];
+    PartyManager.PortraitOrder = [];
+    PartyManager.Gold = 0;
+    GameState.JournalManager.ClearEntries();
+    GameState.JournalManager.SortOrder = 0;
+    GameState.DialogMessageManager.ClearEntries();
+    GameState.FeedbackMessageManager.ClearEntries();
+    GameState.PazaakManager.Initialize();
+    GameState.TutorialWindowTracker = [];
+    GameState.Planetary.Reset();
+    GameState.InventoryManager.ClearInventory();
+  }
+
+  static IsValidPuppetSlot(pupId: number){
+    return Number.isInteger(pupId) && pupId >= 0 && pupId < PartyManager.MaxPuppetCount && !!PartyManager.Puppets[pupId];
+  }
+
+  /**
+   * TSL AddAvailablePUPByTemplate (836)
+   */
+  static AddAvailablePUPByTemplate(pupId: number, template: string|GFFObject): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    let gff: GFFObject;
+    if(template instanceof GFFObject){
+      gff = template;
+    }else if(typeof template === 'string' && template.length){
+      const buffer = ResourceLoader.loadCachedResource(ResourceTypes['utc'], template);
+      if(buffer){ gff = new GFFObject(buffer); }
+    }
+    if(!gff){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    puppet.available = true;
+    puppet.template = gff;
+    return true;
+  }
+
+  /**
+   * TSL AddAvailablePUPByObject (837)
+   */
+  static AddAvailablePUPByObject(pupId: number, object: ModuleCreature): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    puppet.available = true;
+    puppet.template = object.save();
+    return true;
+  }
+
+  /**
+   * TSL AssignPUP (838): make NPC slot nNPC (or NPC_PLAYER) the puppet's owner
+   */
+  static AssignPUP(pupId: number, npcId: number): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(npcId != PartyManager.NPC_PLAYER && !PartyManager.IsValidNPCSlot(npcId)){ return false; }
+    PartyManager.Puppets[pupId].owner = npcId;
+    return true;
+  }
+
+  /**
+   * TSL AddPartyPuppet (840): the puppet must already be available
+   */
+  static AddPartyPuppet(pupId: number, object: ModuleCreature): boolean {
+    if(!PartyManager.IsValidPuppetSlot(pupId)){ return false; }
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return false; }
+    const puppet = PartyManager.Puppets[pupId];
+    if(!puppet.available){ return false; }
+    for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+      if(i != pupId && PartyManager.Puppets[i]?.moduleObject === object){ return false; }
+    }
+    puppet.moduleObject = object;
+    if(!PartyManager.PuppetMembers.includes(pupId)){
+      PartyManager.PuppetMembers.push(pupId);
+    }
+    return true;
+  }
+
+  /**
+   * PUP_* id of a puppet in the party, -1 if the object is not one
+   */
+  static GetPuppetId(object: ModuleCreature): number {
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return -1; }
+    for(const pupId of PartyManager.PuppetMembers){
+      if(PartyManager.Puppets[pupId]?.moduleObject === object){ return pupId; }
+    }
+    return -1;
+  }
+
+  /**
+   * A party puppet whose creature is gone (destroyed, or never placed in an area) needs relinking
+   */
+  static IsPuppetUnlinked(pupId: number){
+    const object = PartyManager.Puppets[pupId]?.moduleObject;
+    return !BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature) || !object.area;
+  }
+
+  /**
+   * Bind a creature to an unlinked party puppet whose template tag it carries.
+   * PARTYTABLE stores only PT_PUPPETS ids; the creature itself comes back from the area save,
+   * so this runs when an area's creatures are loaded and when SpawnAvailablePUP creates one.
+   * @returns the PUP_* id it was bound to, or -1
+   */
+  static RelinkPuppet(object: ModuleCreature, pupId?: number): number {
+    if(!BitWise.InstanceOfObject(object, ModuleObjectType.ModuleCreature)){ return -1; }
+    const linked = PartyManager.GetPuppetId(object);
+    if(linked >= 0){ return linked; }
+    const tag = object.getTag?.()?.toLowerCase();
+    const candidates = pupId === undefined ? PartyManager.PuppetMembers : PartyManager.PuppetMembers.filter((id) => id === pupId);
+    for(const id of candidates){
+      const puppet = PartyManager.Puppets[id];
+      if(!puppet || !PartyManager.IsPuppetUnlinked(id)){ continue; }
+      if(pupId === undefined){
+        if(!tag || !puppet.template?.RootNode.hasField('Tag')){ continue; }
+        if(String(puppet.template.RootNode.getFieldByLabel('Tag').getValue()).toLowerCase() != tag){ continue; }
+      }
+      puppet.moduleObject = object;
+      return id;
+    }
+    return -1;
+  }
+
+  static RelinkPuppets(creatures: ModuleCreature[] = []){
+    for(const creature of creatures){
+      PartyManager.RelinkPuppet(creature);
+    }
+  }
+
+  /**
+   * TSL GetPUPOwner (841): the owner's creature, if it is in the party
+   */
+  static GetPuppetOwner(object: ModuleCreature): ModuleCreature | undefined {
+    const pupId = PartyManager.GetPuppetId(object);
+    if(pupId < 0){ return undefined; }
+    const owner = PartyManager.Puppets[pupId].owner;
+    if(owner == undefined){ return undefined; }
+    if(owner == PartyManager.NPC_PLAYER){
+      // Not PartyManager.Player: during SwitchPlayerCharacter that is the companion in control.
+      return PartyManager.party.find((pm) => PartyManager.IsProtagonist(pm));
+    }
+    return PartyManager.party.find((pm) => pm?.npcId == owner);
+  }
+
+  /**
+   * SetFormation (729): place oCreature at nPosition (1-10) of the pattern around oAnchor
+   */
+  static SetFormation(anchor: ModuleCreature, creature: ModuleCreature, pattern: number, position: number): boolean {
+    if(!BitWise.InstanceOfObject(anchor, ModuleObjectType.ModuleCreature)){ return false; }
+    if(!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature) || creature === anchor){ return false; }
+    if(pattern !== PartyFormationPattern.WEDGE && pattern !== PartyFormationPattern.LINE){ return false; }
+    if(!Number.isInteger(position) || position < 1 || position > PartyManager.FORMATION_MAX_POSITION){ return false; }
+    PartyManager.Formations.set(creature, { anchor, pattern, position });
+    return true;
+  }
+
+  /**
+   * Formation slot offset in the anchor's frame: +right is the anchor's right hand, +forward is where it faces
+   */
+  static GetFormationOffset(pattern: PartyFormationPattern, position: number){
+    const rank = Math.ceil(position / 2);
+    const side = (position % 2) ? -1 : 1;
+    const spacing = PartyManager.FORMATION_SPACING;
+    switch(pattern){
+      case PartyFormationPattern.WEDGE:
+        return { right: side * spacing * rank, forward: -spacing * rank };
+      case PartyFormationPattern.LINE:
+      default:
+        return { right: side * spacing * rank, forward: 0 };
+    }
+  }
+
   /**
    * Add a world creature to the list of Party Members and remove it from the creatures array
    * @param slot - The slot to add the creature to
    * @param creature - The creature to add to the list of Party Members
    * @returns void
    */
-  static AddCreatureToParty(slot = 1, creature: ModuleCreature){
+  static AddCreatureToParty(slot = 1, creature: ModuleCreature): boolean {
     if(!BitWise.InstanceOfObject(creature, ModuleObjectType.ModuleCreature)){
-      return;
+      return false;
+    }
+    // AddPartyMember (574) binds the creature to NPC slot nNPC: it is a companion like any other and
+    // persists through PT_MEMBERS + AVAILNPCn.utc, never mistaken for the protagonist.
+    if(!PartyManager.IsValidNPCSlot(slot)){
+      return false;
+    }
+    creature = creature as ModuleCreature;
+    const occupant = PartyManager.party.find((pm) => pm?.npcId == slot);
+    if(occupant && occupant !== creature){
+      return false;
+    }
+    if(creature === PartyManager.Player || PartyManager.IsControlledNPC(slot)){
+      return false;
+    }
+    const alreadyInParty = PartyManager.party.includes(creature);
+    // Retail party size: the leader plus MaxNPCCount (2) companions. Unverified whether retail returns
+    // FALSE here or silently refuses; either way a full party never grows. Counted from slot membership:
+    // slotless followers don't take a seat, and a protagonist being swapped out is no longer listed.
+    if(!alreadyInParty && PartyManager.GetCompanionMemberCount() >= PartyManager.MaxNPCCount){
+      return false;
+    }
+    if(alreadyInParty && creature.npcId == slot){
+      return true;
+    }
+    if(alreadyInParty && PartyManager.IsValidNPCSlot(creature.npcId)){
+      // Re-slotting a member: drop its old binding so the old slot neither loads it nor keeps it.
+      const oldSlot = PartyManager.NPCS[creature.npcId];
+      PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
+      if(oldSlot && (oldSlot.moduleObject === creature || !oldSlot.moduleObject)){
+        // Nothing else may spawn this creature from its old slot (party selection, AddNPCById, SpawnAvailableNPC).
+        oldSlot.moduleObject = undefined;
+        oldSlot.available = false;
+        oldSlot.canSelect = false;
+        oldSlot.template = undefined;
+      }
     }
 
-    creature = creature as ModuleCreature;
+    creature.npcId = slot;
+    creature.isPC = 0;
+    if(!PartyManager.IsNPCInParty(slot)){
+      PartyManager.CurrentMembers.push({ isLeader: false, memberID: slot });
+    }
     creature.isPM = true;
     creature.clearAllActions();
     PartyManager.NPCS[slot].available = true;
     //PartyManager.NPCS[nID].canSelect = true;
     PartyManager.NPCS[slot].template = creature.template;
     PartyManager.NPCS[slot].moduleObject = creature;
+    if(alreadyInParty){
+      return true;
+    }
     //Add the creature to the party array
     PartyManager.party.push(creature);
     //Check to see if the creature needs to be removed from the creatures array
@@ -828,6 +1297,7 @@ export class PartyManager {
     if(cIdx > -1){
       GameState.module.area.creatures.splice(cIdx, 1);
     }
+    return true;
   }
 
   /**
@@ -868,34 +1338,80 @@ export class PartyManager {
   }
 
   /**
-   * Switch the player character
-   * @param npcId - The ID of the NPC to switch the player character to
+   * Switch the player character.
+   *
+   * The controlled companion stays a party member: it keeps its CurrentMembers slot (PT_MEMBERS carries
+   * PT_IS_LEADER so an NPC can lead and still be listed), it just also becomes the Player and the leader
+   * (party[0]). Whoever was in control before stays in the party too, except the protagonist, which leaves
+   * the world while a companion is in control and is rebuilt from pc.utc on the way back.
+   * The party array is updated synchronously, so scripts that switch and then add members in the same
+   * call see the final roster.
+   * @param npcId - NPC_* slot to take control of, or -1 for the protagonist
    * @returns ModuleCreature
    */
   static SwitchPlayerCharacter(npcId = 0){
-    let partyMember: ModuleCreature;
     const oldPC = PartyManager.Player;
+    if(npcId != -1 && !PartyManager.IsValidNPCSlot(npcId)){
+      return undefined;
+    }
+    // Nothing to switch from (no module loaded yet): refuse rather than spawn a creature at the origin.
+    if(!(oldPC instanceof ModuleCreature)){
+      return undefined;
+    }
 
-    if(oldPC instanceof ModuleCreature && (oldPC instanceof ModulePlayer || oldPC.isPlayer || oldPC.npcId < 0)){
+    const oldIsCreature = true;
+    const oldIsProtagonist = oldIsCreature && PartyManager.IsProtagonist(oldPC);
+    if(oldIsProtagonist){
       PartyManager.ActualPlayerTemplate = oldPC.save();
       CurrentGame.WriteFile('pc.utc', PartyManager.ActualPlayerTemplate.getExportBuffer());
-    }else if(oldPC instanceof ModuleCreature && oldPC.npcId >= 0){
+    }else if(oldIsCreature && PartyManager.IsValidNPCSlot(oldPC.npcId)){
+      // Keep what the companion gained or spent while in control (XP, HP/FP, items) in its slot template.
       PartyManager.RefreshNPCTemplate(oldPC.npcId, oldPC);
     }
 
-    if(npcId == -1){
-      partyMember = new ModulePlayer(PartyManager.ActualPlayerTemplate);
-      PartyManager.PlayerTemplate = PartyManager.ActualPlayerTemplate;
-    }else{
+    if(oldIsCreature && (npcId == -1 ? oldIsProtagonist : oldPC.npcId == npcId)){
+      return oldPC;
+    }
+
+    const member = npcId >= 0 ? PartyManager.party.find((pm) => pm && pm !== oldPC && pm.npcId == npcId) : undefined;
+    if(npcId >= 0){
+      // The slot template only reflects the last save(); re-snapshot from any live creature of the slot first,
+      // so a rebuild keeps the HP/FP spent since.
       PartyManager.RefreshNPCTemplate(npcId);
-      partyMember = new ModuleCreature(PartyManager.NPCS[npcId].template);
+    }
+    const partyMember: ModuleCreature = member
+      ?? (npcId == -1 ? new ModulePlayer(PartyManager.ActualPlayerTemplate) : new ModuleCreature(PartyManager.CloneWithoutObjectIds(PartyManager.NPCS[npcId].template)));
+    if(npcId == -1){
+      PartyManager.PlayerTemplate = PartyManager.ActualPlayerTemplate;
     }
 
     PartyManager.Player = partyMember;
+    PartyManager.ControlledNPC = npcId >= 0 ? npcId : -1;
+
+    // Roster: the new Player leads; the protagonist leaves while a companion is in control; everyone else stays.
+    PartyManager.party = [partyMember, ...PartyManager.party.filter((pm) => pm && pm !== partyMember && !(oldIsProtagonist && pm === oldPC))];
+    if(npcId >= 0 && !PartyManager.IsNPCInParty(npcId)){
+      PartyManager.CurrentMembers.push({ isLeader: true, memberID: npcId });
+    }
+    if(oldIsCreature && !oldIsProtagonist && PartyManager.IsValidNPCSlot(oldPC.npcId) && !PartyManager.IsNPCInParty(oldPC.npcId)){
+      PartyManager.CurrentMembers.push({ isLeader: false, memberID: oldPC.npcId });
+    }
+
+    PartyManager.EnforcePartyCapacity(partyMember, oldPC, oldIsProtagonist, npcId >= 0);
 
     try{
       const spawn = oldPC.position.clone();
       const quaternion = oldPC.quaternion.clone();
+      if(oldIsProtagonist){
+        PartyManager.RetireCreature(oldPC);
+      }
+
+      if(member){
+        member.isPC = 0;
+        member.clearAllActions();
+        PartyManager.UpdateLeader();
+        return member;
+      }
 
       partyMember.isPM = true;
       partyMember.npcId = npcId;
@@ -905,20 +1421,22 @@ export class PartyManager {
       // load(), which would otherwise restore whatever IsPC the template carried.
       partyMember.isPC = npcId == -1 ? 1 : 0;
       partyMember.clearAllActions();
-      partyMember.position.copy(spawn);
-      partyMember.quaternion.copy(quaternion);
+      if(spawn){ partyMember.position.copy(spawn); }
+      if(quaternion){ partyMember.quaternion.copy(quaternion); }
       partyMember.loadScripts();
+      PartyManager.UpdateLeader();
       partyMember.loadModel().then( (model: OdysseyModel3D) => {
-        PartyManager.party[0] = partyMember;
-        
+        // The area may have been disposed (and this creature destroyed) while the model loaded.
+        if(partyMember.destroyed || !model){ return; }
         model.userData.moduleObject = partyMember;
-        partyMember.position.copy(spawn);
-        partyMember.quaternion.copy(quaternion);
+        if(spawn){ partyMember.position.copy(spawn); }
+        if(quaternion){ partyMember.quaternion.copy(quaternion); }
         model.hasCollision = true;
-        
+
         GameState.group.party.add( partyMember.container );
-        oldPC.destroy();
         partyMember.onSpawn();
+      }).catch((e: any) => {
+        console.error('SwitchPlayerCharacter: model load failed', npcId, e);
       });
       return partyMember;
     }catch(e){
@@ -926,10 +1444,106 @@ export class PartyManager {
       return undefined;
     }
   }
+
+  /**
+   * The party in the world is at most MaxSize (the leader + 2). When a switch would exceed it, one companion
+   * leaves the party (creature retired, slot still available with its template saved):
+   * - switching between two companions: the outgoing one, never a member a script just added;
+   * - control returning to the protagonist: the most recently joined companion other than the one that was in
+   *   control. CurrentMembers is kept in join order (Save and PT_MEMBERS preserve it), so this survives saves
+   *   and transitions.
+   * Unverified against retail, which may refuse the switch instead.
+   */
+  static EnforcePartyCapacity(newPlayer: ModuleCreature, oldPC: ModuleCreature, oldIsProtagonist: boolean, newIsCompanion: boolean){
+    while(PartyManager.GetOccupiedSeatCount() > PartyManager.MaxSize){
+      let leaving: ModuleCreature;
+      if(!oldIsProtagonist && newIsCompanion && PartyManager.party.includes(oldPC)){
+        leaving = oldPC;
+      }else{
+        const order = PartyManager.CurrentMembers.map((m) => m.memberID);
+        const candidates = PartyManager.party.filter((pm) => pm && pm !== newPlayer && pm !== oldPC && PartyManager.IsValidNPCSlot(pm.npcId));
+        if(!candidates.length){ break; }
+        candidates.sort((a, b) => order.indexOf(b.npcId) - order.indexOf(a.npcId));
+        leaving = candidates[0];
+      }
+      PartyManager.DropFromParty(leaving);
+    }
+  }
+
+  /**
+   * Take a companion out of the world party; its slot stays available with an up-to-date template.
+   */
+  static DropFromParty(creature: ModuleCreature){
+    const template = creature.save();
+    // The retired creature (and its items) keep their object ids until the deferred destroy; a companion rebuilt
+    // from this template in the meantime must get fresh ids (and no stale queue), or they would share registrations.
+    if(template?.RootNode){
+      PartyManager.StripInstanceFields(template.RootNode);
+    }
+    PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
+    if(PartyManager.IsValidNPCSlot(creature.npcId)){
+      PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
+    }
+    PartyManager.RetireCreature(creature);
+    // Portraits are rebuilt by the switch that called this (UpdateLeader).
+  }
+
+  static PendingDestroy: ModuleCreature[] = [];
+
+  /**
+   * Copy of a slot template with every instance field removed (StripInstanceFields: ObjectIds at any depth, queued
+   * actions, perception, combat round, area), so whatever is built from it registers fresh ids and starts clean.
+   */
+  static CloneWithoutObjectIds(template: GFFObject): GFFObject {
+    const copy = new GFFObject(template.getExportBuffer());
+    PartyManager.StripInstanceFields(copy.RootNode);
+    return copy;
+  }
+
+  /**
+   * Party creatures that hold an NPC slot, in the order they joined: the existing CurrentMembers order first,
+   * anything not listed yet after it in party order.
+   */
+  static GetSlotMembersInJoinOrder(): ModuleCreature[] {
+    const order = PartyManager.CurrentMembers.map((m) => m.memberID);
+    const rank = (pm: ModuleCreature) => { const i = order.indexOf(pm.npcId); return i < 0 ? order.length : i; };
+    return PartyManager.party
+      .filter((pm) => pm instanceof ModuleCreature && pm.npcId >= 0)
+      .map((pm, i) => ({ pm, i }))
+      .sort((a, b) => (rank(a.pm) - rank(b.pm)) || (a.i - b.i))
+      .map(({ pm }) => pm);
+  }
+
+  /**
+   * A creature leaving the world mid-script (the outgoing protagonist, a companion dropped for capacity): it leaves
+   * the party and the scene now, but the real destroy waits for the next tick, so the rest of the running script
+   * can still address it (AssignCommand, ActionX on OBJECT_SELF) without hitting a torn-down object.
+   * ModuleArea.dispose flushes it, so a transition in between cannot leak it.
+   */
+  static RetireCreature(creature: ModuleCreature){
+    if(!creature || creature.destroyed || PartyManager.PendingDestroy.includes(creature)){ return; }
+    creature.isPM = false;
+    try{ creature.container?.removeFromParent(); }catch(e){ console.error('RetireCreature: failed to detach', e); }
+    PartyManager.PendingDestroy.push(creature);
+    setTimeout(() => PartyManager.FlushPendingDestroys(), 0);
+  }
+
+  static FlushPendingDestroys(){
+    const pending = PartyManager.PendingDestroy.splice(0, PartyManager.PendingDestroy.length);
+    for(const creature of pending){
+      if(creature.destroyed){ continue; }
+      try{ creature.destroy(); }catch(e){ console.error('FlushPendingDestroys: failed to destroy', e); }
+    }
+  }
+
   static Save(){
+    // Module transitions dispose the player and rebuild it from PlayerTemplate; this tells loadPlayer which companion it was.
+    PartyManager.ControlledNPC = PartyManager.GetControlledNPC();
     PartyManager.SyncPlayerStateTemplates();
 
-    const npcs = PartyManager.party.filter( (pm) => pm instanceof ModuleCreature && pm.npcId >= 0 );
+    // The companion in control stays listed (with isLeader when it leads); ModuleArea.loadPlayer rebuilds it as
+    // the Player and LoadPartyMember skips its entry, so it is not spawned twice.
+    const npcs = PartyManager.GetSlotMembersInJoinOrder();
     PartyManager.CurrentMembers = npcs.map((pm) => {
       return {
         isLeader: PartyManager.party[0] == pm,
@@ -957,7 +1571,7 @@ export class PartyManager {
    */
   static UpdateLeader(){
     for(let i = 0; i < PartyManager.CurrentMembers.length; i++){
-      const isLeader = (PartyManager.party[0].npcId == PartyManager.CurrentMembers[i].memberID);
+      const isLeader = (PartyManager.party[0]?.npcId == PartyManager.CurrentMembers[i].memberID);
       PartyManager.CurrentMembers[i].isLeader = isLeader;
     }
 
@@ -986,7 +1600,7 @@ export class PartyManager {
    * @returns PartyMember
    */
   static GetPMByNPCId(npcId: number = -1){
-    return PartyManager.party.find( (obj) => obj.npcId == npcId);
+    return PartyManager.party.find( (obj) => obj?.npcId == npcId);
   }
 
   /**
@@ -1082,15 +1696,29 @@ export class PartyManager {
    * @returns void
    */
   static async LoadPartyMember(nIdx: number = 0){
-    const npc = PartyManager.NPCS[PartyManager.CurrentMembers[nIdx].memberID];
-    const template = npc.template;
-    template.RootNode.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameState.ModuleObjectManager.GetNextPlayerId() );
-    const partyMember = new ModuleCreature(template);
-
-    if(nIdx < 0 || nIdx > 1){
-      console.log('LoadPartyMember', 'Wrong index', nIdx, npc, partyMember);
+    if(PartyManager.IsControlledNPC(PartyManager.CurrentMembers[nIdx]?.memberID)){
+      // Already in the world as the Player (saves written before Save() excluded it).
       return;
     }
+    // CurrentMembers holds up to 3 entries while a companion is in control (it is listed too, and the
+    // protagonist is out of the world); the world party itself never exceeds MaxSize.
+    if(nIdx < 0 || nIdx >= PartyManager.CurrentMembers.length){
+      console.log('LoadPartyMember', 'Wrong index', nIdx);
+      return;
+    }
+    if(PartyManager.GetOccupiedSeatCount() >= PartyManager.MaxSize){
+      console.warn('LoadPartyMember: party is full', nIdx, PartyManager.CurrentMembers[nIdx]);
+      return;
+    }
+    const npc = PartyManager.NPCS[PartyManager.CurrentMembers[nIdx].memberID];
+    if(!(npc?.template instanceof GFFObject)){
+      console.warn('LoadPartyMember: no template for slot', PartyManager.CurrentMembers[nIdx].memberID);
+      return;
+    }
+    // A copy without any ObjectId (creature and items), then exactly one fresh id for the creature.
+    const template = PartyManager.CloneWithoutObjectIds(npc.template);
+    template.RootNode.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameState.ModuleObjectManager.GetNextPlayerId() );
+    const partyMember = new ModuleCreature(template);
 
     let currentSlot: ModuleCreature;
 
@@ -1106,7 +1734,7 @@ export class PartyManager {
           PartyManager.party.unshift(PartyManager.party.splice(nIdx+1, 1)[0]);
         }*/
         PartyManager.AddPortraitToOrder( partyMember.getPortraitResRef() );
-        PartyManager.party[ PartyManager.GetCreatureStartingPartyIndex(partyMember) ] = partyMember;
+        PartyManager.PlaceInParty(partyMember, PartyManager.GetCreatureStartingPartyIndex(partyMember));
         let spawn = PartyManager.GetSpawnLocation(partyMember);
         partyMember.position.copy(spawn.position);
         partyMember.setFacing(spawn.getFacing(), true);
@@ -1155,7 +1783,8 @@ export class PartyManager {
       return;
     }
     
-    const partyMember = new ModuleCreature(npc.template);
+    // The preview must not take over the registration of the live companion (or its items) this slot came from.
+    const partyMember = new ModuleCreature(PartyManager.CloneWithoutObjectIds(npc.template));
     partyMember.npcId = npcId;
     partyMember.isPM = true;
     partyMember.load();
@@ -1268,7 +1897,6 @@ export class PartyManager {
 
   }
 
-  static #tmpFollowPositionTarget = new THREE.Vector3();
   static #tmpFollowPosition = new THREE.Vector3();
   /**
    * Get the follow position of the creature
@@ -1276,7 +1904,27 @@ export class PartyManager {
    * @returns THREE.Vector3
    */
   static GetFollowPosition(creature: ModuleCreature){
+    const formation = PartyManager.Formations.get(creature);
+    if(formation && BitWise.InstanceOfObject(formation.anchor, ModuleObjectType.ModuleCreature)){
+      return this.GetFormationPosition(creature, formation.anchor, formation.pattern, formation.position);
+    }
     return this.GetFollowPositionAtIndex(PartyManager.party.indexOf(creature));
+  }
+
+  /**
+   * World position of a formation slot around the anchor, snapped to the creature's walkmesh
+   */
+  static GetFormationPosition(creature: ModuleCreature, anchor: ModuleCreature, pattern: PartyFormationPattern, position: number){
+    const offset = PartyManager.GetFormationOffset(pattern, position);
+    const facing = anchor.rotation.z;
+    this.#tmpFollowPosition.set(
+      anchor.position.x + offset.right * Math.cos(facing) - offset.forward * Math.sin(facing),
+      anchor.position.y + offset.right * Math.sin(facing) + offset.forward * Math.cos(facing),
+      anchor.position.z
+    );
+
+    return (creature.area.isPointWalkable(this.#tmpFollowPosition)) ?
+      this.#tmpFollowPosition : creature.area.getNearestWalkablePoint(this.#tmpFollowPosition, creature.getHitDistance());
   }
 
   /**
@@ -1291,17 +1939,8 @@ export class PartyManager {
     if(!creature)
       return new THREE.Vector3();
 
-    const targetOffset = (idx == 2) ? -1.5 :1.5;
-
-    this.#tmpFollowPositionTarget.set(
-      targetOffset * Math.cos(leader.rotation.z), 
-      targetOffset * Math.sin(leader.rotation.z), 
-      0
-    );
-    this.#tmpFollowPosition.copy(leader.position).sub(this.#tmpFollowPositionTarget);
-
-    return (creature.area.isPointWalkable(this.#tmpFollowPosition)) ?
-      this.#tmpFollowPosition : creature.area.getNearestWalkablePoint(this.#tmpFollowPosition, creature.getHitDistance());
+    // Party members without an explicit SetFormation stand abreast of the leader: slot 1 left, slot 2 right.
+    return this.GetFormationPosition(creature, leader, PartyFormationPattern.LINE, idx);
   }
 
   /**
@@ -1349,6 +1988,15 @@ export class PartyManager {
 
         await PartyManager.ExportPartyMemberTemplate(i, pm.template);
       }
+      for(let i = 0; i < PartyManager.MaxPuppetCount; i++){
+        const puppet = PartyManager.Puppets[i];
+        if(BitWise.InstanceOfObject(puppet?.moduleObject, ModuleObjectType.ModuleCreature)){
+          puppet.template = puppet.moduleObject.save();
+        }
+        if(puppet?.template instanceof GFFObject){
+          await puppet.template.export( path.join( CurrentGame.gameinprogress_dir, 'AVAILPUP'+i+'.utc'));
+        }
+      }
       await PartyManager.ExportPlayerCharacter();
       resolve();
     });
@@ -1359,7 +2007,7 @@ export class PartyManager {
    * @returns void
    */
   static async ExportPlayerCharacter(){
-    if(GameState.PartyManager.Player instanceof ModuleCreature && (GameState.PartyManager.Player instanceof ModulePlayer || GameState.PartyManager.Player.isPlayer || GameState.PartyManager.Player.npcId < 0)){
+    if(GameState.PartyManager.Player instanceof ModuleCreature && PartyManager.IsProtagonist(GameState.PartyManager.Player)){
       GameState.PartyManager.ActualPlayerTemplate = GameState.PartyManager.Player.save();
     }
 
@@ -1378,7 +2026,7 @@ export class PartyManager {
    * @returns void
    */
   public static async SavePartyMember(npcId: number = 0){
-    const pm = PartyManager.party.find( (pm) => pm.npcId == npcId );
+    const pm = PartyManager.party.find( (pm) => pm?.npcId == npcId );
     if(pm) pm.save();
     const npc = PartyManager.NPCS[npcId];
     if(!npc){ return; }

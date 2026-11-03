@@ -711,7 +711,7 @@ export class ModuleCreature extends ModuleObject {
 
 
       //If a non controlled party member is stuck, warp them to their follow position
-      if (this.npcId != undefined && this != (GameState.getCurrentPlayer() as any) && this.collisionTimer >= 1) {
+      if (GameState.PartyManager.ShouldWarpStuckMember(this)) {
         this.setPosition(GameState.PartyManager.GetFollowPosition(this));
         this.collisionTimer = 0;
       }

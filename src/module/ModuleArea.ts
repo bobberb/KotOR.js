@@ -376,6 +376,8 @@ export class ModuleArea extends ModuleObject {
       }
     }
 
+    // Creatures already out of the party but waiting for their deferred destroy (an outgoing protagonist).
+    GameState.PartyManager.FlushPendingDestroys();
     const partyMembers = GameState.PartyManager.party.splice(0, GameState.PartyManager.party.length);
     for(let i = 0; i < partyMembers.length; i++){
       try{
@@ -1751,11 +1753,12 @@ export class ModuleArea extends ModuleObject {
     try{
       if(GameState.PartyManager.Player instanceof ModuleCreature && !GameState.PartyManager.Player.destroyed){
         const player = GameState.PartyManager.Player;
-        player.npcId = -1;
+        // A companion in control (SwitchPlayerCharacter) keeps its NPC slot across module transitions.
+        if(!(player.npcId >= 0)){ player.npcId = -1; }
 
         if(!this.miniGame){
           const playerSlot = GameState.PartyManager.GetCreatureStartingPartyIndex(player);
-          GameState.PartyManager.party[playerSlot] = player;
+          GameState.PartyManager.PlaceInParty(player, playerSlot);
           GameState.group.party.add( player.container );
         }
 
@@ -1784,15 +1787,25 @@ export class ModuleArea extends ModuleObject {
         }
       }else{
         let player = new ModulePlayer( this.getPlayerTemplate() );
-        player.npcId = -1;
+        player.npcId = GameState.PartyManager.GetLoadedPlayerNPCId(player.template);
         
         player.load();
+        // No companion slot and the protagonist's own template: an older save may lack IsPC on it.
+        // Any other slotless template (a possessed droid, a cutscene stand-in) is not the protagonist.
+        if(player.npcId < 0 && !player.isPC){
+          const actual = GameState.PartyManager.ActualPlayerTemplate;
+          if(!actual || actual === GameState.PartyManager.PlayerTemplate){
+            player.isPC = 1;
+          }else{
+            console.warn('ModuleArea.loadPlayer: slotless player is not the protagonist template; leaving IsPC 0', player.getTag?.());
+          }
+        }
         // GameState.currentLeader = player;
         GameState.PartyManager.Player = player;
       
         if(!this.miniGame){
           const playerSlot = GameState.PartyManager.GetCreatureStartingPartyIndex(player);
-          GameState.PartyManager.party[playerSlot] = player;
+          GameState.PartyManager.PlaceInParty(player, playerSlot);
           GameState.group.party.add( player.container );
         }
 
@@ -1827,6 +1840,7 @@ export class ModuleArea extends ModuleObject {
       await GameState.PartyManager.LoadPartyMember(i);
     }
     GameState.PartyManager.party = GameState.PartyManager.party.filter((member) => member instanceof ModuleCreature);
+    GameState.PartyManager.RelinkPuppets(this.creatures);
     GameState.PartyManager.RebuildPortraitOrder();
     GameState.currentLeader = GameState.PartyManager.party[0];
   }
