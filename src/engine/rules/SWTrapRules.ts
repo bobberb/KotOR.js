@@ -323,8 +323,9 @@ export class SWTrapRules {
     if(SWTrapRules.isOwnMine(creature, trap)){
       // Picking up your own mine: no XP (it would be an XP farm), the item comes back.
       const item = SWTrapRules.createMineItem(trap);
+      // Acquired from the trap (GetModuleItemAcquiredFrom), before the trap is removed.
+      if(item) creature.addItem(item, { acquiredFrom: trap });
       trap.disarmTrap(creature);
-      if(item) creature.addItem(item);
       return { outcome: 'success', usedKey: true, item, xp: 0 };
     }
 
@@ -332,8 +333,8 @@ export class SWTrapRules {
     if(check.success){
       const item = SWTrapRules.createMineItem(trap);
       const xp = SWTrapRules.disarmXP(trap);
+      if(item) creature.addItem(item, { acquiredFrom: trap });
       trap.disarmTrap(creature);
-      if(item) creature.addItem(item);
       SWTrapRules.awardXP(creature, xp);
       return { outcome: 'success', check, item, xp };
     }

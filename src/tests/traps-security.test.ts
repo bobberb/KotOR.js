@@ -505,6 +505,7 @@ describe('recover (Demolitions vs disarm DC + 5) gives the mine item', () => {
     const item = (state.InventoryManager.addItem as jest.Mock).mock.calls[0][0] as ModuleItem;
     expect(item).toBeInstanceOf(ModuleItem);
     expect(item.tag).toBe('g_i_trapkit001');
+    expect((state.InventoryManager.addItem as jest.Mock).mock.calls[0][2]).toEqual({ acquiredFrom: trap });
     expect(trap.destroyed).toBe(true);
   });
 
@@ -543,7 +544,8 @@ describe('laying a mine', () => {
     expect(routines.GetTrapCreator.kotor.call({}, mine)).toBe(pc);
     expect(routines.GetIsTrapped.kotor.call({}, mine)).toBe(1);
     expect(state.NWScript.Load).toHaveBeenCalledWith('k_trp_frag');
-    expect(state.InventoryManager.removeItem).toHaveBeenCalledWith(item, 1);
+    // consumed from the party inventory, lost by the layer (OnUnAcquireItem)
+    expect(state.InventoryManager.removeItem).toHaveBeenCalledWith(item, 1, { lostBy: pc });
     // laying a mine on the ground does not blow it up 3s later (that is the door/placeable blast)
     expect(trapEvents()).toHaveLength(0);
   });
@@ -732,7 +734,8 @@ describe('own mines are safe to handle', () => {
     expect(runAction(action, pc)).toBe(ActionStatus.COMPLETE);
     expect(trapEvents()).toHaveLength(0);
     expect(mine.destroyed).toBe(true);
-    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' });
+    // into the party inventory, acquired from the mine (OnAcquireItem)
+    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' }, false, { acquiredFrom: mine });
     expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
   });
 
@@ -1084,7 +1087,7 @@ describe('the party is one owner (PC faction 0, companion faction 2)', () => {
     expect(result.check).toBeUndefined();
     expect(roll).not.toHaveBeenCalled();
     expect(state.PartyManager.GiveXP).not.toHaveBeenCalled();
-    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' });
+    expect(state.InventoryManager.addItem).toHaveBeenCalledWith({ tag: 'g_i_trapkit001' }, false, { acquiredFrom: mine });
     expect(trapEvents()).toHaveLength(0);
   });
 
