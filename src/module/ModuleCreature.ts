@@ -825,6 +825,8 @@ export class ModuleCreature extends ModuleObject {
   }
 
   updateRegen(delta = 0) {
+    // The dead do not heal back up; party revival is PartyDeathMonitor's call.
+    if (this.isDead()) return;
     this.regenTimer -= delta;
     if (this.regenTimer <= 0) {
       this.regenTimer = this.regenTimerMax;
@@ -2292,7 +2294,7 @@ export class ModuleCreature extends ModuleObject {
 
   retrieveInventory() {
     while (this.inventory.length) {
-      GameState.InventoryManager.addItem(this.inventory.pop())
+      GameState.InventoryManager.addItem(this.inventory.pop(), false, { acquiredFrom: this })
     }
   }
 
@@ -3981,21 +3983,8 @@ export class ModuleCreature extends ModuleObject {
         this.subraceIndex = this.template.RootNode.getFieldByLabel('SubraceIndex').getValue();
 
 
-      if (this.template.RootNode.hasField('SWVarTable')) {
-        let localBools = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0].getFieldByLabel('BitArray').getChildStructs();
-        //console.log(localBools);
-        for (let i = 0; i < localBools.length; i++) {
-          let data = localBools[i].getFieldByLabel('Variable').getValue();
-          for (let bit = 0; bit < 32; bit++) {
-            this._locals.Booleans[bit + (i * 32)] = ((data >> bit) % 2 != 0);
-          }
-        }
-        let localNumbers = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0].getFieldByLabel('ByteArray').getChildStructs();
-        //console.log(localNumbers);
-        for (let i = 0; i < localNumbers.length; i++) {
-          let data = localNumbers[i].getFieldByLabel('Variable').getValue();
-          this.setLocalNumber(i, data);
-        }
+      if(this.template.RootNode.hasField('SWVarTable')){
+        this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
       }
 
       if (this.template.RootNode.hasField('PM_Appearance'))

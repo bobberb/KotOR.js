@@ -93,6 +93,7 @@ export const CutsceneAttack = defineAction({
     intParam("nDamage"),
   ] as const,
   kotor(this: NWScriptInstance, oTarget, nAnimation, nAttackResult, nDamage) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) return;
     if (
       BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleCreature) ||
       BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModulePlaceable)
@@ -146,7 +147,7 @@ export const GetLastHostileTarget = defineAction({
     if (BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature)) {
       return target.combatData.lastAttackTarget;
     }
-    return this.caller.combatData.lastAttackTarget;
+    return this.caller?.combatData?.lastAttackTarget;
   },
 });
 

@@ -370,26 +370,7 @@ export class ModuleSound extends ModuleObject {
       this.elevation = this.template.RootNode.getFieldByLabel('Elevation').getValue();
 
     if(this.template.RootNode.hasField('SWVarTable')){
-      const swVarTableStruct = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0];
-      if(swVarTableStruct){
-        if(swVarTableStruct.hasField('BitArray')){
-          const localBools = swVarTableStruct.getFieldByLabel('BitArray').getChildStructs();
-          for(let i = 0; i < localBools.length; i++){
-            const data = localBools[i].getFieldByLabel('Variable').getValue();
-            for(let bit = 0; bit < 32; bit++){
-              this._locals.Booleans[bit + (i*32)] = ( (data>>bit) % 2 != 0);
-            }
-          }
-        }
-
-        if(swVarTableStruct.hasField('ByteArray')){
-          const localNumbers = swVarTableStruct.getFieldByLabel('ByteArray').getChildStructs();
-          for(let i = 0; i < localNumbers.length; i++){
-            const data = localNumbers[i].getFieldByLabel('Variable').getValue();
-            this.setLocalNumber(i, data);
-          }
-        }
-      }
+      this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
     }
 
     try{

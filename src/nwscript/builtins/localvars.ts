@@ -1,4 +1,5 @@
 import EngineLocation from "@/engine/EngineLocation";
+import { GameState } from "@/GameState";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { NWScriptDataType } from "@/enums/nwscript/NWScriptDataType";
 import type { ModuleObject } from "@/module";
@@ -6,6 +7,24 @@ import { BitWise } from "@/utility/BitWise";
 import { NW_FALSE, NW_TRUE } from "@/nwscript/NWScriptConstants";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
 import { defineAction, intParam, objectParam } from "@/nwscript/builtins/actionBuilder";
+
+interface ILocalVariableOwner {
+  getLocalBoolean(index: number): boolean;
+  setLocalBoolean(index: number, value: boolean): void;
+  getLocalNumber(index: number): number;
+  setLocalNumber(index: number, value: number): void;
+}
+
+/** Module objects and the module itself (GetModule()) carry locals. */
+function localsOwner(oObject: unknown): ILocalVariableOwner | undefined {
+  if (BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleObject)) {
+    return oObject as ILocalVariableOwner;
+  }
+  if (oObject && oObject === GameState.module) {
+    return oObject as unknown as ILocalVariableOwner;
+  }
+  return undefined;
+}
 
 export const GetRunScriptVar = defineAction({
   id: 565,
@@ -28,10 +47,7 @@ export const GetLocalBoolean = defineAction({
     intParam("nIndex"),
   ] as const,
   kotor(this: NWScriptInstance, oObject, nIndex) {
-    if (BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleObject)) {
-      return oObject.getLocalBoolean(nIndex) ? NW_TRUE : NW_FALSE;
-    }
-    return 0;
+    return localsOwner(oObject)?.getLocalBoolean(nIndex) ? NW_TRUE : NW_FALSE;
   },
 });
 
@@ -46,7 +62,7 @@ export const SetLocalBoolean = defineAction({
     intParam("bValue"),
   ] as const,
   kotor(this: NWScriptInstance, oObject, nIndex, bValue) {
-    oObject.setLocalBoolean(nIndex, !!bValue);
+    localsOwner(oObject)?.setLocalBoolean(nIndex, !!bValue);
   },
 });
 
@@ -60,10 +76,7 @@ export const GetLocalNumber = defineAction({
     intParam("nIndex"),
   ] as const,
   kotor(this: NWScriptInstance, oObject, nIndex) {
-    if (BitWise.InstanceOfObject(oObject, ModuleObjectType.ModuleObject)) {
-      return oObject.getLocalNumber(nIndex);
-    }
-    return 0;
+    return localsOwner(oObject)?.getLocalNumber(nIndex) ?? 0;
   },
 });
 
@@ -78,7 +91,7 @@ export const SetLocalNumber = defineAction({
     intParam("nValue"),
   ] as const,
   kotor(this: NWScriptInstance, oObject, nIndex, nValue) {
-    oObject.setLocalNumber(nIndex, nValue);
+    localsOwner(oObject)?.setLocalNumber(nIndex, nValue);
   },
 });
 

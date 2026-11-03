@@ -290,9 +290,9 @@ export class MenuStore extends GameMenu {
     const purchasedItem = this.sanitizePurchasedItem(item);
     const customer = this.getCurrentTrader();
     if(customer instanceof ModuleCreature){
-      customer.addItem(purchasedItem);
+      customer.addItem(purchasedItem, { acquiredFrom: this.storeObject });
     }else{
-      GameState.InventoryManager.addItem(purchasedItem);
+      GameState.InventoryManager.addItem(purchasedItem, false, { acquiredFrom: this.storeObject });
     }
 
     if(!item.isInfinite()){

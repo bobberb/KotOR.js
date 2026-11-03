@@ -32,6 +32,8 @@ export const ActionAttack = defineAction({
     intParam("bPassive", { optional: true, default: 0 }),
   ] as const,
   kotor(this: NWScriptInstance, oAttackee, bPassive) {
+    // Only creatures attack; the module (OBJECT_SELF in Mod_* scripts) cannot.
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) return;
     if (BitWise.InstanceOfObject(oAttackee, ModuleObjectType.ModuleCreature)) {
       this.caller.attackCreature(oAttackee);
     } else {
@@ -179,7 +181,7 @@ export const GetAttemptedAttackTarget = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.caller.combatData.lastAttemptedAttackTarget;
+    return this.caller?.combatData?.lastAttemptedAttackTarget;
   },
 });
 
@@ -223,7 +225,7 @@ export const GetAttemptedSpellTarget = defineAction({
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
   kotor(this: NWScriptInstance) {
-    return this.caller.combatData.lastAttemptedSpellTarget;
+    return this.caller?.combatData?.lastAttemptedSpellTarget;
   },
 });
 

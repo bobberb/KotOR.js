@@ -32,6 +32,7 @@ export { InGameDialog } from "@/game/tsl/menu/InGameDialog";
 export { MenuEquipment } from "@/game/tsl/menu/MenuEquipment";
 export { MenuFeedback } from "@/game/tsl/menu/MenuFeedback";
 export { MenuGalaxyMap } from "@/game/tsl/menu/MenuGalaxyMap";
+export { MenuGameOver } from "@/game/tsl/menu/MenuGameOver";
 export { MenuGameplay } from "@/game/tsl/menu/MenuGameplay";
 export { MenuGraphics } from "@/game/tsl/menu/MenuGraphics";
 export { MenuGraphicsAdvanced } from "@/game/tsl/menu/MenuGraphicsAdvanced";

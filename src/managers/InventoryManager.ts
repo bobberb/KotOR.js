@@ -3,11 +3,31 @@ import { GFFField } from "@/resource/GFFField";
 import { GFFObject } from "@/resource/GFFObject";
 import * as path from "path";
 import { CurrentGame } from "@/engine/CurrentGame";
-import type { ModuleCreature, ModuleItem } from "@/module";
+import type { ModuleCreature, ModuleItem, ModuleObject } from "@/module";
 import { GameState } from "@/GameState";
 import { BaseItemType } from "@/enums/combat/BaseItemType";
 import { UIIconTimerType } from "@/enums/engine/UIIconTimerType";
 // import { PartyManager } from "@/managers/PartyManager";
+
+export interface IInventoryAddOptions {
+  /** Previous owner, reported by GetModuleItemAcquiredFrom. */
+  acquiredFrom?: ModuleObject;
+  /** Not an acquisition (savegame restore, unequip): skip Mod_OnAcquirItem. */
+  silent?: boolean;
+}
+
+export interface IInventoryRemoveOptions {
+  /** Reported by GetModuleItemLostBy; defaults to the party leader. */
+  lostBy?: ModuleObject;
+  /** Not a loss (equipping moves the item out of the shared inventory): skip Mod_OnUnAqreItem. */
+  silent?: boolean;
+}
+
+/** Module item events only fire for a running module, never while a game is being restored. */
+function moduleForItemEvents(){
+  const module = GameState.module;
+  return module?.readyToProcessEvents ? module : undefined;
+}
 
 /**
  * InventoryManager class.
@@ -130,7 +150,16 @@ export class InventoryManager {
     return false;
   }
 
-  static addItem(template: GFFObject|ModuleItem = new GFFObject(), limitOne = false): ModuleItem {
+  static addItem(template: GFFObject|ModuleItem = new GFFObject(), limitOne = false, options: IInventoryAddOptions = {}): ModuleItem {
+    const stored = InventoryManager.storeItem(template, limitOne);
+    const module = !options.silent && stored && moduleForItemEvents();
+    if(module){
+      module.onItemAcquired(stored, options.acquiredFrom);
+    }
+    return stored;
+  }
+
+  private static storeItem(template: GFFObject|ModuleItem, limitOne: boolean): ModuleItem | undefined {
 
     let item: ModuleItem;
     if(template instanceof GFFObject){
@@ -182,36 +211,41 @@ export class InventoryManager {
 
   }
 
-  static removeItemByResRef(resRef = '', nCount = 1){
-    let item = InventoryManager.getItemByTag(resRef);
+  static removeItemByResRef(resRef = '', nCount = 1, options: IInventoryRemoveOptions = {}){
+    const item = InventoryManager.getItemByTag(resRef);
     if(item){
-      GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
-      let idx = InventoryManager.inventory.indexOf(item);
-      if(nCount < item.getStackSize()){
-        item.setStackSize( (item.getStackSize() - nCount) || 1 );
-      }else{
-        InventoryManager.inventory.splice(idx, 1);
-      }
+      InventoryManager.takeFromInventory(item, nCount, options);
     }
   }
 
-  static removeItem(item?: string|ModuleItem, nCount = 1){
+  static removeItem(item?: string|ModuleItem, nCount = 1, options: IInventoryRemoveOptions = {}){
     if(typeof item === 'string'){
-      InventoryManager.removeItemByResRef(item, nCount);
+      InventoryManager.removeItemByResRef(item, nCount, options);
     }else if(item instanceof GameState.Module.ModuleArea.ModuleItem){
-      let idx = InventoryManager.inventory.indexOf(item);
-      if(idx >= 0){
-        GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
-        if(nCount >= item.getStackSize()){
-          InventoryManager.inventory.splice(idx, 1);
-        }else{
-          item.setStackSize( (item.getStackSize() - nCount) || 1 );
-        }
-      }else{
-        //Item not in inventory
+      if(InventoryManager.inventory.indexOf(item) >= 0){
+        InventoryManager.takeFromInventory(item, nCount, options);
       }
     }else{
       console.warn('InventoryManager.removeItem() unknown item', item, nCount);
+    }
+  }
+
+  private static takeFromInventory(item: ModuleItem, nCount: number, options: IInventoryRemoveOptions){
+    GameState.UINotificationManager.EnableUINotificationIconType(UIIconTimerType.ITEM_LOST);
+    const module = !options.silent && moduleForItemEvents();
+    let lost = item;
+    if(nCount >= item.getStackSize()){
+      InventoryManager.inventory.splice(InventoryManager.inventory.indexOf(item), 1);
+    }else{
+      // GetModuleItemLost reports what left the party, not the stack that stayed.
+      if(module){
+        lost = item.clone();
+        lost.setStackSize(nCount);
+      }
+      item.setStackSize( (item.getStackSize() - nCount) || 1 );
+    }
+    if(module){
+      module.onItemLost(lost, options.lostBy || GameState.PartyManager?.party?.[0]);
     }
   }
 

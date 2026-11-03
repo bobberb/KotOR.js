@@ -209,7 +209,7 @@ export const BeginConversation = defineAction({
       return NW_TRUE;
     }
 
-    if (this.caller.conversation) {
+    if (this.caller?.conversation) {
       GameState.CutsceneManager.startConversation(this.caller.conversation, this.caller, dialogTarget as any);
       return NW_TRUE;
     }

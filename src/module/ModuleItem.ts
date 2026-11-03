@@ -1142,7 +1142,7 @@ export class ModuleItem extends ModuleObject {
       oCreature.addEffect( eDisguise );
     }
     if(GameState.PartyManager.party.indexOf(oCreature) >= 0){
-      GameState.InventoryManager.removeItem(this);
+      GameState.InventoryManager.removeItem(this, 1, { silent: true });
     }else{
       const index = oCreature.inventory.indexOf(this);
       if(index >= 0) oCreature.inventory.splice(index, 1);
@@ -1154,7 +1154,7 @@ export class ModuleItem extends ModuleObject {
     console.log('ModuleItem.onUnEquip', oCreature, this);
     oCreature.removeEffectsByCreator(this);
     if(GameState.PartyManager.party.indexOf(oCreature) >= 0){
-      GameState.InventoryManager.addItem(this);
+      GameState.InventoryManager.addItem(this, false, { silent: true });
     }else if(!oCreature.inventory.includes(this)){
       oCreature.addItem(this);
     }

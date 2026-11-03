@@ -74,6 +74,7 @@ export const ActionEquipMostDamagingMelee = defineAction({
     action.setParameter(0, ActionParameterType.DWORD, weapon);
     action.setParameter(1, ActionParameterType.INT, bOffHand ? ModuleCreatureArmorSlot.LEFTHAND : ModuleCreatureArmorSlot.RIGHTHAND);
     action.setParameter(2, ActionParameterType.INT, NW_FALSE);
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     this.caller.actionQueue.add(action);
   },
 });
@@ -125,6 +126,7 @@ export const ActionEquipMostDamagingRanged = defineAction({
     action.setParameter(0, ActionParameterType.DWORD, weapon);
     action.setParameter(1, ActionParameterType.INT, ModuleCreatureArmorSlot.RIGHTHAND);
     action.setParameter(2, ActionParameterType.INT, NW_FALSE);
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     this.caller.actionQueue.add(action);
   },
 });

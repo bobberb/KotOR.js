@@ -1336,27 +1336,7 @@ export class ModuleArea extends ModuleObject {
     }
 
     if(this.git.RootNode.hasField('SWVarTable')){
-      console.log("SWVarTable", this.git);
-      let swVarTableStruct = this.git.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0];
-      if(swVarTableStruct){
-        if(swVarTableStruct.hasField('BitArray')){
-          let localBools = swVarTableStruct.getFieldByLabel('BitArray').getChildStructs();
-          for(let i = 0; i < localBools.length; i++){
-            let data = localBools[i].getFieldByLabel('Variable').getValue();
-            for(let bit = 0; bit < 32; bit++){
-              this._locals.Booleans[bit + (i*32)] = ( (data>>bit) % 2 != 0);
-            }
-          }
-        }
-
-        if(swVarTableStruct.hasField('ByteArray')){
-          let localNumbers = swVarTableStruct.getFieldByLabel('ByteArray').getChildStructs();
-          for(let i = 0; i < localNumbers.length; i++){
-            let data = localNumbers[i].getFieldByLabel('Variable').getValue();
-            this.setLocalNumber(i, data);
-          }
-        }
-      }
+      this.loadSWVarTable(this.git.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
     }
 
     GameState.AlphaTest = this.alphaTest;

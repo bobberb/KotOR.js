@@ -202,7 +202,9 @@ export const GetItemActivated = defineAction({
   comment: "439: Get the item that was activated in an OnItemActivated script.",
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
-  kotor: unimplemented("GetItemActivated", 439),
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivated;
+  },
 });
 
 export const GetItemActivator = defineAction({
@@ -211,7 +213,9 @@ export const GetItemActivator = defineAction({
   comment: "440: Get the creature that activated the item in an OnItemActivated script.",
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
-  kotor: unimplemented("GetItemActivator", 440),
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivator;
+  },
 });
 
 export const GetTotalDamageDealt = defineAction({

@@ -37,6 +37,8 @@ export const GetNearestCreature = defineAction({
     intParam("nThirdCriteriaValue"),
   ] as const,
   kotor(this: NWScriptInstance, nFirstCriteriaType, nFirstCriteriaValue, oTarget, nNth, nSecondCriteriaType, nSecondCriteriaValue, nThirdCriteriaType, nThirdCriteriaValue) {
+    // Nearest needs a position (and perception); the module has neither.
+    if (!BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleObject)) return undefined;
     return GameState.ModuleObjectManager.GetNearestCreature(
       nFirstCriteriaType,
       nFirstCriteriaValue,
