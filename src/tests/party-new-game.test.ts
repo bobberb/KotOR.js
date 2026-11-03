@@ -241,6 +241,18 @@ describe.each([GameEngineType.TSL, GameEngineType.KOTOR])('new game after loadin
   });
 });
 
+describe('InventoryManager.ClearInventory', () => {
+  test('destroys the items it drops, so their object-id registrations do not leak', () => {
+    const items = [new FakeItem(new GFFObject()), new FakeItem(new GFFObject())] as any[];
+    for(const item of items){ item.destroy = jest.fn(); }
+    items[0].destroy.mockImplementation(() => { throw new Error('renderer gone'); }); // one failing destroy must not stop the rest
+    InventoryManager.inventory = items;
+    InventoryManager.ClearInventory();
+    expect(InventoryManager.inventory).toEqual([]);
+    expect(items.map((i) => i.destroy.mock.calls.length)).toEqual([1, 1]);
+  });
+});
+
 describe('SaveGame.loadInventory', () => {
   function inventoryRes(count: number){
     const gff = new GFFObject();

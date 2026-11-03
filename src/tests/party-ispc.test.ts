@@ -50,6 +50,8 @@ import { GFFField } from '@/resource/GFFField';
 import { GFFStruct } from '@/resource/GFFStruct';
 import { GFFDataType } from '@/enums/resource/GFFDataType';
 import { CurrentGame } from '@/engine/CurrentGame';
+import { ModuleCreatureArmorSlot } from '@/enums/module/ModuleCreatureArmorSlot';
+import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { loadSourceWithStubs } from './support/loadSourceWithStubs';
 import { buildRuntimeAction, EngineVariant } from '@/nwscript/builtins/actionBuilder';
 import * as partyRoutines from '@/nwscript/builtins/party';
@@ -859,6 +861,113 @@ describe('a save made while a companion is in control survives save -> load -> s
       expect(PartyManager.SwitchPlayerCharacter(2)).toBeUndefined();
       expect(PartyManager.Player).toBeUndefined();
       expect(PartyManager.party).toEqual([]);
+    });
+
+    /** Every ObjectId in a template, at any depth. */
+    function objectIds(struct: GFFStruct): number[] {
+      const ids: number[] = [];
+      for(const field of struct.getFields()){
+        if(field.label === 'ObjectId'){ ids.push(field.getValue()); }
+        for(const child of field.getChildStructs?.() ?? []){ ids.push(...objectIds(child)); }
+      }
+      return ids;
+    }
+    /** A slot template saved from a live companion: its own ObjectId plus equipped and carried items with theirs. */
+    function liveCompanionTemplate(tag: string, id: number){
+      const gff = creatureTemplate(tag, 0);
+      gff.RootNode.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(id);
+      for(const [label, itemId] of [['Equip_ItemList', id + 1], ['ItemList', id + 2]] as const){
+        const item = new GFFStruct(ModuleCreatureArmorSlot.ARMOR);
+        item.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(itemId);
+        item.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue(`${tag}_item`);
+        gff.RootNode.addField(new GFFField(GFFDataType.LIST, label)).addChildStruct(item);
+      }
+      return gff;
+    }
+
+    test('LoadPartyMember gives the creature exactly one, fresh ObjectId and its items none from the template', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      PartyManager.NPCS[5].template = liveCompanionTemplate('bastila', 777);
+      // An older build appended a second ObjectId to slot templates on every load.
+      PartyManager.NPCS[5].template.RootNode.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(-3);
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 5 }];
+      await PartyManager.LoadPartyMember(0);
+      const bastila = PartyManager.party.find((p) => p.npcId == 5)!;
+      expect(objectIds(bastila.template.RootNode)).toEqual([1]); // GetNextPlayerId() in this suite
+      expect(bastila.id).toBe(1);
+      expect(objectIds(PartyManager.NPCS[5].template.RootNode)).toEqual([777, 778, 779, -3]); // the slot template is untouched
+    });
+
+    test('the party-selection preview and SpawnAvailableNPC never reuse a live companion\'s ObjectIds', () => {
+      PartyManager.NPCS[5].template = liveCompanionTemplate('bastila', 900);
+      let previewed: any;
+      jest.spyOn(ModuleCreature.prototype, 'load').mockImplementation(function(this: any){ previewed = this; });
+      PartyManager.LoadPartyMemberCreature(5, () => {});
+      expect(previewed.getTag?.() ?? previewed.template.RootNode.getFieldByLabel('Tag').getValue()).toBe('bastila');
+      expect(objectIds(previewed.template.RootNode)).toEqual([]);
+
+      let built: any;
+      state.Module = { ModuleArea: { ModuleCreature: class {
+        template: any;
+        constructor(t: any){ this.template = t; built = this; }
+        load(){} clearAllActions(){} loadModel(){ return new Promise(() => {}); }
+      } } };
+      const location: any = { area: { attachObject: jest.fn() }, position: { x: 0, y: 0, z: 0 }, getFacing: () => 0 };
+      routine(partyRoutines.SpawnAvailableNPC, 'kotor')(5, location);
+      expect(built.template.RootNode.getFieldByLabel('Tag').getValue()).toBe('bastila');
+      expect(objectIds(built.template.RootNode)).toEqual([]);
+      expect(objectIds(PartyManager.NPCS[5].template.RootNode)).toEqual([900, 901, 902]);
+    });
+
+    test('retiring a companion while its rebuilt twin exists leaves the twin\'s equipped items registered', async () => {
+      const { ModuleObjectManager } = jest.requireActual('@/managers/ModuleObjectManager') as any;
+      ModuleObjectManager.Reset();
+      state.ModuleObjectManager = ModuleObjectManager;
+      state.CursorManager = { notifyObjectDestroyed: jest.fn() };
+      (ModuleCreature.prototype.destroy as jest.Mock).mockRestore();
+      // Items as the engine treats them: id from the template's ObjectId, registered on build, unregistered on destroy.
+      class TestItem {
+        objectType = ModuleObjectType.ModuleObject | ModuleObjectType.ModuleItem;
+        id: number; destroyed = false;
+        constructor(public template: GFFObject){
+          this.id = template.RootNode.hasField('ObjectId') ? template.RootNode.getFieldByLabel('ObjectId').getValue() : undefined;
+          // Stat queries (getACBonus, getDEXBonus, ...) the creature makes of its equipment answer 0.
+          const self = new Proxy(this, { get: (t: any, k) => (k in t) ? t[k] : (typeof k === 'string' && /^(get|has|is)/.test(k) ? () => 0 : undefined) });
+          ModuleObjectManager.AddObjectById(self);
+          return self;
+        }
+        save(){
+          const s = new GFFStruct();
+          s.addField(new GFFField(GFFDataType.DWORD, 'ObjectId')).setValue(this.id);
+          s.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue(this.template.RootNode.getFieldByLabel('Tag').getValue());
+          return s;
+        }
+        destroy(){ if(this.destroyed) return; this.destroyed = true; ModuleObjectManager.RemoveObject(this); }
+      }
+      state.Module = { ModuleArea: { ModuleItem: TestItem } };
+      PartyManager.NPCS[2].template = liveCompanionTemplate('carth', 500);
+
+      await companionOnlySegment();
+      const carth = PartyManager.Player;
+      if((carth as any).debugLabel){ (carth as any).debugLabel.dispose = () => {}; }
+      const oldArmor = carth.equipment.ARMOR;
+      expect(oldArmor).toBeInstanceOf(TestItem);
+
+      PartyManager.SwitchPlayerCharacter(7);                  // carth retired, destroy pending
+      const carth2 = PartyManager.SwitchPlayerCharacter(2)!;  // rebuilt twin, same script
+      if((carth2 as any).debugLabel){ (carth2 as any).debugLabel.dispose = () => {}; }
+      const newArmor = carth2.equipment.ARMOR;
+      expect(newArmor).toBeInstanceOf(TestItem);
+      expect(newArmor).not.toBe(oldArmor);
+      expect(newArmor.id).not.toBe(oldArmor.id); // fresh ids: the dropped companion's saved items carry none
+
+      await tick();
+      expect(carth.destroyed).toBe(true);
+      expect(oldArmor.destroyed).toBe(true);
+      expect(ModuleObjectManager.GetObjectById(newArmor.id)).toBe(newArmor);
+      expect(ModuleObjectManager.GetObjectById(carth2.id)).toBe(carth2);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
     });
 
     test('a dropped companion re-created in the same script keeps its object-id registration (real ObjectManager + destroy)', async () => {

@@ -424,7 +424,7 @@ describe('TSL puppets (routines 836-843)', () => {
     old.destroyed = true;
     const spawned = spawn(0, location);
     expect(spawned).toBeDefined();
-    expect(spawned.template).toBe(PartyManager.Puppets[0].template);
+    expect(spawned.template.RootNode.getFieldByLabel('Tag').getValue()).toBe('g_remote'); // a fresh copy of the slot template
     expect(attached).toEqual([spawned]);
     expect(PartyManager.Puppets[0].moduleObject).toBe(spawned);
   });

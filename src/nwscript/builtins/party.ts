@@ -196,7 +196,8 @@ function spawnCreatureFromTemplate(template: any, lLocation: EngineLocation): Mo
     return undefined;
   }
 
-  const partyMember = new GameState.Module.ModuleArea.ModuleCreature(template);
+  // A fresh copy without ObjectIds: the slot template may carry a live companion's ids (creature and items).
+  const partyMember = new GameState.Module.ModuleArea.ModuleCreature(GameState.PartyManager.CloneWithoutObjectIds(template));
   lLocation.area.attachObject(partyMember);
   partyMember.load();
   partyMember.clearAllActions();

@@ -1436,10 +1436,12 @@ export class PartyManager {
    */
   static DropFromParty(creature: ModuleCreature){
     const template = creature.save();
-    // The retired creature keeps its object id until its deferred destroy; a companion rebuilt from this template
-    // in the meantime must get a fresh id (and no stale queue), or the two would share one registration.
-    template?.RootNode?.removeFieldByLabel?.('ObjectId');
-    template?.RootNode?.removeFieldByLabel?.('ActionList');
+    // The retired creature (and its items) keep their object ids until the deferred destroy; a companion rebuilt
+    // from this template in the meantime must get fresh ids (and no stale queue), or they would share registrations.
+    if(template?.RootNode){
+      PartyManager.StripObjectIds(template.RootNode);
+      template.RootNode.removeFieldByLabel('ActionList');
+    }
     PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
     if(PartyManager.IsValidNPCSlot(creature.npcId)){
       PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
@@ -1449,6 +1451,26 @@ export class PartyManager {
   }
 
   static PendingDestroy: ModuleCreature[] = [];
+
+  /**
+   * Remove every ObjectId in a template, at any depth (ItemList, Equip_ItemList, nested structs), so whatever is built
+   * from it registers fresh ids instead of taking over a live object's.
+   */
+  static StripObjectIds(struct: GFFStruct){
+    if(!struct){ return; }
+    while(struct.removeFieldByLabel('ObjectId')){ /* a template can carry it twice */ }
+    for(const field of struct.getFields()){
+      for(const child of field.getChildStructs?.() ?? []){
+        PartyManager.StripObjectIds(child);
+      }
+    }
+  }
+
+  static CloneWithoutObjectIds(template: GFFObject): GFFObject {
+    const copy = new GFFObject(template.getExportBuffer());
+    PartyManager.StripObjectIds(copy.RootNode);
+    return copy;
+  }
 
   /**
    * Party creatures that hold an NPC slot, in the order they joined: the existing CurrentMembers order first,
@@ -1665,7 +1687,8 @@ export class PartyManager {
       console.warn('LoadPartyMember: no template for slot', PartyManager.CurrentMembers[nIdx].memberID);
       return;
     }
-    const template = npc.template;
+    // A copy without any ObjectId (creature and items), then exactly one fresh id for the creature.
+    const template = PartyManager.CloneWithoutObjectIds(npc.template);
     template.RootNode.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameState.ModuleObjectManager.GetNextPlayerId() );
     const partyMember = new ModuleCreature(template);
 
@@ -1732,7 +1755,8 @@ export class PartyManager {
       return;
     }
     
-    const partyMember = new ModuleCreature(npc.template);
+    // The preview must not take over the registration of the live companion (or its items) this slot came from.
+    const partyMember = new ModuleCreature(PartyManager.CloneWithoutObjectIds(npc.template));
     partyMember.npcId = npcId;
     partyMember.isPM = true;
     partyMember.load();
