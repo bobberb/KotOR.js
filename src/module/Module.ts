@@ -33,7 +33,7 @@ import type { ModuleObject } from "@/module/ModuleObject";
 import type { ModuleCreature } from "@/module/ModuleCreature";
 import type { ModuleItem } from "@/module/ModuleItem";
 import { PartyDeathMonitor } from "@/module/PartyDeathMonitor";
-import { buildSWVarTableStruct, isSWVarIndex, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS } from "@/module/SWVarTable";
+import { buildSWVarTableStruct, isSWVarIndex, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS, toSWVarNumber } from "@/module/SWVarTable";
 
 type ModuleScriptKeys = 'Mod_OnAcquirItem'|'Mod_OnActvtItem'|'Mod_OnClientEntr'|'Mod_OnClientLeav'|'Mod_OnHeartbeat'|'Mod_OnModLoad'|'Mod_OnModStart'|'Mod_OnPlrDeath'|'Mod_OnPlrDying'|'Mod_OnPlrLvlUp'|'Mod_OnPlrRest'|'Mod_OnSpawnBtnDn'|'Mod_OnUnAqreItem'|'Mod_OnUsrDefined';
 
@@ -641,7 +641,7 @@ export class Module {
 
   setLocalNumber(index: number, value: number){
     if(!Module.isLocalIndex(index, SWVAR_MAX_NUMBERS, 'number')){ return; }
-    this._locals.Numbers[index] = value;
+    this._locals.Numbers[index] = toSWVarNumber(value);
   }
 
   setLocalsFromSWVarTable(struct?: GFFStruct){

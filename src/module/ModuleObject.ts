@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { Action } from "@/actions/Action";
 import type { IInventoryAddOptions } from "@/managers/InventoryManager";
-import { buildSWVarTableStruct } from "@/module/SWVarTable";
+import { buildSWVarTableStruct, isSWVarIndex, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS, toSWVarNumber } from "@/module/SWVarTable";
 import { ActionQueue } from "@/actions/ActionQueue";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { CollisionManager } from "@/engine/CollisionManager";
@@ -3129,6 +3129,10 @@ export class ModuleObject {
    * @param bool 
    */
   setLocalBoolean(index: number, bool: boolean){
+    if(!isSWVarIndex(index, SWVAR_MAX_BOOLEANS)){
+      console.warn(`ModuleObject: local boolean index ${index} is outside 0-${SWVAR_MAX_BOOLEANS - 1}; ignored`);
+      return;
+    }
     this._locals.Booleans[index] = !!bool;
   }
 
@@ -3138,7 +3142,12 @@ export class ModuleObject {
    * @param value 
    */
   setLocalNumber(index: number, value: number){
-    (this._locals.Numbers as any)[index] = value;
+    if(!isSWVarIndex(index, SWVAR_MAX_NUMBERS)){
+      console.warn(`ModuleObject: local number index ${index} is outside 0-${SWVAR_MAX_NUMBERS - 1}; ignored`);
+      return;
+    }
+    // Stored as the save stores it, so a reload cannot change what scripts read.
+    (this._locals.Numbers as any)[index] = toSWVarNumber(value);
   }
 
   /**

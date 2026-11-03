@@ -106,6 +106,7 @@ import { GFFObject } from '@/resource/GFFObject';
 import { GFFField } from '@/resource/GFFField';
 import { GFFStruct } from '@/resource/GFFStruct';
 import { GFFDataType } from '@/enums/resource/GFFDataType';
+import { buildSWVarTableStruct, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS } from '@/module/SWVarTable';
 
 const state = GameState as any;
 
@@ -1245,6 +1246,75 @@ describe('module locals and tokens survive the IFO save/load', () => {
 
     expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
     expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(8);
+  });
+
+  test('number locals read the same before and after a save: values wrap to a byte on set, out-of-range indices never store', async () => {
+    jest.spyOn(ModuleCreature.prototype, 'loadScripts').mockImplementation(() => {});
+    const warn = console.warn as jest.Mock;
+    const npc = creature('trask');
+    const module = new Module();
+    module.setFromIFO(baseIFO(), false);
+    state.module = module;
+    const read = (owner: any) => [12, 13, 400].map((index) => call(localVarRoutines.GetLocalNumber, { caller: owner }, owner, index));
+    const readBool = (owner: any) => call(localVarRoutines.GetLocalBoolean, { caller: owner }, owner, 2000);
+    for(const owner of [npc, module] as any[]){
+      call(localVarRoutines.SetLocalNumber, { caller: owner }, owner, 12, -1);
+      call(localVarRoutines.SetLocalNumber, { caller: owner }, owner, 13, 300);
+      call(localVarRoutines.SetLocalNumber, { caller: owner }, owner, 400, 7);
+      call(localVarRoutines.SetLocalBoolean, { caller: owner }, owner, 2000, 1);
+      expect(read(owner)).toEqual([255, 44, 0]);
+      expect(readBool(owner)).toBe(0);
+    }
+    expect(warn.mock.calls.filter((args) => /^Module(Object)?: local/.test(String(args[0])))).toHaveLength(4);
+
+    const restored = new ModuleCreature(new GFFObject(npc.save().getExportBuffer()));
+    restored.load();
+    const reloaded = await saveAndReload(module);
+
+    for(const owner of [restored, reloaded] as any[]){
+      expect(read(owner)).toEqual([255, 44, 0]);
+      expect(readBool(owner)).toBe(0);
+    }
+  });
+
+  test('the SWVarTable writer masks and bounds whatever is in memory, before GFF export', () => {
+    const table = buildSWVarTableStruct({ Booleans: { 5: true, [SWVAR_MAX_BOOLEANS]: true }, Numbers: { 3: 300, 4: -1, [SWVAR_MAX_NUMBERS]: 9 } });
+    const bytes = table.getFieldByLabel('ByteArray').getChildStructs().map((s) => s.getFieldByLabel('Variable').getValue());
+
+    expect(bytes).toEqual([0, 0, 0, 44, 255, 0, 0, 0]);
+    expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
+  });
+
+  test('loading a table larger than the bounds keeps only the bounded indices', () => {
+    const struct = new GFFStruct();
+    const bitArray = struct.addField(new GFFField(GFFDataType.LIST, 'BitArray'));
+    for(let i = 0; i < (SWVAR_MAX_BOOLEANS / 32) + 4; i++){
+      const word = new GFFStruct();
+      word.addField(new GFFField(GFFDataType.DWORD, 'Variable')).setValue(0xFFFFFFFF);
+      bitArray.addChildStruct(word);
+    }
+    const byteArray = struct.addField(new GFFField(GFFDataType.LIST, 'ByteArray'));
+    for(let i = 0; i < SWVAR_MAX_NUMBERS + 20; i++){
+      const byte = new GFFStruct();
+      byte.addField(new GFFField(GFFDataType.BYTE, 'Variable')).setValue(7);
+      byteArray.addChildStruct(byte);
+    }
+    const booleans: number[] = [];
+    const numbers: number[] = [];
+
+    readSWVarTableStruct(struct, (index) => booleans.push(index), (index) => numbers.push(index));
+
+    expect(booleans).toHaveLength(SWVAR_MAX_BOOLEANS);
+    expect(Math.max(...booleans)).toBe(SWVAR_MAX_BOOLEANS - 1);
+    expect(numbers).toHaveLength(SWVAR_MAX_NUMBERS);
+    expect(Math.max(...numbers)).toBe(SWVAR_MAX_NUMBERS - 1);
+
+    const module = new Module();
+    module.setLocalsFromSWVarTable(struct);
+    expect(module.getLocalBoolean(SWVAR_MAX_BOOLEANS - 1)).toBe(true);
+    expect(module.getLocalBoolean(SWVAR_MAX_BOOLEANS)).toBe(false);
+    expect(module.getLocalNumber(SWVAR_MAX_NUMBERS - 1)).toBe(7);
+    expect(module.getLocalNumber(SWVAR_MAX_NUMBERS)).toBe(0);
   });
 
   test('loading an IFO replaces the previous module locals', () => {

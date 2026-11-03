@@ -28,6 +28,11 @@ export function isSWVarIndex(index: number, max: number): boolean {
   return Number.isInteger(index) && index >= 0 && index < max;
 }
 
+/** Local numbers are unsigned bytes (TSL nwscript.nss: "the value range is 0 to 255"). */
+export function toSWVarNumber(value: number): number {
+  return (Number(value) || 0) & 0xFF;
+}
+
 function highestSetIndex(values: { [index: number]: any }, max: number): number {
   let highest = -1;
   for(const key of Object.keys(values)){
@@ -61,8 +66,7 @@ export function buildSWVarTableStruct(locals: ISWVarTableLocals): GFFStruct {
   const byteArray = struct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
   for(let i = 0; i < numberCount; i++){
     const varStruct = new GFFStruct();
-    // BYTE field: values outside 0-255 wrap, as they always have for object locals.
-    varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( (Number(numbers[i]) || 0) & 0xFF );
+    varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( toSWVarNumber(numbers[i]) );
     byteArray.addChildStruct(varStruct);
   }
   return struct;
