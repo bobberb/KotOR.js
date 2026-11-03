@@ -752,6 +752,43 @@ describe('credits', () => {
     expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
   });
 
+  test('StartCreditSequence while the credits roll carries on with the running crawl', async () => {
+    const { credits } = creditsMenu();
+    call(moduleRoutines.StartCreditSequence, {}, 0);
+    await flush();
+    await frames(10);
+    expect(credits.elapsed).toBe(10);
+
+    call(moduleRoutines.StartCreditSequence, {}, 0);
+    await flush();
+
+    expect(credits.elapsed).toBe(10);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+    expect(state.MenuManager.activeMenus).toEqual([credits]);
+    await frames(MenuCredits.MIN_DURATION - 10);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
+    expect(state.MenuManager.activeMenus).toEqual([]);
+  });
+
+  test('a StartCreditSequence issued in the last frame of a crawl starts a new one instead of being closed', async () => {
+    const { credits } = creditsMenu();
+    credits.startSequence([]);
+    await frames(MenuCredits.MIN_DURATION - 1);
+    expect(credits.inProgress).toBe(true);
+
+    call(moduleRoutines.StartCreditSequence, {}, 0);
+    // The frame that finishes the first crawl; its deferred close lands after the restart.
+    await frames(1, 1);
+
+    expect(credits.inProgress).toBe(true);
+    expect(credits.elapsed).toBe(0);
+    expect(state.MenuManager.activeMenus).toEqual([credits]);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(1);
+    await frames(MenuCredits.MIN_DURATION);
+    expect(call(moduleRoutines.IsCreditSequenceInProgress, {})).toBe(0);
+    expect(state.MenuManager.activeMenus).toEqual([]);
+  });
+
   test('without a credits GUI it is in progress only until that is known', async () => {
     const { credits } = creditsMenu();
     credits.tGuiPanel = null;
@@ -1221,6 +1258,32 @@ describe('module locals and tokens survive the IFO save/load', () => {
     expect(table.getFieldByLabel('BitArray').getChildStructs()).toHaveLength(3);
     // A zero at index 13 needs no entry: an absent number reads back as 0.
     expect(table.getFieldByLabel('ByteArray').getChildStructs()).toHaveLength(8);
+  });
+
+  test('a creature GFF with a 40-word BitArray loads only the bounded booleans, so a reload reads the same', () => {
+    jest.spyOn(ModuleCreature.prototype, 'loadScripts').mockImplementation(() => {});
+    const gff = new GFFObject();
+    gff.RootNode.addField(new GFFField(GFFDataType.CEXOSTRING, 'Tag')).setValue('wide');
+    const table = new GFFStruct();
+    const bitArray = table.addField(new GFFField(GFFDataType.LIST, 'BitArray'));
+    for(let i = 0; i < 40; i++){
+      const word = new GFFStruct();
+      word.addField(new GFFField(GFFDataType.DWORD, 'Variable')).setValue(0xFFFFFFFF);
+      bitArray.addChildStruct(word);
+    }
+    table.addField(new GFFField(GFFDataType.LIST, 'ByteArray'));
+    gff.RootNode.addField(new GFFField(GFFDataType.STRUCT, 'SWVarTable')).addChildStruct(table);
+    const npc = new ModuleCreature(gff);
+    npc.load();
+    const read = (owner: any, index: number) => call(localVarRoutines.GetLocalBoolean, { caller: owner }, owner, index);
+
+    expect(read(npc, SWVAR_MAX_BOOLEANS - 1)).toBe(1);
+    expect(read(npc, 1100)).toBe(0);
+
+    const restored = new ModuleCreature(new GFFObject(npc.save().getExportBuffer()));
+    restored.load();
+    expect(read(restored, SWVAR_MAX_BOOLEANS - 1)).toBe(1);
+    expect(read(restored, 1100)).toBe(0);
   });
 
   test('a creature number local at index 12 survives its own save/load (object SWVarTable)', () => {

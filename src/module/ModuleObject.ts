@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { Action } from "@/actions/Action";
 import type { IInventoryAddOptions } from "@/managers/InventoryManager";
-import { buildSWVarTableStruct, isSWVarIndex, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS, toSWVarNumber } from "@/module/SWVarTable";
+import { buildSWVarTableStruct, isSWVarIndex, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS, toSWVarNumber } from "@/module/SWVarTable";
 import { ActionQueue } from "@/actions/ActionQueue";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { CollisionManager } from "@/engine/CollisionManager";
@@ -3643,26 +3643,7 @@ export class ModuleObject {
       this.willSaveThrow = this.template.RootNode.getFieldByLabel('WillSaveThrow').getValue();
 
     if(this.template.RootNode.hasField('SWVarTable')){
-      let swVarTableStruct = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0];
-      if(swVarTableStruct){
-        if(swVarTableStruct.hasField('BitArray')){
-          let localBools = swVarTableStruct.getFieldByLabel('BitArray').getChildStructs();
-          for(let i = 0; i < localBools.length; i++){
-            let data = localBools[i].getFieldByLabel('Variable').getValue();
-            for(let bit = 0; bit < 32; bit++){
-              this._locals.Booleans[bit + (i*32)] = ( (data>>bit) % 2 != 0);
-            }
-          }
-        }
-
-        if(swVarTableStruct.hasField('ByteArray')){
-          let localNumbers = swVarTableStruct.getFieldByLabel('ByteArray').getChildStructs();
-          for(let i = 0; i < localNumbers.length; i++){
-            let data = localNumbers[i].getFieldByLabel('Variable').getValue();
-            this.setLocalNumber(i, data);
-          }
-        }
-      }
+      this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
     }
 
     this.initialized = true;
@@ -3679,6 +3660,17 @@ export class ModuleObject {
 
     return gff;
 
+  }
+
+  /**
+   * Load locals from a saved SWVarTable through the setters, so a table larger
+   * than the SWVarTable bounds loads only what a save can hold.
+   */
+  loadSWVarTable(struct?: GFFStruct){
+    readSWVarTableStruct(struct,
+      (index, value) => this.setLocalBoolean(index, value),
+      (index, value) => this.setLocalNumber(index, value),
+    );
   }
 
   /**

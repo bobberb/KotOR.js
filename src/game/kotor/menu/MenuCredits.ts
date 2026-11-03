@@ -62,6 +62,9 @@ export class MenuCredits extends GameMenu {
   }
 
   startSequence(lines: string[] = MenuCredits.GetCreditLines()){
+    // Already rolling: carry on. Restarting would let a script that re-issues
+    // StartCreditSequence hold the credits open forever.
+    if(this.inProgress){ return; }
     this.elapsed = 0;
     this.duration = Math.min(MenuCredits.MAX_DURATION, Math.max(MenuCredits.MIN_DURATION, lines.length * MenuCredits.SECONDS_PER_LINE));
     this.LB_CREDITS?.mutate?.((tx) => {
@@ -86,8 +89,9 @@ export class MenuCredits extends GameMenu {
     }
     if(this.elapsed >= this.duration){
       this.inProgress = false;
-      // MenuManager.Update is iterating activeMenus right now; close after it.
-      queueMicrotask(() => this.close());
+      // MenuManager.Update is iterating activeMenus right now; close after it,
+      // unless a StartCreditSequence in the meantime began a new crawl.
+      queueMicrotask(() => { if(!this.inProgress){ this.close(); } });
     }
   }
 
