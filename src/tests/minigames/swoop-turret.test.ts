@@ -1122,3 +1122,147 @@ describe("review round 3: sub-steps", () => {
     expect(mg.enemies[0].hit_points).toBe(6);
   });
 });
+
+/**
+ * An animated track whose real animation manager also poses `modelhook` along +Y at
+ * `unitsPerSec` (as updateAnimationNode poses MDL nodes): the rider's pose lags the
+ * animation clock by one update, as in game.
+ */
+class PosingTrack extends FakeAnimatedTrack {
+  constructor(length: number, unitsPerSec: number, y = 0) {
+    super(length, y);
+    this.animateFrame = true;
+    this.odysseyAnimations[0].nodes = [{ nodeNumber: 1 }];
+    const hook = this.getObjectByName("modelhook")!;
+    this.animationManager.updateAnimationNode = (_a: any, _n: any, state: any) => { hook.position.y = state.elapsed * unitsPerSec; };
+  }
+}
+
+describe("review round 4: track discontinuities and moving followers", () => {
+  test("on an animated track the jump back to the start (posed one update late) is not swept through the course", async () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
+    mg.player.setTrack(new PosingTrack(1, 100) as any); // 1 s per lap, course y 0..100
+    await addObstacle(mg, "mgs_rock01", 50);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    const ys: number[] = [];
+    for (let i = 0; i < 75; i++) { mg.tick(1 / 60); ys.push(mg.player.getWorldSphere().center.y); }
+    expect(Math.max(...ys)).toBeGreaterThan(95);
+    expect(ys.some((y, i) => i > 0 && y < ys[i - 1] - 50)).toBe(true); // the jump really happened
+    expect([mg.player.loopsCompleted, hits.calls]).toEqual([1, 1]);
+  });
+
+  test("a follower trailing the player at the same speed is never 'hit'", () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 }, [{ Track: "f", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.enemies[0].setTrack(new PosingTrack(100, 40, -10) as any);
+    const followerTrack: any = mg.enemies[0].track;
+    followerTrack.playAnimation();
+    followerTrack.update(0.25);
+    followerTrack.updateMatrixWorld(true);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitFollower = hits as any;
+    mg.initMiniGameObjects();
+    let minGap = Infinity;
+    for (let i = 0; i < 4; i++) {
+      mg.tick(0.25);
+      minGap = Math.min(minGap, mg.player.getWorldSphere().center.distanceTo(mg.enemies[0].getWorldSphere().center));
+    }
+    expect(minGap).toBeGreaterThan(2);
+    expect(hits.calls).toBe(0);
+  });
+
+  test("a follower crossing the player's path within one step is hit (relative sweep)", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0 }, [{ Track: "f", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.player.setTrack(makeTrack(0, 50, 0) as any); // parked at y=50
+    mg.enemies[0].setTrack(new PosingTrack(100, 400, 0) as any); // 100 u per 0.25 s step, passing y=50
+    const hits = fakeScript();
+    mg.player.scripts.OnHitFollower = hits as any;
+    mg.initMiniGameObjects();
+    for (let i = 0; i < 3; i++) mg.tick(0.25);
+    expect(hits.calls).toBe(1);
+  });
+
+  test("a long frame across the finish line still hits an obstacle just before the finish", async () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 });
+    mg.player.trackLength = 100;
+    await addObstacle(mg, "mgs_rock01", 97);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    for (let i = 0; i < 9; i++) mg.tick(0.25); // y=90
+    expect(hits.calls).toBe(0);
+    mg.tick(0.25); // 90 -> 100 (finish) -> 0
+    expect([mg.player.loopsCompleted, hits.calls]).toEqual([1, 1]);
+  });
+
+  test("a swoop killed by one crash gets no further hit events in the same step", async () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40, Bump_Damage: 10, Hit_Points: 10 });
+    const rock1 = await addObstacle(mg, "mgs_rock01", 5);
+    const rock2 = await addObstacle(mg, "mgs_rock02", 8);
+    let calls = 0;
+    mg.player.scripts.OnHitObstacle = fakeScript((self) => { calls++; routine("kotor", OnObstacleHit, self); }) as any;
+    const obstacleEvents = [fakeScript(), fakeScript()];
+    rock1.scripts.OnHitFollower = obstacleEvents[0] as any;
+    rock2.scripts.OnHitFollower = obstacleEvents[1] as any;
+    mg.initMiniGameObjects();
+    mg.tick(0.25);
+    expect(mg.player.alive).toBe(false);
+    expect([calls, obstacleEvents[0].calls, obstacleEvents[1].calls]).toEqual([1, 0, 0]);
+  });
+});
+
+describe("review round 4: edge cases", () => {
+  const wall = (track: string) => ({ Track: track, Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10, Models: [{ Model: "mgs_wall", RotatingModel: 0 }] });
+
+  test("a swoop killed by a follower gets no further follower contacts in the same step", () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40, Bump_Damage: 10, Hit_Points: 10 }, [wall("a"), wall("b")]);
+    mg.enemies[0].setTrack(makeTrack(0, 5, 0));
+    mg.enemies[1].setTrack(makeTrack(0, 8, 0));
+    let calls = 0;
+    mg.player.scripts.OnHitFollower = fakeScript((self) => { calls++; routine("kotor", OnObstacleHit, self); }) as any;
+    mg.initMiniGameObjects();
+    mg.tick(0.25);
+    expect([mg.player.alive, calls]).toEqual([false, 1]);
+  });
+
+  test("the lap cut is at the finish line: an obstacle just past the finish is never hit", async () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 });
+    mg.player.trackLength = 95;
+    await addObstacle(mg, "mgs_rock01", 98); // 3 past the finish; radii sum 2
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 2.5); // the step 90 -> 100 crosses the finish at 95 and restarts at 5
+    expect([mg.player.loopsCompleted, hits.calls]).toEqual([1, 0]);
+  });
+
+  test("a parked follower just before the finish is hit by a long frame across the finish line", () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 }, [wall("a")]);
+    mg.enemies[0].setTrack(makeTrack(0, 97, 0));
+    mg.player.trackLength = 100;
+    const hits = fakeScript();
+    mg.player.scripts.OnHitFollower = hits as any;
+    mg.initMiniGameObjects();
+    for (let i = 0; i < 9; i++) mg.tick(0.25);
+    expect(hits.calls).toBe(0);
+    mg.tick(0.25);
+    expect([mg.player.loopsCompleted, hits.calls]).toEqual([1, 1]);
+  });
+
+  test("after the lap window, a sudden speed-up on an animated track is still swept", async () => {
+    const mg = swoopGame({ Minimum_Speed: 2, Maximum_Speed: 10, Accel_Secs: 0 });
+    mg.player.setTrack(new PosingTrack(1, 100) as any); // rate 0.2: one lap per 5 s
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 6);
+    expect(mg.player.loopsCompleted).toBe(1);
+    mg.player.speed = 10; // rate 1 from now on: 25 units per step instead of 5
+    const y0 = mg.player.getWorldSphere().center.y;
+    await addObstacle(mg, "mgs_rock01", y0 + 17);
+    mg.tick(0.25); // the pose lags: this step still shows the old rate
+    mg.tick(0.25); // y0+5 -> y0+30, through the rock
+    expect(hits.calls).toBe(1);
+  });
+});

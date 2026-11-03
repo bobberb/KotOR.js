@@ -98,6 +98,13 @@ export class ModuleMGPlayer extends ModuleObject {
   /** Rider time along an animated track (seconds of animation), for lap counting. */
   trackTime: number = 0;
 
+  /** Lap resets during the current step: where the swoop left the track and where it re-entered. */
+  stepBreaks: { end: THREE.Vector3; start: THREE.Vector3 }[] = [];
+  /** Steps left in which an animated track's lap jump may still show up (the pose lags one update). */
+  lapWindow: number = 0;
+  /** Distance the swoop moved in the last continuous step, to recognise a jump. */
+  lastStepDistance: number = 0;
+
   /** Contacts whose default obstacle response already ran: object -> contact serial. */
   handledContacts: Map<ModuleObject, number> = new Map();
 
@@ -348,6 +355,10 @@ export class ModuleMGPlayer extends ModuleObject {
     this.trackDistance += this.forceVector.y;
     if(this.trackLength > 0){
       while(this.trackDistance >= this.trackLength){
+        // Record the cut so collisions sweep up to the finish and on from the start, not across the course.
+        const end = this.container.getWorldPosition(new THREE.Vector3());
+        end.y -= this.trackDistance - this.trackLength;
+        this.stepBreaks.push({ end, start: end.clone().setY(end.y - this.trackLength) });
         this.trackDistance -= this.trackLength;
         this.track.position.y -= this.trackLength;
         this.track.updateMatrixWorld();
@@ -422,6 +433,7 @@ export class ModuleMGPlayer extends ModuleObject {
     this.trackTime += step;
     while(this.trackTime >= length - 1e-9){
       this.trackTime -= length;
+      this.lapWindow = 2;
       this.completeLoop();
     }
   }

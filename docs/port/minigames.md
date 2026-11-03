@@ -52,8 +52,21 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
   at their LYT position (default radius 1; `SWMG_SetSphereRadius` overrides). Entering a sphere fires the player's
   `OnHitFollower`/`OnHitObstacle`, then the other object's `OnHitFollower`, once per contact, until the spheres
   separate.
-  - Player contacts are swept: the player's path over each step is tested against each sphere. The one exception is
-    the jump back to the track start after a lap, where only the new position is tested.
+  - Player contacts are swept along the player's path over each step, and the path is cut at lap resets so the
+    jump back to the start is never swept through the course.
+    - On a track without animation, the cut is exact: the path is swept up to the finish line and again from the
+      start, so a long frame across the finish still hits an obstacle just before it.
+    - On an animated track, the engine's animation manager poses the rider one update after its clock wraps, so the
+      jump shows up on the step after the lap (or on the same step). Within that window, a displacement more than 3×
+      the previous step's counts as the jump, and only its two end positions are tested.
+  - Obstacles are static, so they are swept against the player's path segments.
+    - Followers move, so they use the relative motion over the step. A follower trailing the player at the same
+      speed never touches it, while one crossing the player's path inside a step does.
+    - When the player's path is cut, a parked follower is swept like an obstacle and a moving one is compared at end
+      positions.
+    - When a follower's own track loops (a displacement more than 3× its previous step's), only end positions are
+      compared.
+  - Once a contact kills the swoop, no further hit events are dispatched in that step.
   - Bullets are swept too, and stop at the first sphere their path enters (nearest along the path, so an obstacle in
     front shields what is behind it). A target that already contains the bullet is hit first.
 
@@ -136,6 +149,9 @@ No game assets or retail executable were used. These are reasoned choices, not o
 - **Laps:** the animated-track lap rule, its speed-scaled playback rate, and the frozen track at speed 0 without
   a `Maximum_Speed`.
 - **Stepping:** the 0.25 s step and 1 s frame cap.
+- **Jump detection:** the 3× displacement rule that recognises a track-loop jump. On an animated track it can
+  leave one step around the finish untested, because only the jump's two end positions are compared.
+- **Follower motion within a step:** followers are assumed to move linearly across one step.
 - **Movement and timing:** jump physics (9.8 m/s²); heartbeat cadence (3 s, as for other objects).
 - **Event values:**
   - `SWMG_GetLastEvent` returning the script key for non-animation events.

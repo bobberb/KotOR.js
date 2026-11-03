@@ -98,6 +98,8 @@ export class ModuleMiniGame {
   private contextDepth: number = 0;
   /** Serial of the latest contact; colliding objects carry `mgContact` for the contact they are in. */
   private contactSerial: number = 0;
+  /** Distance each follower moved in its last continuous step, to recognise a track-loop jump. */
+  private followerStepDistance: Map<ModuleMGEnemy, number> = new Map();
 
   private obstacleTemplates: GFFObject[] = [];
   private heartbeatTimers: Map<ModuleObject, number> = new Map();
@@ -179,9 +181,14 @@ export class ModuleMiniGame {
   private step(delta: number){
     this.elapsed += delta;
 
-    const from = this.player.getWorldSphere().center.clone();
-    const loopsBefore = this.player.loopsCompleted;
-    this.player.update(delta);
+    const player = this.player;
+    const from = player.getWorldSphere().center.clone();
+    const followersFrom = new Map<ModuleMGEnemy, THREE.Vector3>();
+    for(const enemy of this.enemies){
+      followersFrom.set(enemy, enemy.getWorldSphere().center.clone());
+    }
+    player.stepBreaks = [];
+    player.update(delta);
 
     for(const enemy of this.enemies.slice()){
       enemy.update(delta);
@@ -192,11 +199,119 @@ export class ModuleMiniGame {
     }
 
     if(this.type == MiniGameType.SWOOPRACE){
-      // A lap reset teleports the swoop back to the start: don't sweep across the whole course.
-      this.updatePlayerCollisions(this.player.loopsCompleted === loopsBefore ? from : undefined);
+      this.updatePlayerCollisions(this.getPlayerPath(from), followersFrom);
     }
+    if(player.lapWindow > 0){ player.lapWindow--; }
 
     this.updateHeartbeats(delta);
+  }
+
+  /**
+   * The player's path over the step as segments, cut at track discontinuities:
+   * - an unanimated track records the exact end/start points of each lap reset (stepBreaks);
+   * - an animated track poses the rider one update late, so the jump back to the start shows
+   *   up on the step after the lap (or the same one); within that window a displacement far
+   *   larger than the previous step's is treated as the jump, and only its two ends are tested.
+   */
+  getPlayerPath(from: THREE.Vector3): [THREE.Vector3, THREE.Vector3][] {
+    const player = this.player;
+    const to = player.getWorldSphere().center.clone();
+    const segments: [THREE.Vector3, THREE.Vector3][] = [];
+    let cursor = from;
+    for(const cut of player.stepBreaks){
+      segments.push([cursor, cut.end]);
+      cursor = cut.start;
+    }
+    segments.push([cursor, to]);
+
+    const distance = from.distanceTo(to);
+    if(!player.stepBreaks.length && player.lapWindow > 0 && distance > 3 * player.lastStepDistance + 1e-6){
+      return [[from, from], [to, to]];
+    }
+    if(!player.stepBreaks.length){
+      player.lastStepDistance = distance;
+    }
+    return segments;
+  }
+
+  /**
+   * Swoop collisions: entering a follower's or obstacle's sphere fires the player's
+   * OnHitFollower/OnHitObstacle, then the other object's OnHitFollower. Each contact
+   * fires once until the spheres separate again, and carries a contact serial
+   * (`mgContact`) so the default response runs once per contact. Airborne players
+   * clear obstacles, and a player killed by one contact gets no further ones.
+   *
+   * Obstacles are static: the player's path segments are swept against them.
+   * Followers move too, so their test uses the relative motion over the step (a
+   * follower trailing the player at the same speed never "touches" it). When the
+   * player's path is cut by a lap reset, a parked follower is swept like an obstacle and
+   * a moving one is compared at end positions; when the follower itself jumps (its own
+   * track loop), only end positions are compared.
+   */
+  updatePlayerCollisions(
+    path: [THREE.Vector3, THREE.Vector3][] = [[this.player.getWorldSphere().center.clone(), this.player.getWorldSphere().center.clone()]],
+    followersFrom: Map<ModuleMGEnemy, THREE.Vector3> = new Map()
+  ){
+    const player = this.player;
+    if(!player || !player.alive){ return; }
+    const radius = player.getCollisionRadius();
+    const line = new THREE.Line3();
+    const closest = new THREE.Vector3();
+    const origin = new THREE.Vector3();
+    const sweeps = (sphere: THREE.Sphere) => path.some(([a, b]) => {
+      line.set(a, b);
+      return line.closestPointToPoint(sphere.center, true, closest).distanceTo(sphere.center) <= radius + sphere.radius;
+    });
+    const continuous = path.length === 1;
+    const to = path[path.length - 1][1];
+
+    for(const enemy of this.enemies.slice()){
+      if(!player.alive){ return; }
+      const enemySphere = enemy.getWorldSphere();
+      const f1 = enemySphere.center;
+      const f0 = followersFrom.get(enemy) ?? f1;
+      const moved = f0.distanceTo(f1);
+      const lastMoved = this.followerStepDistance.get(enemy) || 0;
+      const followerJumped = lastMoved > 0 && moved > 3 * lastMoved + 1e-6;
+      if(!followerJumped){ this.followerStepDistance.set(enemy, moved); }
+      let reached: boolean;
+      if(followerJumped){
+        reached = to.distanceTo(f1) <= radius + enemySphere.radius;
+      }else if(continuous){
+        line.set(path[0][0].clone().sub(f0), path[0][1].clone().sub(f1));
+        reached = line.closestPointToPoint(origin, true, closest).length() <= radius + enemySphere.radius;
+      }else if(moved < 1e-6){
+        reached = sweeps(enemySphere); // a parked follower is static, like an obstacle
+      }else{
+        reached = to.distanceTo(f1) <= radius + enemySphere.radius;
+      }
+      const touching = enemy.alive && !player.isAirborne() && reached;
+      if(touching && !enemy.collided){
+        enemy.collided = true;
+        (enemy as any).mgContact = ++this.contactSerial;
+        player.onHitFollower(enemy);
+        if(this.enemies.includes(enemy) && player.alive){
+          enemy.onHitFollower(player);
+        }
+      }else if(!touching){
+        enemy.collided = false;
+      }
+    }
+
+    for(const obstacle of this.obstacles.slice()){
+      if(!player.alive){ return; }
+      const touching = !player.isAirborne() && sweeps(obstacle.getWorldSphere());
+      if(touching && !obstacle.collided){
+        obstacle.collided = true;
+        (obstacle as any).mgContact = ++this.contactSerial;
+        player.onHitObstacle(obstacle);
+        if(this.obstacles.includes(obstacle) && player.alive){
+          obstacle.onHitFollower(player);
+        }
+      }else if(!touching){
+        obstacle.collided = false;
+      }
+    }
   }
 
   tickPaused(delta: number = 0){
@@ -321,54 +436,6 @@ export class ModuleMiniGame {
     target.alive = false;
     this.dispatchEvent(target, ModuleObjectScript.MGPlayerOnDeath, {}, () => target.defaultOnDeath());
   }
-  /**
-   * Swoop collisions: entering a follower's or obstacle's sphere fires the player's
-   * OnHitFollower/OnHitObstacle, then the other object's OnHitFollower. Each contact
-   * fires once until the spheres separate again, and carries a contact serial
-   * (`mgContact`) so the default response runs once per contact. Airborne players
-   * clear obstacles.
-   */
-  updatePlayerCollisions(from?: THREE.Vector3){
-    const player = this.player;
-    if(!player || !player.alive){ return; }
-    const radius = player.getCollisionRadius();
-    // Swept: the player's path over this step, so a long step cannot pass through an object.
-    const path = new THREE.Line3((from ?? player.getWorldSphere().center).clone(), player.getWorldSphere().center.clone());
-    const closest = new THREE.Vector3();
-    const reaches = (sphere: THREE.Sphere) =>
-      path.closestPointToPoint(sphere.center, true, closest).distanceTo(sphere.center) <= radius + sphere.radius;
-
-    for(const enemy of this.enemies.slice()){
-      const enemySphere = enemy.getWorldSphere();
-      const touching = enemy.alive && !player.isAirborne() && reaches(enemySphere);
-      if(touching && !enemy.collided){
-        enemy.collided = true;
-        (enemy as any).mgContact = ++this.contactSerial;
-        player.onHitFollower(enemy);
-        if(this.enemies.includes(enemy)){
-          enemy.onHitFollower(player);
-        }
-      }else if(!touching){
-        enemy.collided = false;
-      }
-    }
-
-    for(const obstacle of this.obstacles.slice()){
-      const obstacleSphere = obstacle.getWorldSphere();
-      const touching = !player.isAirborne() && reaches(obstacleSphere);
-      if(touching && !obstacle.collided){
-        obstacle.collided = true;
-        (obstacle as any).mgContact = ++this.contactSerial;
-        player.onHitObstacle(obstacle);
-        if(this.obstacles.includes(obstacle)){
-          obstacle.onHitFollower(player);
-        }
-      }else if(!touching){
-        obstacle.collided = false;
-      }
-    }
-  }
-
   updateHeartbeats(delta: number = 0){
     const objects: ModuleObject[] = [this.player, ...this.enemies, ...this.obstacles];
     for(const object of objects){
