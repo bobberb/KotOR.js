@@ -51,6 +51,13 @@ import { GFFStruct } from '@/resource/GFFStruct';
 import { GFFDataType } from '@/enums/resource/GFFDataType';
 import { CurrentGame } from '@/engine/CurrentGame';
 import { loadSourceWithStubs } from './support/loadSourceWithStubs';
+import { buildRuntimeAction, EngineVariant } from '@/nwscript/builtins/actionBuilder';
+import * as partyRoutines from '@/nwscript/builtins/party';
+
+function routine(def: any, engine: EngineVariant = 'tsl', caller?: any) {
+  const built = buildRuntimeAction(def, engine)!;
+  return (...args: any[]) => built.action!.call({ caller }, args);
+}
 
 const state = GameState as any;
 
@@ -353,7 +360,8 @@ describe('a save made while a companion is in control survives save -> load -> s
 
     await moduleTransition();
     expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
-    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 5 }]);
+    // The companion in control stays listed, as the leader.
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }]);
 
     // and again: the duplicate must not come back on the next transition
     await moduleTransition();
@@ -396,7 +404,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     const destroy = jest.spyOn(atton, 'destroy').mockImplementation(() => {});
     PartyManager.party = [atton];
     PartyManager.Save();
-    expect(PartyManager.CurrentMembers).toEqual([]);
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }]);
 
     const { MenuPartySelection } = loadSourceWithStubs('game/kotor/menu/MenuPartySelection.ts', { '@/GameState': { GameState } });
     const menu = Object.create(MenuPartySelection.prototype);
@@ -406,11 +414,11 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(menu.canAdd(2)).toBe(false);
     expect(menu.canAdd(5)).toBe(true);
     // ...and the manager must refuse it too.
+    PartyManager.CurrentMembers = [];
     await PartyManager.AddNPCById(2);
     expect(PartyManager.CurrentMembers).toEqual([]);
+    PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }];
 
-    // A save written before Save() excluded the Player can still list it.
-    PartyManager.CurrentMembers.push({ isLeader: false, memberID: 2 });
     expect(menu.canRemove(2)).toBe(false);
     expect(menu.getCurrentMemberCount()).toBe(0);
     PartyManager.RemoveNPCById(2, false);
@@ -436,14 +444,194 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
     expect(attonPM.isPC).toBe(0);
     expect(exile.destroy).toHaveBeenCalled();
-    expect(PartyManager.CurrentMembers.map((m) => m.memberID)).toEqual([5]);
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }]);
     expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
 
-    // companion -> companion: the previous one steps into the member's slot
+    // companion -> companion: the previous one stays a member, the new one leads
     expect(PartyManager.SwitchPlayerCharacter(5)).toBe(baoPM);
     expect(roster()).toEqual(['bao:5(P)', 'atton:2']);
-    expect(PartyManager.CurrentMembers.map((m) => m.memberID)).toEqual([2]);
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }, { isLeader: true, memberID: 5 }]);
     expect(PartyManager.GetControlledNPC()).toBe(5);
+  });
+
+  function member(tag: string, slot: number){
+    const c = new ModuleCreature(creatureTemplate(tag, 0)); c.load(); c.npcId = slot; c.isPM = true;
+    jest.spyOn(c, 'destroy').mockImplementation(() => {});
+    return c;
+  }
+  async function flush(){ for(let i = 0; i < 10; i++) await Promise.resolve(); }
+  function resolveModels(){
+    (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValue({ userData: {} } as never);
+    jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+  }
+  const memberIds = () => PartyManager.CurrentMembers.map((m) => m.memberID);
+
+  describe('switching keeps every companion in the party', () => {
+    beforeEach(() => {
+      PartyManager.ResetPartyTableState();
+      PartyManager.CurrentMembers = [];
+      PartyManager.party = [PartyManager.Player];
+      jest.spyOn(PartyManager.Player, 'destroy').mockImplementation(() => {});
+      for(const [slot, tag] of [[2, 'carth'], [5, 'bastila'], [7, 'hk']] as const){
+        PartyManager.NPCS[slot] = { template: creatureTemplate(tag, 0), available: true, canSelect: true, spawned: false };
+      }
+    });
+
+    test('take over an in-party companion, then switch back: the companion stays, alive, with what it gained', async () => {
+      const exile = PartyManager.Player;
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [exile, carth, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      PartyManager.SwitchPlayerCharacter(2);
+      carth.experience = 1234; // earned while in control
+
+      resolveModels();
+      const back = PartyManager.SwitchPlayerCharacter(-1)!;
+      await flush();
+      expect(back.getTag()).toBe('exile');
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bastila:5']);
+      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(memberIds()).toEqual([2, 5]);
+      expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(2)).toBe(1);
+      expect(PartyManager.NPCS[2].template.RootNode.getFieldByLabel('Experience').getValue()).toBe(1234);
+
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+      await moduleTransition();
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bastila:5']);
+    });
+
+    test('switch to a non-party NPC while a companion leads: the leader stays a member, the protagonist leaves', async () => {
+      const exile = PartyManager.Player;
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [carth, exile, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      resolveModels();
+      const hk = PartyManager.SwitchPlayerCharacter(7)!;
+      expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']); // synchronously, before the model loads
+      await flush();
+      expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
+      expect(PartyManager.party[0]).toBe(hk);
+      expect(exile.destroy).toHaveBeenCalled();
+      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }, { isLeader: true, memberID: 7 }]);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('take over a member while another companion leads: the taken-over creature leads', () => {
+      const exile = PartyManager.Player;
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [carth, exile, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      PartyManager.SwitchPlayerCharacter(5);
+      expect(roster()).toEqual(['bastila:5(P)', 'carth:2']);
+      expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }, { isLeader: true, memberID: 5 }]);
+      expect(state.currentLeader).toBe(bastila);
+    });
+
+    test('a taken-over companion stays a member when control moves on to a non-party NPC', async () => {
+      const exile = PartyManager.Player;
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [exile, carth, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      PartyManager.SwitchPlayerCharacter(2);
+      resolveModels();
+      PartyManager.SwitchPlayerCharacter(7);
+      await flush();
+      expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
+      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(memberIds()).toEqual([2, 5, 7]);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('the companion in control is a party member to scripts; an Ebon Hawk spawn loop does not copy it', () => {
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(2)).toBe(1);
+      expect(routine(partyRoutines.IsObjectPartyMember, 'kotor')(carth)).toBe(1);
+      const spawned: number[] = [];
+      for(let i = 0; i < PartyManager.MaxPartyCount; i++){
+        if(PartyManager.IsAvailable(i) && !routine(partyRoutines.IsNPCPartyMember, 'kotor')(i)) spawned.push(i);
+      }
+      expect(spawned).toEqual([5, 7]);
+    });
+
+    test('a companion-only segment: switch to a non-party NPC, then add two companions in the same script', async () => {
+      state.module = { area: { creatures: [] } };
+      resolveModels();
+      PartyManager.party = [PartyManager.Player];
+      PartyManager.SwitchPlayerCharacter(2);
+      const add = routine(partyRoutines.AddPartyMember, 'kotor');
+      const bao = member('bao', -1), mand = member('mand', -1);
+      bao.npcId = undefined; mand.npcId = undefined;
+      expect(add(4, bao)).toBe(1);
+      expect(add(6, mand)).toBe(1);
+      expect(add(5, member('extra', -1))).toBe(0);
+      await flush();
+      expect(roster()).toEqual(['carth:2(P)', 'bao:4', 'mand:6']);
+      expect(memberIds()).toEqual([2, 4, 6]);
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('a controlled companion an older save left out of PT_MEMBERS rejoins as a member on switching back', () => {
+      const carth = member('carth', 2);
+      PartyManager.Player = carth;
+      PartyManager.party = [carth];
+      PartyManager.CurrentMembers = [];
+      PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+      PartyManager.SwitchPlayerCharacter(-1);
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2']);
+      expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }]);
+    });
+
+    test('the PARTYTABLE lists the companion in control in PT_MEMBERS, flagged as leader', async () => {
+      PartyManager.SwitchPlayerCharacter(2);
+      await PartyManager.Export('save');
+      const rows = new GFFObject(exported).RootNode.getFieldByLabel('PT_MEMBERS').getChildStructs()
+        .map((s) => [s.getFieldByLabel('PT_MEMBER_ID').getValue(), s.getFieldByLabel('PT_IS_LEADER').getValue()]);
+      expect(rows).toEqual([[2, 1]]);
+    });
+
+    test('switching to the companion already in control is a no-op', () => {
+      const first = PartyManager.SwitchPlayerCharacter(2)!;
+      expect(PartyManager.SwitchPlayerCharacter(2)).toBe(first);
+      expect(roster()).toEqual(['carth:2(P)']);
+      expect(memberIds()).toEqual([2]);
+    });
+
+    test('switching to an invalid slot changes nothing', () => {
+      const exile = PartyManager.Player;
+      expect(PartyManager.SwitchPlayerCharacter(12)).toBeUndefined();
+      expect(PartyManager.SwitchPlayerCharacter(-5)).toBeUndefined();
+      expect(PartyManager.Player).toBe(exile);
+      expect(PartyManager.party).toEqual([exile]);
+    });
+
+    test('a slotless follower in the party does not take a companion seat', () => {
+      state.module = { area: { creatures: [] } };
+      const carth = member('carth', 2);
+      const follower = member('follower', -1); follower.npcId = undefined;
+      PartyManager.party = [PartyManager.Player, carth, follower];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }];
+      expect(PartyManager.AddCreatureToParty(5, member('bastila', 5))).toBe(true);
+      expect(PartyManager.GetCompanionMemberCount()).toBe(2);
+    });
+
+    test('UpdateLeader on an empty party clears every leader flag without throwing', () => {
+      PartyManager.party = [];
+      PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }];
+      expect(() => PartyManager.UpdateLeader()).not.toThrow();
+      expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }]);
+    });
+
+    test('re-slotting a member (2 -> 3) unbinds slot 2 so nothing can spawn a second copy', () => {
+      state.module = { area: { creatures: [] } };
+      const carth = member('carth', 2);
+      PartyManager.party = [PartyManager.Player, carth];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }];
+      expect(PartyManager.AddCreatureToParty(3, carth)).toBe(true);
+      expect(PartyManager.NPCS[2]).toMatchObject({ available: false, canSelect: false, template: undefined, moduleObject: undefined });
+      expect(PartyManager.IsAvailable(2)).toBe(false);
+      expect(memberIds()).toEqual([3]);
+    });
   });
 
   test('a slotless player whose template is not the protagonist\'s keeps IsPC 0 and cannot overwrite pc.utc', async () => {
