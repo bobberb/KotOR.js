@@ -23,6 +23,56 @@
 | `ModuleDoor`, `ModuleEncounter`, `ModulePlaceable`, `ModuleSound`, `ModuleTrigger`, `ModuleWaypoint` | Combined comment + `TemplateResRef` field |
 | `ModuleCamera.ts` | Took PR #112 GFF API (`setOrientation`/`setVector`) |
 
+### Corrections from the 2026-11-02 audit
+
+The table above is partly wrong. An audit of `c2cfc14` found:
+
+- `ItemProperty.ts` is PR #112's file plus PR #111's From2DA bail, not #112 wholesale.
+- `ModuleCreature.save()` conflict hunks were resolved to pre-#112 lines, reverting #112's `clampShort` on ForcePoints/HitPoints and its IsDestroyable, IsPC, StealthMode and SubraceIndex writes.
+- `ModuleStore.load()` referenced an undeclared `templateResRef`, so every store threw and was removed from its area.
+- `CharGenAbilities.ts` auto-merged a #112 `syncDerivedStats` call that counted class base saves 3x.
+- `ModuleWaypoint.save()` wrote TemplateResRef, VarTable and XOrientation twice; the stale XOrientation won on load.
+- PR #109's `getTotal*Save()` change to the NWScript saving-throw routines was lost when #112's builtins replaced `NWScriptDefK1.ts`.
+
+None of these were caught by tests: several tests grepped source text instead of executing code, and the build (esbuild-loader) does not type-check.
+
+## Progress (2026-11-02)
+
+Work lands on `bobberb/fix-merge-regressions-0b91e201`, one branch per unit merged in after it passes a cold adversarial review (mutation testing plus probes).
+
+| Unit | State |
+|---|---|
+| Merge regressions above, stale tests rewritten as executing tests | Merged |
+| Forge suites compiling (dlgLocString import, rmdir typing, TXI completions, lipVisemes module, React 19 types) | Merged |
+| Galaxy-map travel (K1 + TSL), selection and masks survive save/load | Merged |
+| Pazaak rules (bust at end of turn, 9-card win, TSL special cards, payout), TSL card persistence and menus | Merged |
+| Force powers end to end (conjure/cast/impact, FP cost, fake casts, location casts) | In review |
+| Effect expiry and stat consumers (AC, saves, abilities, skills, damage, debilitating states) | In review |
+| Death flow, game over, module script events, module locals | In review |
+| Traps, mines, lockpicking | In review |
+| TSL influence, puppets, formation, solo mode, PARTYTABLE scalars | In review |
+
+Phase 1 below is complete: `npx jest --runInBand ./src/tests` exits 0, and `npm run webpack:prod` compiles. tsc is down from 145 to 92 errors, none in gameplay files touched by this work.
+
+### Remaining backlog (most player-visible first)
+
+1. Usable items (medpacs, stims, grenades, shields) and AI talent use (`ActionItemCastSpell` has no `update()`, `ModuleItem.useItemOnObject` has no callers).
+2. Level-up and XP (`MenuLevelUp`/`MenuPowerLevelUp` are empty; no kill XP; max FP never grows).
+3. Passive feats, equip restrictions (`reqfeat0-4` unchecked), and about 20 missing item property types.
+4. Combat rules: blaster deflection, Critical Strike / Sniper Shot, sneak attack, attacks of opportunity, haste/slow, concealment, immunity, damage resistance.
+5. Workbench upgrades and the TSL lab station.
+6. Stealth (toggle is a no-op; no stealth vs Awareness).
+7. Swoop and turret minigames (event hooks have no callers; ~45 SWMG routines missing).
+8. Menus that do nothing (status summary, credits text, abilities list, map pins, store item cost multipliers).
+9. About 60 rarely used NWScript fallbacks, plus `ShipBuild` returning FALSE.
+
+### Unverified without game data
+
+- Whether retail saves store the class base save in `FortSaveThrow` (if so, `getTotal*Save()` double counts it for retail saves).
+- TSL Pazaak special-card index order, the 23-entry PT_PAZAAKCARDS size, and 1-based card item ModelVariation.
+- Engine-local GFF fields added by this work: `GlxyMapSelMsk`, effect `LinkId`, `TrapDetected`/`TrapDetectedBy`, `PT_PUPPET_ID`, `PT_PUP_OWNER`, `PT_SWOOP1-3`, `PT_DISABLEREGEN`.
+- K1 death GUI resref `gameover`, `GetSpellSaveDC` formula, `DAMAGE_BONUS_*` table, formation constants.
+
 ## Objective
 
 Stabilize the merged branch, fix regressions introduced by conflict resolution, and validate the integrated port so it can be proposed upstream as a coherent set of PRs.

@@ -707,7 +707,10 @@ export class ProjectFileSystem {
       return false;
     }
     return new Promise<boolean>((resolve) => {
-      fs.rmdir(path.join(this.rootDirectoryPath, rel), { recursive: !!opts.recursive } as fs.RmDirOptions, (err) => {
+      // The Electron preload shim exposes rmdir (not rm) and forwards the options
+      // object; current @types/node dropped rmdir's options overload.
+      const rmdir = fs.rmdir as unknown as (dir: string, options: { recursive: boolean }, callback: (err: NodeJS.ErrnoException | null) => void) => void;
+      rmdir(path.join(this.rootDirectoryPath, rel), { recursive: !!opts.recursive }, (err) => {
         if(err){
           console.error(err);
           resolve(false);

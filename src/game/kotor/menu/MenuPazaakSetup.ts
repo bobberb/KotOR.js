@@ -135,58 +135,79 @@ export class MenuPazaakSetup extends GameMenu {
       });
       this.BTN_YTEXT.hide();
 
-      /**
-       * Available cards
-       */
-      for(let i = 0; i < PazaakCards.MAX_CARDS; i++){
-        const card = GameState.PazaakManager.Cards.get(i);
-        if(card){
-          const button = this.getCardButton(i);
-          if(!button){
-            continue;
-          }
-          button.swapBorderAndHighliteOnHover = false;
-          button.addEventListener('click', () => {
-            this.selectedCard = i;
-            console.log(`PazaakSetup: Selected card ${i}, count: ${card.count}`);
-            if(card.count <= 0){
-              return;
-            }
-            for(let j = 0; j < PazaakSideDeckSlots.MAX_SLOTS; j++){
-              const sideCard = GameState.PazaakManager.PlayerSideDeck.get(j);
-              if(sideCard != PazaakCards.INVALID){
-                continue;
-              }
-              GameState.PazaakManager.MoveCardToSideDeck(card.card, j);
-              this.rebuild();
-              break;
-            }
-          });
-        }
-      }
+      this.bindCardButtons();
 
-      /**
-       * Side deck cards
-       */
-      for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
-        const button = this.getSideCardButton(i);
+      resolve();
+    });
+  }
+
+  /**
+   * Card indices the collection grid lists for the running game
+   * (K1: 0-17, TSL: 0-22 including the TSL special cards).
+   */
+  getAvailableCardIndices(): PazaakCards[] {
+    const indices: PazaakCards[] = [];
+    const max = GameState.PazaakManager.GetMaxCards();
+    for(let i = 0; i < max; i++){
+      indices.push(i);
+    }
+    return indices;
+  }
+
+  /**
+   * Wire the collection grid and side deck buttons.
+   */
+  bindCardButtons(){
+    /**
+     * Available cards
+     */
+    for(const i of this.getAvailableCardIndices()){
+      if(GameState.PazaakManager.Cards.get(i)){
+        const button = this.getCardButton(i);
         if(!button){
           continue;
         }
         button.swapBorderAndHighliteOnHover = false;
         button.addEventListener('click', () => {
-          const card = GameState.PazaakManager.PlayerSideDeck.get(i);
-          this.selectedSideCard = i;
-          console.log(`PazaakSetup: Side card ${i} - ${card}`);
-          if(card != PazaakCards.INVALID){
-            GameState.PazaakManager.MoveSideDeckCardToMainDeck(i);
+          // Look the card up on click: a save load replaces the Cards entries
+          const card = GameState.PazaakManager.Cards.get(i);
+          this.selectedCard = i;
+          console.log(`PazaakSetup: Selected card ${i}, count: ${card.count}`);
+          if(card.count <= 0){
+            return;
+          }
+          for(let j = 0; j < PazaakSideDeckSlots.MAX_SLOTS; j++){
+            const sideCard = GameState.PazaakManager.PlayerSideDeck.get(j);
+            if(sideCard != PazaakCards.INVALID){
+              continue;
+            }
+            GameState.PazaakManager.MoveCardToSideDeck(card.card, j);
             this.rebuild();
+            break;
           }
         });
       }
+    }
 
-      resolve();
-    });
+    /**
+     * Side deck cards
+     */
+    for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
+      const button = this.getSideCardButton(i);
+      if(!button){
+        continue;
+      }
+      button.swapBorderAndHighliteOnHover = false;
+      button.addEventListener('click', () => {
+        const card = GameState.PazaakManager.PlayerSideDeck.get(i);
+        this.selectedSideCard = i;
+        console.log(`PazaakSetup: Side card ${i} - ${card}`);
+        if(card != PazaakCards.INVALID){
+          GameState.PazaakManager.MoveSideDeckCardToMainDeck(i);
+          this.rebuild();
+        }
+      });
+    }
   }
 
   open(){
@@ -195,7 +216,7 @@ export class MenuPazaakSetup extends GameMenu {
       GameState.MenuManager.MenuPazaakWager.open();
     }
     this.knownCards.clear();
-    for(let i = 0; i < PazaakCards.MAX_CARDS; i++){
+    for(const i of this.getAvailableCardIndices()){
       const card = GameState.PazaakManager.Cards.get(i);
       if(card && card.count > 0){
         this.knownCards.set(i, true);
@@ -205,7 +226,7 @@ export class MenuPazaakSetup extends GameMenu {
     }
     for(let i = 0; i < PazaakSideDeckSlots.MAX_SLOTS; i++){
       const card = GameState.PazaakManager.PlayerSideDeck.get(i);
-      if(card && card != PazaakCards.INVALID){
+      if(card != undefined && card != PazaakCards.INVALID){
         this.knownCards.set(card, true);
       }
     }
@@ -256,13 +277,13 @@ export class MenuPazaakSetup extends GameMenu {
   }
 
   rebuild(){
-    for(let i = 0; i < PazaakCards.MAX_CARDS; i++){
+    for(const i of this.getAvailableCardIndices()){
       const card = GameState.PazaakManager.Cards.get(i);
       if(card){
         this.setCardCount(i, card.count);
       }
 
-      const bCardAvailable = card.count > 0;
+      const bCardAvailable = (card?.count ?? 0) > 0;
       const bCardKnown = this.knownCards.get(i);
 
       const button = this.getCardButton(i);
@@ -290,22 +311,14 @@ export class MenuPazaakSetup extends GameMenu {
       }
       button.swapBorderAndHighliteOnHover = false;
       if(typeof card === 'number' && card != PazaakCards.INVALID){
-        label.setText(card.toString());
-        const type = Math.floor(card/6);
-        const modifier = (card % 6) + 1;
-        if(type === 0){
-          button.setFillTextureName(PazaakCardGUITextures.CARD_POS, false);
-          label.setText(`+${modifier}`);
-        }else if(type === 1){
-          button.setFillTextureName(PazaakCardGUITextures.CARD_NEG, false);
-          label.setText(`-${modifier}`);
-        }else if(type === 2){
-          button.setFillTextureName(PazaakCardGUITextures.CARD_TWOSIDED_POS, false);
-          label.setText(`±${modifier}`);
+        const sideCard = GameState.PazaakManager.Config.data.sideDeckCards[card];
+        label.setText(sideCard ? sideCard.modifierLabel : card.toString());
+        if(sideCard){
+          button.setFillTextureName(sideCard.textures[0], false);
         }
       }else{
         label.setText('');
-        button.setFillTextureName(PazaakCardGUITextures.CARD_BACK, false);
+        button.setFillTextureName(GameState.PazaakManager.Config.textures[0]?.file ?? PazaakCardGUITextures.CARD_BACK, false);
       }
     }
   }

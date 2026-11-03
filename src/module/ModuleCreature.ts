@@ -48,6 +48,7 @@ import { GameEffectDurationType } from "@/enums/effects/GameEffectDurationType";
 import { BitWise } from "@/utility/BitWise";
 import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { PerceptionType } from "@/enums/engine/PerceptionType";
+import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { AudioEmitterType } from "@/enums/audio/AudioEmitterType";
 import { AudioPriorityGroup } from "@/enums/audio/AudioPriorityGroup";
 import { CombatActionType } from "@/enums/combat/CombatActionType";
@@ -55,6 +56,7 @@ import { CombatRound, CombatRoundAction } from "@/combat";
 import { GameEffectFactory } from "@/effects/GameEffectFactory";
 import type { Action } from "@/actions/Action";
 import { ModuleTriggerType } from "@/enums/module/ModuleTriggerType";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 import { EngineDebugType } from "@/enums/engine/EngineDebugType";
 import { TextSprite3D } from "@/engine/TextSprite3D";
 import { UIIconTimerType } from "@/enums/engine/UIIconTimerType";
@@ -709,7 +711,7 @@ export class ModuleCreature extends ModuleObject {
 
 
       //If a non controlled party member is stuck, warp them to their follow position
-      if (this.npcId != undefined && this != (GameState.getCurrentPlayer() as any) && this.collisionTimer >= 1) {
+      if (GameState.PartyManager.ShouldWarpStuckMember(this)) {
         this.setPosition(GameState.PartyManager.GetFollowPosition(this));
         this.collisionTimer = 0;
       }
@@ -824,6 +826,8 @@ export class ModuleCreature extends ModuleObject {
   }
 
   updateRegen(delta = 0) {
+    // The dead do not heal back up; party revival is PartyDeathMonitor's call.
+    if (this.isDead()) return;
     this.regenTimer -= delta;
     if (this.regenTimer <= 0) {
       this.regenTimer = this.regenTimerMax;
@@ -972,15 +976,16 @@ export class ModuleCreature extends ModuleObject {
       }
     }
 
-    for(let i = 0, triglen = this.area.triggers.length; i < triglen; i++){
-      const trig = this.area.triggers[i];
-      if(trig.type != ModuleTriggerType.TRAP){ continue; }
-      if(trig.trapDetected){ continue; }
-      const actionFlag = new GameState.ActionFactory.ActionFlagMine();
-      actionFlag.setParameter(0, ActionParameterType.DWORD, trig);
-      this.actionQueue.addFront(actionFlag);
-    }
-    
+    this.updateTrapDetection();
+
+  }
+
+  /**
+   * Passive mine detection: party members only, Awareness vs TrapDetectDC
+   * within range (SWTrapRules.passiveDetect).
+   */
+  updateTrapDetection(){
+    return SWTrapRules.passiveDetect(this, this.area?.triggers || []);
   }
 
   updateCombat(delta = 0){
@@ -1410,27 +1415,24 @@ export class ModuleCreature extends ModuleObject {
   useTalent(talent: TalentObject, oTarget: ModuleObject): Action {
     let action: Action;
     if (talent instanceof TalentObject) {
-      const combatAction = new CombatRoundAction();
-      switch (talent.objectType) {
-        case 1: //FEAT
-          combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
-          combatAction.target = oTarget;
-          combatAction.setFeat(talent as TalentFeat);
-          this.combatRound.addAction(combatAction);
-          break;
-        case 2: //SKILL
-          if (talent.id == 6) { //Security
-            action = new GameState.ActionFactory.ActionUnlockObject();
-            action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
-            this.actionQueue.add(action);
-          }
-          break;
-        case 0: //SPELL
-          combatAction.actionType = CombatActionType.CAST_SPELL;
-          combatAction.setSpell(talent as TalentSpell);
-          combatAction.target = oTarget;
-          this.combatRound.addAction(combatAction);
-          break;
+      // objectType is a TalentObjectType bit mask (TalentObject | subtype), not the NWScript TALENT_TYPE_* index.
+      if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentFeat)) {
+        const combatAction = new CombatRoundAction();
+        combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
+        combatAction.target = oTarget;
+        combatAction.setFeat(talent as TalentFeat);
+        this.combatRound.addAction(combatAction);
+        if (!this.actionQueue.actionTypeExists(ActionType.ActionCombat)) {
+          this.actionQueue.add(new GameState.ActionFactory.ActionCombat(0xFFFF));
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSkill)) {
+        if (talent.id == 6) { //Security
+          action = new GameState.ActionFactory.ActionUnlockObject();
+          action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
+          this.actionQueue.add(action);
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSpell)) {
+        talent.useTalentOnObject(oTarget, this);
       }
     }
     return action;
@@ -2290,7 +2292,7 @@ export class ModuleCreature extends ModuleObject {
 
   retrieveInventory() {
     while (this.inventory.length) {
-      GameState.InventoryManager.addItem(this.inventory.pop())
+      GameState.InventoryManager.addItem(this.inventory.pop(), false, { acquiredFrom: this })
     }
   }
 
@@ -2610,15 +2612,20 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getFP() {
-    return this.forcePoints;
+    // Mirrors getHP: currentForce is relative to the base pool (forcePoints); max adds bonuses. setFP/addFP/subtractFP all write currentForce.
+    return (this.getMaxFP() + (Number(this.currentForce) || 0)) - (Number(this.forcePoints) || 0);
   }
 
   getMaxFP() {
-    return this.maxForcePoints;
+    const base = Number(this.forcePoints) || 0;
+    const max = Number(this.maxForcePoints);
+    // UTC blueprints have no MaxForcePoints field, and earlier builds saved that absent max as 0.
+    if (!Number.isFinite(max) || (max === 0 && base > 0)) return base;
+    return max;
   }
 
   setFP(nAmount = 0) {
-    let bonus = this.maxForcePoints - this.forcePoints;
+    let bonus = this.getMaxFP() - (Number(this.forcePoints) || 0);
     this.currentForce = nAmount - bonus;
   }
 
@@ -2849,8 +2856,16 @@ export class ModuleCreature extends ModuleObject {
     }
   }
 
+  /**
+   * Force power save DC. KotOR 1 community mechanics references (GameFAQs mechanics FAQs, Deadly Stream)
+   * give DC = 5 + caster level + Wisdom modifier; unverified against the TSL engine, which may differ
+   * (e.g. Force Focus / alignment bonuses are not modelled here).
+   * Caster level is the sum of spellcaster (Jedi) class levels, falling back to character level for
+   * creatures that cast without a spellcaster class.
+   */
   getSpellSaveDC() {
-    return 10 + this.getSpellCasterLevel();
+    const casterLevel = this.getSpellCasterLevel() || this.getTotalClassLevel();
+    return 5 + casterLevel + CombatRound.GetMod(this.getWIS());
   }
 
   getSpellCasterLevel() {
@@ -3248,9 +3263,15 @@ export class ModuleCreature extends ModuleObject {
     return spells;
   }
 
+  /** Force powers the creature cannot pay for are not offered to the AI; item-granted powers cost no FP. */
+  canAffordTalent(talent: TalentObject): boolean {
+    if (!BitWise.InstanceOf(talent?.objectType, TalentObjectType.TalentSpell) || talent.item) return true;
+    return this.getFP() >= (talent as TalentSpell).getForcePointCost();
+  }
+
   getRandomTalent(category = 0, category2 = 0) {
 
-    let talents = this.getTalents().filter((talent: TalentObject) => talent.category == category || talent.category == category2);
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category == category || talent.category == category2) && this.canAffordTalent(talent));
     let talent = talents[Math.floor(Math.random() * talents.length)];
     //console.log('getRandomTalent', talent);
     return talent;
@@ -3258,8 +3279,9 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getTalentBest(nCategory = 0, nCRMax = 0, nInclusion = 0, nExcludeType = -1, nExcludeId = -1) {
-    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax));
-    talents.sort((a: TalentObject, b: TalentObject) => (a.maxCR > b.maxCR) ? 1 : -1);
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax) && this.canAffordTalent(talent));
+    // GetCreatureTalentBest: the strongest talent whose CR does not exceed nCRMax.
+    talents.sort((a: TalentObject, b: TalentObject) => b.maxCR - a.maxCR);
     //console.log('getTalentBest', talents);
     if (talents.length) {
       return talents[0];
@@ -3830,6 +3852,10 @@ export class ModuleCreature extends ModuleObject {
       if (this.template.RootNode.hasField('IsPC'))
         this.isPC = this.template.getFieldByLabel('IsPC').getValue();
 
+      // save() writes this from SetIsDestroyable's flag; without the read it reset to true on load.
+      if (this.template.RootNode.hasField('IsDestroyable'))
+        this.isDestroyable = !!this.template.getFieldByLabel('IsDestroyable').getValue();
+
       if (this.template.RootNode.hasField('LastName'))
         this.lastName = this.template.getFieldByLabel('LastName').getValue();
 
@@ -3971,34 +3997,12 @@ export class ModuleCreature extends ModuleObject {
       if (this.template.RootNode.hasField('WillSaveThrow'))
         this.willSaveThrow = this.template.RootNode.getFieldByLabel('WillSaveThrow').getValue();
 
-      if (this.template.RootNode.hasField('fortbonus'))
-        this.fortbonus = this.template.RootNode.getFieldByLabel('fortbonus').getValue();
-
-      if (this.template.RootNode.hasField('refbonus'))
-        this.refbonus = this.template.RootNode.getFieldByLabel('refbonus').getValue();
-
-      if (this.template.RootNode.hasField('willbonus'))
-        this.willbonus = this.template.RootNode.getFieldByLabel('willbonus').getValue();
-
       if (this.template.RootNode.hasField('SubraceIndex'))
         this.subraceIndex = this.template.RootNode.getFieldByLabel('SubraceIndex').getValue();
 
 
-      if (this.template.RootNode.hasField('SWVarTable')) {
-        let localBools = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0].getFieldByLabel('BitArray').getChildStructs();
-        //console.log(localBools);
-        for (let i = 0; i < localBools.length; i++) {
-          let data = localBools[i].getFieldByLabel('Variable').getValue();
-          for (let bit = 0; bit < 32; bit++) {
-            this._locals.Booleans[bit + (i * 32)] = ((data >> bit) % 2 != 0);
-          }
-        }
-        let localNumbers = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0].getFieldByLabel('ByteArray').getChildStructs();
-        //console.log(localNumbers);
-        for (let i = 0; i < localNumbers.length; i++) {
-          let data = localNumbers[i].getFieldByLabel('Variable').getValue();
-          this.setLocalNumber(i, data);
-        }
+      if(this.template.RootNode.hasField('SWVarTable')){
+        this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
       }
 
       if (this.template.RootNode.hasField('PM_Appearance'))
@@ -4538,16 +4542,16 @@ export class ModuleCreature extends ModuleObject {
       firstNameLoc.addSubString(this.firstName || '', 0);
     }
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOLOCSTRING, 'FirstName') ).setValue( firstNameLoc );
-    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'ForcePoints') ).setValue(this.forcePoints);
+    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'ForcePoints') ).setValue(clampShort(this.forcePoints));
     gff.RootNode.addField( new GFFField(GFFDataType.CHAR, 'FortSaveThrow') ).setValue(this.fortitudeSaveThrow);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Gender') ).setValue(this.gender);
     gff.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Gold') ).setValue(0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'GoodEvil') ).setValue(this.goodEvil);
-    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'HitPoints') ).setValue(this.hitPoints);
+    gff.RootNode.addField( new GFFField(GFFDataType.SHORT, 'HitPoints') ).setValue(clampShort(this.hitPoints));
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Int') ).setValue(this.int);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Interruptable') ).setValue(this.interruptable ? 1 : 0);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsDestroyable') ).setValue(1);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsPC') ).setValue( this.playerCreated ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsDestroyable') ).setValue(this.isDestroyable ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsPC') ).setValue(this.isPC ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'IsRaiseable') ).setValue(1);
     if(this.playerCreated){
       gff.RootNode.addField( new GFFField(GFFDataType.INT, 'PlayerCreated') ).setValue(1);
@@ -4564,7 +4568,7 @@ export class ModuleCreature extends ModuleObject {
     gff.RootNode.addField(new GFFField(GFFDataType.CEXOLOCSTRING, 'LastName')).setValue(this.template.RootNode.getFieldByLabel('LastName')?.getCExoLocString());
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Listening')).setValue(this.isListening);
 
-    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.maxForcePoints));
+    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.getMaxFP()));
     gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxHitPoints')).setValue(clampShort(this.maxHitPoints));
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Min1HP')).setValue(this.min1HP);
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'MovementRate')).setValue(0);
@@ -4658,10 +4662,10 @@ export class ModuleCreature extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.WORD, 'SkillPoints') ).setValue( this.skillPoints ? this.skillPoints : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.WORD, 'SoundSetFile') ).setValue(this.soundSetFile);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StartingPackage') ).setValue(0);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StealthMode') ).setValue(0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'StealthMode') ).setValue(this.stealthMode ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Str') ).setValue(this.str);
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Subrace') ).setValue('');
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'SubraceIndex') ).setValue(this.subrace);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'SubraceIndex') ).setValue(this.subraceIndex);
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Tag') ).setValue(this.tag);
     // Blueprint reference; dropped by every save path until now - see ModulePlaceable.save.
     gff.RootNode.addField( new GFFField(GFFDataType.RESREF, 'TemplateResRef') ).setValue(this.templateResRef || '');

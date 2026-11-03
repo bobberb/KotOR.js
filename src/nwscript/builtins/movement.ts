@@ -15,6 +15,7 @@ export const SetFacing = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [floatParam("fDirection")] as const,
   kotor(this: NWScriptInstance, fDirection) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     this.caller.setFacing(fDirection);
   },
 });

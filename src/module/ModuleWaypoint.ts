@@ -135,16 +135,6 @@ export class ModuleWaypoint extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOSTRING, 'Tag') ).setValue(this.tag);
 
     // Blueprint reference; dropped by every save path until now - see ModulePlaceable.save.
-
-    gff.RootNode.addField( new GFFField(GFFDataType.RESREF, 'TemplateResRef') ).setValue(this.templateResRef || '');
-    gff.RootNode.addField( new GFFField(GFFDataType.LIST,  'VarTable') );
-    
-    if(this.template.RootNode.hasField('XOrientation')){
-      gff.RootNode.addField( new GFFField(GFFDataType.FLOAT, 'XOrientation') ).setValue(this.template.RootNode.getFieldByLabel('XOrientation').getValue());
-    }else{
-      gff.RootNode.addField( new GFFField(GFFDataType.FLOAT, 'XOrientation') ).setValue(0);
-    }
-
     gff.RootNode.addField( new GFFField(GFFDataType.RESREF, 'TemplateResRef') ).setValue(this.templateResRef || '');
     gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'VarTable') );
     gff.RootNode.addField( new GFFField(GFFDataType.FLOAT, 'XOrientation') ).setValue(xOrientation || 0);

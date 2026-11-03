@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import type { Action } from "@/actions/Action";
+import type { IInventoryAddOptions } from "@/managers/InventoryManager";
+import { buildSWVarTableStruct, isSWVarIndex, readSWVarTableStruct, SWVAR_MAX_BOOLEANS, SWVAR_MAX_NUMBERS, toSWVarNumber } from "@/module/SWVarTable";
 import { ActionQueue } from "@/actions/ActionQueue";
 import { AudioEmitter } from "@/audio/AudioEmitter";
 import { CollisionManager } from "@/engine/CollisionManager";
@@ -54,6 +56,9 @@ import type { SWRange } from "@/engine/rules/SWRange";
 import { TURN_SPEED_SLOW } from "@/engine/TurnSpeeds";
 import { actionParameterToStruct } from "@/actions/actionParameterStructs";
 
+
+/** Trap detection key shared by every party member (see getTrapDetectorFactionId). */
+export const TRAP_DETECTOR_PARTY = -2;
 
 /**
 * ModuleObject class.
@@ -265,6 +270,12 @@ export class ModuleObject {
   trapType: number;
   trapFlag: boolean;
   ownerDemolitions: number = -1;
+  /** Factions that have detected this trap; detection is shared by a faction (the party is one). */
+  trapDetectedByFactions: Set<number> = new Set();
+  trapCreatorId: number = ModuleObjectConstant.OBJECT_INVALID;
+  lastTrapDetected: ModuleObject;
+  lastLocked: ModuleObject;
+  lastUnlocked: ModuleObject;
 
   notBlastable: boolean = false;
 
@@ -1600,7 +1611,7 @@ export class ModuleObject {
     if(!onSpellAt){ return; }
     const instance = onSpellAt.nwscript.newInstance();
     instance.lastSpellCaster = event.getObject(0);
-    instance.lastSpell = event.getInt(0);
+    instance.lastSpell = new GameState.TalentSpell(event.getInt(0));
     instance.lastSpellHarmful = event.getInt(1) ? true : false;
     instance.run(this);
   }
@@ -1735,9 +1746,9 @@ export class ModuleObject {
    * @param item 
    * @returns 
    */
-  addItem(item: ModuleItem){
+  addItem(item: ModuleItem, options: IInventoryAddOptions = {}){
     if(this.isPartyMember()){
-      return GameState.InventoryManager.addItem(item);
+      return GameState.InventoryManager.addItem(item, false, options);
     }
 
     item.load();
@@ -1773,7 +1784,7 @@ export class ModuleObject {
     removedItem.setStackSize(removedCount);
 
     if(this.isPartyMember()){
-      GameState.InventoryManager.removeItem(eItem, removedCount);
+      GameState.InventoryManager.removeItem(eItem, removedCount, { lostBy: this });
       return removedItem;
     }
 
@@ -1806,7 +1817,7 @@ export class ModuleObject {
     removedItem.setStackSize(removedCount);
 
     if(this.isPartyMember()){
-      GameState.InventoryManager.removeItem(eItem, removedCount);
+      GameState.InventoryManager.removeItem(eItem, removedCount, { lostBy: this });
       return removedItem;
     }
 
@@ -1902,6 +1913,8 @@ export class ModuleObject {
    */
   doCommand(script: NWScriptInstance){
     //console.log('doCommand', this.getTag(), script, action, instruction);
+    // A script may still hold a creature that has since been destroyed (e.g. the PC after a switch).
+    if(this.destroyed || !this.actionQueue){ return; }
     let action = new GameState.ActionFactory.ActionDoCommand();
     action.setParameter(0, ActionParameterType.SCRIPT_SITUATION, script);
     this.actionQueue.add(action);
@@ -1962,12 +1975,85 @@ export class ModuleObject {
     //Trigger Geomerty
     trigger.vertices[0] = new THREE.Vector3(-2,  2, 0);
     trigger.vertices[1] = new THREE.Vector3(-2, -2, 0);
-    trigger.vertices[2] = new THREE.Vector3( 2,  2, 0);
+    trigger.vertices[2] = new THREE.Vector3( 2, -2, 0);
     trigger.vertices[3] = new THREE.Vector3( 2,  2, 0);
 
     trigger.load();
 
     this.area.triggers.push(trigger);
+  }
+
+  /**
+   * Detection key for a detector: the whole party shares TRAP_DETECTOR_PARTY
+   * (the PC is faction 0 while companions keep their UTC faction), anyone
+   * else their faction id.
+   */
+  getTrapDetectorFactionId(detector: ModuleObject): number {
+    // PartyManager.party, not isPM: isPM can be stale after a member leaves.
+    if(detector && (GameState.PartyManager?.party || []).indexOf(detector as any) >= 0){
+      return TRAP_DETECTOR_PARTY;
+    }
+    const id = detector?.faction?.id ?? detector?.factionId;
+    return typeof id === 'number' && !isNaN(id) ? id : -1;
+  }
+
+  isTrapDetectedBy(detector: ModuleObject): boolean {
+    if(!detector) return false;
+    return this.trapDetectedByFactions.has(this.getTrapDetectorFactionId(detector));
+  }
+
+  /**
+   * Whether this object is a trap that can still be found: a trapped door or
+   * placeable (TrapFlag set). ModuleTrigger overrides this for mines.
+   */
+  isTrapActive(): boolean {
+    return !this.destroyed && !!this.trapFlag;
+  }
+
+  /** @returns false when refused (detecting a trap that is not active) */
+  setTrapDetectedBy(detector: ModuleObject, detected = true): boolean {
+    if(!detector) return false;
+    if(detected && !this.isTrapActive()) return false;
+    const factionId = this.getTrapDetectorFactionId(detector);
+    if(detected){
+      this.trapDetectedByFactions.add(factionId);
+      detector.lastTrapDetected = this;
+    }else{
+      this.trapDetectedByFactions.delete(factionId);
+    }
+    return true;
+  }
+
+  /** SetTrapDisabled: the trap stays in place, disarmed, and nobody knows about it any more. */
+  disableTrap(){
+    this.trapFlag = false;
+    this.trapDetectedByFactions.clear();
+  }
+
+  /** Engine-local TrapDetectedBy list (faction / party detection keys). */
+  saveTrapDetectedBy(root: GFFStruct){
+    const detectedBy = root.addField( new GFFField(GFFDataType.LIST, 'TrapDetectedBy') );
+    for(const factionId of this.trapDetectedByFactions){
+      const struct = new GFFStruct();
+      struct.addField( new GFFField(GFFDataType.INT, 'FactionId') ).setValue(factionId);
+      detectedBy.addChildStruct(struct);
+    }
+  }
+
+  loadTrapDetectedBy(root: GFFStruct){
+    if(!root?.hasField('TrapDetectedBy')) return;
+    this.trapDetectedByFactions.clear();
+    for(const struct of root.getFieldByLabel('TrapDetectedBy').getChildStructs()){
+      if(struct.hasField('FactionId')){
+        this.trapDetectedByFactions.add(struct.getFieldByLabel('FactionId').getValue());
+      }
+    }
+    if(!this.isTrapActive()) this.trapDetectedByFactions.clear();
+  }
+
+  getTrapCreator(): ModuleObject {
+    if(this.trapCreatorId == undefined || this.trapCreatorId == ModuleObjectConstant.OBJECT_INVALID) return undefined;
+    return GameState.ModuleObjectManager?.GetObjectById?.(this.trapCreatorId);
   }
 
   //---------------//
@@ -3127,6 +3213,10 @@ export class ModuleObject {
    * @param bool 
    */
   setLocalBoolean(index: number, bool: boolean){
+    if(!isSWVarIndex(index, SWVAR_MAX_BOOLEANS)){
+      console.warn(`ModuleObject: local boolean index ${index} is outside 0-${SWVAR_MAX_BOOLEANS - 1}; ignored`);
+      return;
+    }
     this._locals.Booleans[index] = !!bool;
   }
 
@@ -3136,7 +3226,12 @@ export class ModuleObject {
    * @param value 
    */
   setLocalNumber(index: number, value: number){
-    (this._locals.Numbers as any)[index] = value;
+    if(!isSWVarIndex(index, SWVAR_MAX_NUMBERS)){
+      console.warn(`ModuleObject: local number index ${index} is outside 0-${SWVAR_MAX_NUMBERS - 1}; ignored`);
+      return;
+    }
+    // Stored as the save stores it, so a reload cannot change what scripts read.
+    (this._locals.Numbers as any)[index] = toSWVarNumber(value);
   }
 
   /**
@@ -3632,26 +3727,7 @@ export class ModuleObject {
       this.willSaveThrow = this.template.RootNode.getFieldByLabel('WillSaveThrow').getValue();
 
     if(this.template.RootNode.hasField('SWVarTable')){
-      let swVarTableStruct = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0];
-      if(swVarTableStruct){
-        if(swVarTableStruct.hasField('BitArray')){
-          let localBools = swVarTableStruct.getFieldByLabel('BitArray').getChildStructs();
-          for(let i = 0; i < localBools.length; i++){
-            let data = localBools[i].getFieldByLabel('Variable').getValue();
-            for(let bit = 0; bit < 32; bit++){
-              this._locals.Booleans[bit + (i*32)] = ( (data>>bit) % 2 != 0);
-            }
-          }
-        }
-
-        if(swVarTableStruct.hasField('ByteArray')){
-          let localNumbers = swVarTableStruct.getFieldByLabel('ByteArray').getChildStructs();
-          for(let i = 0; i < localNumbers.length; i++){
-            let data = localNumbers[i].getFieldByLabel('Variable').getValue();
-            this.setLocalNumber(i, data);
-          }
-        }
-      }
+      this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
     }
 
     this.initialized = true;
@@ -3671,36 +3747,24 @@ export class ModuleObject {
   }
 
   /**
+   * Load locals from a saved SWVarTable through the setters, so a table larger
+   * than the SWVarTable bounds loads only what a save can hold.
+   */
+  loadSWVarTable(struct?: GFFStruct){
+    readSWVarTableStruct(struct,
+      (index, value) => this.setLocalBoolean(index, value),
+      (index, value) => this.setLocalNumber(index, value),
+    );
+  }
+
+  /**
    * Get the SWVarTable save struct
    * @returns 
    */
   getSWVarTableSaveStruct(){
-    let swVarTableStruct = new GFFStruct();
-
-    let swVarTableBitArray = swVarTableStruct.addField( new GFFField(GFFDataType.LIST, 'BitArray') );
-
-    for(let i = 0; i < 3; i++){
-      let varStruct = new GFFStruct();
-      let value = 0;
-      let offset = 32 * i;
-      for(let j = 0; j < 32; j++){
-        if(this.getLocalBoolean(offset + j) == true){
-          value |= 1 << j;
-        }
-      }
-      value = value >>> 0;
-      varStruct.addField( new GFFField(GFFDataType.DWORD, 'Variable') ).setValue( value );
-      swVarTableBitArray.addChildStruct(varStruct);
-    }
-
-    let swVarTableByteArray = swVarTableStruct.addField( new GFFField(GFFDataType.LIST, 'ByteArray') );
-
-    for(let i = 0; i < 8; i++){
-      let varStruct = new GFFStruct();
-      varStruct.addField( new GFFField(GFFDataType.BYTE, 'Variable') ).setValue( Number(this.getLocalNumber(i)) );
-      swVarTableByteArray.addChildStruct(varStruct);
-    }
-    return swVarTableStruct;
+    // Sized to the highest local set: a fixed 8-byte ByteArray dropped number
+    // locals 8+ (scripts use 12 and up) on every save.
+    return buildSWVarTableStruct(this._locals);
   }
 
   /**

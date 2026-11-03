@@ -1,4 +1,5 @@
 import { TwoDAObject } from "@/resource/TwoDAObject";
+import { PazaakCards } from "@/enums/minigames/PazaakCards";
 
 export class PazaakDeck {
 
@@ -54,16 +55,16 @@ export class PazaakDeck {
       return 16;
     }else if(cardModifier == '+-6'){
       return 17;
-    }else if(cardModifier == '$$'){ //TSL only
-      return 18;
-    }else if(cardModifier == 'F1'){ //TSL only
-      return 19;
-    }else if(cardModifier == 'F2'){ //TSL only
-      return 20;
-    }else if(cardModifier == 'TT'){ //TSL only
-      return 21;
-    }else if(cardModifier == 'VV'){ //TSL only
-      return 22;
+    }else if(cardModifier == '$$'){ //TSL only: double
+      return PazaakCards.TSL_DOUBLE;
+    }else if(cardModifier == 'F1'){ //TSL only: flip 2&4
+      return PazaakCards.TSL_FLIP_2_4;
+    }else if(cardModifier == 'F2'){ //TSL only: flip 3&6
+      return PazaakCards.TSL_FLIP_3_6;
+    }else if(cardModifier == 'TT'){ //TSL only: tiebreaker
+      return PazaakCards.TSL_TIEBREAKER;
+    }else if(cardModifier == 'VV'){ //TSL only: 1±2
+      return PazaakCards.TSL_PLUS_MINUS_1_OR_2;
     }
     return -1;
   }

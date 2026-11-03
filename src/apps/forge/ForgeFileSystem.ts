@@ -25,7 +25,7 @@ interface ShowOpenDirectoryDialogOptions {
    * File System Access API
    */
   id?: string;
-  mode?: 'readwrite' | 'readonly';
+  mode?: FileSystemPermissionMode;
   types?: {
     description: string;
     accept: {
@@ -188,9 +188,8 @@ export class ForgeFileSystem {
           });
         })
       }else{
+        // A directory picker takes no type filter or multi-select.
         window.showDirectoryPicker({
-          types: ForgeFileSystem.GetFilteredFilePickerTypes(options.ext),
-          multiple: false,
           mode: "readwrite"
         }).then( (handle: FileSystemDirectoryHandle) => {
           if(handle){
@@ -290,7 +289,7 @@ export class ForgeFileSystem {
             return {
               type: responseType,
               path: result.filePaths[0],
-              handle: undefined,
+              handle: undefined as FileSystemDirectoryHandle | undefined,
             };
           }
         }
@@ -322,8 +321,8 @@ export class ForgeFileSystem {
     return {
       cancelled: cancelled,
       type: responseType,
-      path: undefined,
-      handle: undefined,
+      path: undefined as string | undefined,
+      handle: undefined as FileSystemDirectoryHandle | undefined,
     };
   }
 
@@ -339,7 +338,10 @@ export class ForgeFileSystem {
 
 }
 
-(window as any).ForgeFileSystem = ForgeFileSystem
+// Debug handle for the browser console; absent when imported outside a window (tests, workers).
+if(typeof window !== "undefined"){
+  (window as any).ForgeFileSystem = ForgeFileSystem;
+}
 
 export const supportedFilePickerTypes: any[] = [
   {

@@ -40,6 +40,11 @@ export class ActionFollowLeader extends Action {
 
       this.target = GameState.PartyManager.party[0];
 
+      if(GameState.SOLOMODE && this.owner !== this.target){
+        this.owner.setAnimationState(ModuleCreatureAnimState.IDLE);
+        return ActionStatus.COMPLETE;
+      }
+
       const follow_destination = GameState.PartyManager.GetFollowPosition(this.owner as any);
       const distance = Utility.Distance2D(this.owner.position, this.target.position.clone());
       if(distance > 5){

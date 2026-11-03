@@ -22,6 +22,7 @@ export class Planetary {
   static selected: Planet;
 
   static models: Map<string, OdysseyModel> = new Map();
+  static readonly MASK_BITS = 32;
 
   static async Init(){
 
@@ -47,17 +48,33 @@ export class Planetary {
 
   }
 
+  /**
+   * Back to a fresh game's galaxy map: nothing available, selectable or selected
+   */
+  static Reset(){
+    for(const planet of Planetary.planets ?? []){
+      planet.enabled = false;
+      planet.selectable = false;
+    }
+    Planetary.selectedIndex = -1;
+    Planetary.selected = undefined;
+  }
+
   static SetSelectedPlanet( index = 0 ){
     Planetary.selectedIndex = index;
     Planetary.selected = Planetary.planets[index];
   }
 
   static SetPlanetAvailable(index: number, bState: boolean){
-    Planetary.planets[index].enabled = bState;
+    const planet = Planetary.planets[index];
+    if(!planet){ return; }
+    planet.enabled = bState;
   }
 
   static SetPlanetSelectable(index: number, bState: boolean){
-    Planetary.planets[index].selectable = bState;
+    const planet = Planetary.planets[index];
+    if(!planet){ return; }
+    planet.selectable = bState;
   }
 
   static GetPlanetByGUITag(sTag = ''): Planet{
@@ -80,18 +97,46 @@ export class Planetary {
 
     struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapNumPnts') ).setValue(Planetary.planets.length);
 
-    let planetMask = 0
-    for(let i = 0; i < Planetary.planets.length; i++){
-      let planet = Planetary.planets[i];
-      if(planet.enabled){
-        planetMask |= 1 << planet.id;
-      }
-      planetMask = planetMask >>> 0;
-    }
-    struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapPlntMsk') ).setValue(planetMask);
+    struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapPlntMsk') ).setValue(Planetary.BuildMask((planet) => planet.enabled));
     struct.addField( new GFFField(GFFDataType.INT, 'GlxyMapSelPnt') ).setValue(Planetary.selectedIndex);
 
+    // Not in retail saves; without it every planet reloads unselectable and the map can't travel.
+    struct.addField( new GFFField(GFFDataType.DWORD, 'GlxyMapSelMsk') ).setValue(Planetary.BuildMask((planet) => planet.selectable));
+
     return struct;
+  }
+
+  /** Planet masks are DWORDs: ids outside 0..31 are dropped, since `1 << 32` would alias bit 0. */
+  static BuildMask(predicate: (planet: Planet) => boolean): number {
+    let mask = 0;
+    for(let i = 0; i < Planetary.planets.length; i++){
+      const planet = Planetary.planets[i];
+      if(!predicate(planet)){ continue; }
+      if(!Number.isInteger(planet.id) || planet.id < 0 || planet.id >= Planetary.MASK_BITS){
+        console.warn('Planetary: planet id out of save-mask range', planet.id);
+        continue;
+      }
+      mask |= 1 << planet.id;
+    }
+    return mask >>> 0;
+  }
+
+  static LoadStruct(struct: GFFStruct){
+    if(!struct){ return; }
+    const planetCount = struct.hasField('GlxyMapNumPnts') ? struct.getFieldByLabel('GlxyMapNumPnts').getValue() : 0;
+    const availableMask = struct.hasField('GlxyMapPlntMsk') ? struct.getFieldByLabel('GlxyMapPlntMsk').getValue() : 0;
+    const hasSelectableMask = struct.hasField('GlxyMapSelMsk');
+    // Retail saves carry no selectable mask; treating available planets as selectable keeps travel possible.
+    const selectableMask = hasSelectableMask ? struct.getFieldByLabel('GlxyMapSelMsk').getValue() : availableMask;
+    const selectedIndex = struct.hasField('GlxyMapSelPnt') ? struct.getFieldByLabel('GlxyMapSelPnt').getValue() : -1;
+
+    for(let i = 0; i < Planetary.planets.length; i++){
+      const inSave = i < planetCount && i < Planetary.MASK_BITS;
+      Planetary.SetPlanetAvailable(i, inSave && !!((availableMask >>> i) & 0x01));
+      Planetary.SetPlanetSelectable(i, inSave && !!((selectableMask >>> i) & 0x01));
+    }
+
+    Planetary.SetSelectedPlanet(selectedIndex);
   }
 
 }

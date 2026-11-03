@@ -202,7 +202,9 @@ export const GetItemActivated = defineAction({
   comment: "439: Get the item that was activated in an OnItemActivated script.",
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
-  kotor: unimplemented("GetItemActivated", 439),
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivated;
+  },
 });
 
 export const GetItemActivator = defineAction({
@@ -211,7 +213,9 @@ export const GetItemActivator = defineAction({
   comment: "440: Get the creature that activated the item in an OnItemActivated script.",
   returnType: NWScriptDataType.OBJECT,
   params: [] as const,
-  kotor: unimplemented("GetItemActivator", 440),
+  kotor(this: NWScriptInstance) {
+    return GameState.module?.itemActivator;
+  },
 });
 
 export const GetTotalDamageDealt = defineAction({
@@ -311,18 +315,6 @@ export const CancelPostDialogCharacterSwitch = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [] as const,
   kotor: unimplemented("CancelPostDialogCharacterSwitch", 757),
-});
-
-export const GetInfluence = defineAction({
-  availability: "tsl",
-  id: 795,
-  name: "GetInfluence",
-  comment: "795: Get the PC's influence on a CNPC.",
-  returnType: NWScriptDataType.INTEGER,
-  params: [intParam("nNPC")] as const,
-  tsl(this: NWScriptInstance, nNPC) {
-    return GameState.PartyManager.InfluenceMap.get(nNPC) ?? -1;
-  },
 });
 
 export const QueueMovie = defineAction({
@@ -454,36 +446,6 @@ export const AdjustCreatureAttributes = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [objectParam<any>("oObject"), intParam("nAttribute"), intParam("nAmount")] as const,
   tsl: unimplemented("AdjustCreatureAttributes", 833),
-});
-
-export const GetPUPOwner = defineAction({
-  availability: "tsl",
-  id: 841,
-  name: "GetPUPOwner",
-  comment: "841: Get the owner of a party puppet.",
-  returnType: NWScriptDataType.OBJECT,
-  params: [objectParam<any>("oPUP", { optional: true, default: undefined })] as const,
-  tsl: unimplemented("GetPUPOwner", 841),
-});
-
-export const GetIsPuppet = defineAction({
-  availability: "tsl",
-  id: 842,
-  name: "GetIsPuppet",
-  comment: "842: Determine whether the target is a party puppet.",
-  returnType: NWScriptDataType.INTEGER,
-  params: [objectParam<any>("oPUP", { optional: true, default: undefined })] as const,
-  tsl: unimplemented("GetIsPuppet", 842, 0),
-});
-
-export const ActionFollowOwner = defineAction({
-  availability: "tsl",
-  id: 843,
-  name: "ActionFollowOwner",
-  comment: "843: Have the creature follow its owner.",
-  returnType: NWScriptDataType.VOID,
-  params: [floatParam("fRange", { optional: true, default: 2.5 })] as const,
-  tsl: unimplemented("ActionFollowOwner", 843),
 });
 
 export const ActionSwitchWeapons = defineAction({
@@ -908,9 +870,7 @@ export const SavePUPByObject = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [intParam("nPUP"), objectParam<any>("oidPuppet")] as const,
   tsl(this: NWScriptInstance, nPUP, oidPuppet) {
-    if (GameState.PartyManager.Puppets[nPUP]) {
-      GameState.PartyManager.Puppets[nPUP].available = BitWise.InstanceOfObject(oidPuppet, ModuleObjectType.ModuleCreature) ? true : GameState.PartyManager.Puppets[nPUP].available;
-    }
+    GameState.PartyManager.AddAvailablePUPByObject(nPUP, oidPuppet);
   },
 });
 
@@ -989,7 +949,6 @@ export const missingActions = [
   EffectLightsaberThrow,
   ChangeItemCost,
   CancelPostDialogCharacterSwitch,
-  GetInfluence,
   QueueMovie,
   PlayMovieQueue,
   IsStealthed,
@@ -998,9 +957,6 @@ export const missingActions = [
   GetSpellBaseForcePointCost,
   HasLineOfSight,
   AdjustCreatureAttributes,
-  GetPUPOwner,
-  GetIsPuppet,
-  ActionFollowOwner,
   ActionSwitchWeapons,
   GetSpellAcquired,
   SetFakeCombatState,

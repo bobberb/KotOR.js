@@ -311,7 +311,7 @@ export class InGameOverlay extends GameMenu {
 
       this.TB_SOLO.addEventListener('click', (e) => {
         e.stopPropagation();
-        GameState.SOLOMODE = !GameState.SOLOMODE;
+        GameState.PartyManager.SetSoloMode(!GameState.SOLOMODE);
       }).setKeymapAction(KeyMapAction.PartyActive).setTooltipText(
         GameState.TLKManager.TLKStrings[TLK_TOOLTIP_SOLOMODE].Value
       );

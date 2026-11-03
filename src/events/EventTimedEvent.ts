@@ -3,6 +3,7 @@ import { GameEventType } from "@/enums/events/GameEventType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { GFFDataType } from "@/enums/resource/GFFDataType";
 import type { NWScriptInstance } from "@/nwscript/NWScriptInstance";
+import type { IMiniGameEventContext } from "@/module/ModuleMiniGame";
 import { GFFField } from "@/resource/GFFField";
 import { GFFStruct } from "@/resource/GFFStruct";
 import { BitWise } from "@/utility/BitWise";
@@ -19,6 +20,8 @@ import { GameEvent } from "@/events/GameEvent";
  */
 export class EventTimedEvent extends GameEvent {
   offset: number;
+  /** Minigame event context captured by DelayCommand inside a minigame handler (runtime only, not saved). */
+  miniGameContext?: IMiniGameEventContext;
 
   constructor(){
     super();
@@ -64,18 +67,23 @@ export class EventTimedEvent extends GameEvent {
     if(!this.script){ return; }
     this.script.setCaller(this.getCaller());
     this.script.seekTo(this.offset);
+    const miniGame = GameState.module?.area?.miniGame;
+    if(this.miniGameContext && miniGame){
+      miniGame.runInContext(this.miniGameContext, () => this.script.runScript());
+      return;
+    }
     this.script.runScript();
   }
 
   export(){
     let struct = new GFFStruct( 0xABCD );
 
-    struct.addField( new GFFField(GFFDataType.DWORD, 'CallerId') ).setValue( BitWise.InstanceOfObject(this.script.caller, ModuleObjectType.ModuleObject) ? this.script.caller.id : 2130706432 );
+    struct.addField( new GFFField(GFFDataType.DWORD, 'CallerId') ).setValue( GameEvent.IsLiveOwner(this.script.caller) ? this.script.caller.id : 2130706432 );
     struct.addField( new GFFField(GFFDataType.DWORD, 'Day') ).setValue(this.day);
     let eventData = struct.addField( new GFFField(GFFDataType.STRUCT, 'EventData') );
     eventData.addChildStruct( this.script.saveEventSituation() );
     struct.addField( new GFFField(GFFDataType.DWORD, 'EventId') ).setValue(this.id);
-    struct.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( BitWise.InstanceOfObject(this.script.object, ModuleObjectType.ModuleObject) ? this.script.object.id : 2130706432 );
+    struct.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameEvent.IsLiveOwner(this.script.object) ? this.script.object.id : 2130706432 );
     struct.addField( new GFFField(GFFDataType.DWORD, 'Time') ).setValue(this.time);
 
     return struct;

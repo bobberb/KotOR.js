@@ -594,13 +594,15 @@ export class SaveGame {
    */
   async loadInventory(){
     console.log('SaveGame', 'Loading Inventory...');
+    // Loading save B after save A must not stack A's items under B's.
+    GameState.InventoryManager.ClearInventory();
 
     try{
       const buffer = await GameFileSystem.readFile( path.join( CurrentGame.gameinprogress_dir, 'inventory.res'));
       this.inventory = new GFFObject(buffer);
       let invArr = this.inventory.RootNode.getFieldByLabel('ItemList').getChildStructs();
       for(let i = 0; i < invArr.length; i++){
-        GameState.InventoryManager.addItem(GFFObject.FromStruct(invArr[i]));
+        GameState.InventoryManager.addItem(GFFObject.FromStruct(invArr[i]), false, { silent: true });
       }
     }catch(e){
       console.error(e);

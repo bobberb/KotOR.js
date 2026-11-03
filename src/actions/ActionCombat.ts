@@ -77,12 +77,22 @@ export class ActionCombat extends Action {
         this.owner.actionQueue.unshift(attackAction);
       break;
       case CombatActionType.CAST_SPELL:
+        // Talent casts are object-targeted; an AI passing OBJECT_INVALID gets the action dropped.
+        if(!combatAction.target){
+          combatRound.action = undefined;
+          break;
+        }
         const spellAction = new GameState.ActionFactory.ActionCastSpell();
         spellAction.setParameter(0, ActionParameterType.INT, combatAction.spell ? combatAction.spell.id : 0); //Spell Id
         spellAction.setParameter(1, ActionParameterType.INT, combatAction.spellClassIndex);
         spellAction.setParameter(2, ActionParameterType.INT, combatAction.domainLevel); //DomainLevel
         spellAction.setParameter(3, ActionParameterType.INT, 0);
-        spellAction.setParameter(4, ActionParameterType.INT, 0);
+        // Item-granted powers carry their source item so the cast stays free after a save/load (see ActionCastSpell).
+        if(combatAction.spell?.item){
+          spellAction.setParameter(4, ActionParameterType.DWORD, combatAction.spell.item.id);
+        }else{
+          spellAction.setParameter(4, ActionParameterType.INT, 0);
+        }
         spellAction.setParameter(5, ActionParameterType.DWORD, combatAction.target?.id || ModuleObjectConstant.OBJECT_INVALID); //Target Object
         spellAction.setParameter(6, ActionParameterType.FLOAT, combatAction.target.position.x); //Target X
         spellAction.setParameter(7, ActionParameterType.FLOAT, combatAction.target.position.y); //Target Y

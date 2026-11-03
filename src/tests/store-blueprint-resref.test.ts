@@ -44,7 +44,7 @@ describe('ModuleStore blueprint resolution', () => {
 
   test('guards on the same value it looks up', () => {
     const body = loadBody(read('module/ModuleStore.ts'));
-    expect(body).toContain('const blueprint = this.getResRef();');
+    expect(body).toContain('const blueprint = this.getTemplateResRef() || this.getResRef();');
     expect(body).toContain('if(blueprint){');
   });
 

@@ -24,8 +24,8 @@ export const LIP_EDITOR_DEFAULT_HEAD = 'p_bastilah';
 const DEFAULT_HEAD = LIP_EDITOR_DEFAULT_HEAD;
 
 export type TabLIPEditorStateEventListenerTypes =
-TabStateEventListenerTypes & 
-  ''|'onLIPLoaded'|'onPlay'|'onPause'|'onStop'|'onAudioLoad'|'onHeadChange'|
+TabStateEventListenerTypes |
+  'onLIPLoaded'|'onPlay'|'onPause'|'onStop'|'onAudioLoad'|'onHeadChange'|
   'onHeadLoad'|'onKeyFrameSelect'|'onKeyFrameTrackZoomIn'|'onKeyFrameTrackZoomOut'|
   'onAnimate'|'onKeyFramesChange'|'onDurationChange'|'onPhonemesGenerated'|
   'onPhonemeGenerationStart'|'onPhonemeGenerationError'|'onPhonemeGenerationProgress';

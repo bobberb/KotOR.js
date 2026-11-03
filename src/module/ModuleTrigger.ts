@@ -14,9 +14,12 @@ import { EngineMode } from "@/enums/engine/EngineMode";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { ActionParameterType, ModuleDoorAnimState, ModuleObjectConstant, SignalEventType } from "@/enums";
 import { ModuleObjectScript } from "@/enums/module/ModuleObjectScript";
+import { SWTrapRules } from "@/engine/rules/SWTrapRules";
 
 
 const OBJECTS_INSIDE_UPDATE_THRESHOLD = 15; // 15 frame ticks
+/** Seconds a spent one-shot trap lingers so its queued OnTrapTriggered script can run. */
+export const SPENT_TRAP_REMOVE_DELAY = 2;
 
 /**
 * ModuleTrigger class.
@@ -46,6 +49,10 @@ export class ModuleTrigger extends ModuleObject {
   trapTriggered: boolean;
   trapResRef: string;
   trapDetected: boolean = false;
+  trapDisarmedBy: ModuleObject;
+  /** A one-shot trap that has gone off; removed once trapSpentTimer runs out. */
+  trapSpent: boolean = false;
+  trapSpentTimer: number = 0;
   declare type: ModuleTriggerType;
 
   constructor ( gff = new GFFObject() ) {
@@ -198,11 +205,8 @@ export class ModuleTrigger extends ModuleObject {
         }).then( (model: OdysseyModel3D) => {
           this.trapModel = model;
           this.container.add(model);
-          if(this.trapDetected){
-            this.model.playAnimation('detect', false);
-          }else{
-            this.model.playAnimation('default', false);
-          }
+          // Triggers have no this.model; animate the trap model itself.
+          model?.playAnimation?.(this.trapDetected ? 'detect' : 'default', false);
         });
       });
     }
@@ -246,15 +250,84 @@ export class ModuleTrigger extends ModuleObject {
     GameState.group.triggers.add(this.container);
   }
 
-  detectTrap(){
-    if(this.trapDetected){ return; }
-    this.trapDetected = true;
-
-    if(this.trapDetected){
-      this.model.playAnimation('detect', false);
-    }else{
-      this.model.playAnimation('default', false);
+  /**
+   * Flag the trap as detected by the detector's faction. It becomes visible
+   * (trapDetected, the 'detect' animation in update()) once the party knows it.
+   */
+  detectTrap(detector?: ModuleObject): boolean {
+    // A disabled, spent or removed trap is no longer there to be found.
+    if(this.type == ModuleTriggerType.TRAP && !SWTrapRules.isLive(this)){ return false; }
+    if(detector){
+      this.setTrapDetectedBy(detector, true);
     }
+    if(!detector || SWTrapRules.isPartyMember(detector)){
+      this.trapDetected = true;
+    }
+    return true;
+  }
+
+  /** A mine is active while live (not disabled, spent or removed); other triggers by TrapFlag. */
+  isTrapActive(): boolean {
+    if(this.type == ModuleTriggerType.TRAP) return SWTrapRules.isLive(this);
+    return super.isTrapActive();
+  }
+
+  setTrapDetectedBy(detector: ModuleObject, detected = true): boolean {
+    if(!super.setTrapDetectedBy(detector, detected)){ return false; }
+    if(detector && SWTrapRules.isPartyMember(detector)){
+      this.trapDetected = !!detected;
+    }
+    return true;
+  }
+
+  /**
+   * Set the trap off on victim. Only a creature hostile to the trap's faction
+   * sets it off (a party mine never fires on the party). A one-shot trap is
+   * spent afterwards: no longer detectable/disarmable/recoverable, and removed
+   * from the area after SPENT_TRAP_REMOVE_DELAY so its OnTrapTriggered script
+   * still runs with the trap as OBJECT_SELF.
+   * @returns true when the OnTrapTriggered event was queued
+   */
+  fireTrap(victim?: ModuleObject): boolean {
+    if(this.type != ModuleTriggerType.TRAP || this.trapSpent || this.destroyed || !this.isTrapArmed()){ return false; }
+    if(victim && victim !== this && !this.isHostile(victim)){ return false; }
+    if(victim && this.isExemptFromTrap(victim)){ return false; }
+    const oneShot = this.isTrapOneShot();
+    if(oneShot){
+      this.trapSpent = true;
+      this.trapSpentTimer = SPENT_TRAP_REMOVE_DELAY;
+      this.trapFlag = false;
+      this.trapDetectable = false;
+      this.trapDisarmable = false;
+      this.trapDetected = false;
+      this.trapDetectedByFactions.clear();
+    }
+    this.trapTriggered = true;
+    this.triggered = true;
+    if(victim){
+      this.lastObjectEntered = victim;
+    }
+    const event = new GameState.GameEventFactory.EventSignalEvent();
+    event.setCaller(victim || this);
+    event.setObject(this);
+    event.setDay(GameState.module.timeManager.pauseDay);
+    event.setTime(GameState.module.timeManager.pauseTime);
+    event.eventType = SignalEventType.OnTrapTriggered;
+    GameState.module.addEvent(event);
+    return true;
+  }
+
+  /** Neutralise the trap (disarmed or recovered): runs OnDisarm and removes it. */
+  disarmTrap(disarmer?: ModuleObject){
+    if(this.type != ModuleTriggerType.TRAP || this.destroyed){ return; }
+    this.trapFlag = false;
+    this.trapDisarmedBy = disarmer;
+    const onDisarm: any = this.scripts[ModuleObjectScript.TriggerOnDisarm];
+    if(onDisarm){
+      const instance = typeof onDisarm.newInstance === 'function' ? onDisarm.newInstance() : onDisarm;
+      instance?.run?.(this);
+    }
+    this.destroy();
   }
 
   //Some modules have exit triggers that are placed in the same location that the player spawns into
@@ -309,13 +382,47 @@ export class ModuleTrigger extends ModuleObject {
     return this.type == ModuleTriggerType.TRAP;
   }
 
+  /** False once disabled: TrapFlag 0 (SetTrapDisabled, a disarmed or spent trap). Unset counts as armed. */
+  isTrapArmed(): boolean {
+    return !(this.trapFlag === false || (this.trapFlag as any) === 0);
+  }
+
   canTrigger(object: ModuleObject): boolean {
+    if(!this.isTrapArmed() || this.trapSpent){ return false; }
+    if(this.isExemptFromTrap(object)){ return false; }
     return this.isHostile(object) && (!this.triggered || !this.trapOneShot);
+  }
+
+  /** A party-set mine never goes off on (or even notices) a party member, whatever their faction's standing. */
+  isExemptFromTrap(object: ModuleObject): boolean {
+    return !!object && !!this.setByPlayerParty && SWTrapRules.isPartyMember(object);
+  }
+
+  /** One-shot unless TrapOneShot says otherwise (an unset field counts as one-shot). */
+  isTrapOneShot(): boolean {
+    return this.trapOneShot === undefined || this.trapOneShot === null || !!this.trapOneShot;
+  }
+
+  /** SetTrapDisabled: disarm the trap in place; nobody can see or target it any more. */
+  disableTrap(){
+    super.disableTrap();
+    this.trapDetected = false;
+  }
+
+  /** Counts down a spent one-shot trap and removes it. @returns true once removed */
+  updateSpentTrap(delta = 0): boolean {
+    if(!this.trapSpent || this.destroyed){ return false; }
+    this.trapSpentTimer -= delta;
+    if(this.trapSpentTimer > 0){ return false; }
+    this.destroy();
+    return true;
   }
 
   update(delta = 0){
     
     super.update(delta);
+
+    if(this.updateSpentTrap(delta)){ return; }
     
     if(!this.room) this.getCurrentRoom();
     try{
@@ -389,6 +496,8 @@ export class ModuleTrigger extends ModuleObject {
       this.lastObjectEntered = object;
 
       if(this.type == ModuleTriggerType.TRAP){
+        // canTrigger applies every refusal fireTrap does (disabled, spent, party
+        // exemption, hostility), so past it the trap really goes off.
         if(!this.canTrigger(object)){ return; }
         this.onEnter(object);
         this.triggered = true;
@@ -445,17 +554,8 @@ export class ModuleTrigger extends ModuleObject {
 
   onEnter(object?: ModuleObject){
     if(!object){ return; }
-    if(this.type == ModuleTriggerType.TRAP && !this.trapTriggered){
-      if(object.isHostile(this)){
-        this.trapTriggered = true;
-        const event = new GameState.GameEventFactory.EventSignalEvent();
-        event.setCaller(object);
-        event.setObject(this);
-        event.setDay(GameState.module.timeManager.pauseDay);
-        event.setTime(GameState.module.timeManager.pauseTime);
-        event.eventType = SignalEventType.OnTrapTriggered;
-        GameState.module.addEvent(event);
-      }
+    if(this.type == ModuleTriggerType.TRAP){
+      this.fireTrap(object);
     }else if(this.linkedToModule && (GameState.Mode != EngineMode.DIALOG)){
       if(object == GameState.getCurrentPlayer()){
         GameState.LoadModule(this.linkedToModule.toLowerCase(), this.linkedTo.toLowerCase());
@@ -609,6 +709,33 @@ export class ModuleTrigger extends ModuleObject {
     if(this.template.RootNode.hasField('TrapDetectDC'))
       this.trapDetectDC = this.template.getFieldByLabel('TrapDetectDC').getValue();
 
+    if(this.template.RootNode.hasField('TrapDisarmDC'))
+      this.trapDisarmDC = this.template.getFieldByLabel('TrapDisarmDC').getValue();
+
+    if(this.template.RootNode.hasField('CreatorId'))
+      this.trapCreatorId = this.template.getFieldByLabel('CreatorId').getValue();
+
+    if(this.template.RootNode.hasField('TrapDetected'))
+      this.trapDetected = !!this.template.getFieldByLabel('TrapDetected').getValue();
+
+    // Saved inside the spent window (e.g. a quicksave right after the blast): stays spent, removed on the next update.
+    if(this.template.RootNode.hasField('TrapSpent') && this.template.getFieldByLabel('TrapSpent').getValue()){
+      this.trapSpent = true;
+      this.trapSpentTimer = 0;
+      this.trapTriggered = true;
+      this.triggered = true;
+    }
+
+    if(this.template.RootNode.hasField('TrapDetectedBy')){
+      this.trapDetectedByFactions.clear();
+      for(const struct of this.template.getFieldByLabel('TrapDetectedBy').getChildStructs()){
+        if(struct.hasField('FactionId')){
+          this.trapDetectedByFactions.add(struct.getFieldByLabel('FactionId').getValue());
+        }
+      }
+    }
+    // (A disabled mine's detection is cleared once TrapFlag is known, below.)
+
     if(this.template.RootNode.hasField('TrapFlag'))
       this.trapFlag = this.template.getFieldByLabel('TrapFlag').getValue();
 
@@ -637,26 +764,7 @@ export class ModuleTrigger extends ModuleObject {
       this.zOrientation = this.template.RootNode.getFieldByLabel('ZOrientation').getValue();
 
     if(this.template.RootNode.hasField('SWVarTable')){
-      const swVarTableStruct = this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0];
-      if(swVarTableStruct){
-        if(swVarTableStruct.hasField('BitArray')){
-          const localBools = swVarTableStruct.getFieldByLabel('BitArray').getChildStructs();
-          for(let i = 0; i < localBools.length; i++){
-            const data = localBools[i].getFieldByLabel('Variable').getValue();
-            for(let bit = 0; bit < 32; bit++){
-              this._locals.Booleans[bit + (i*32)] = ( (data>>bit) % 2 != 0);
-            }
-          }
-        }
-
-        if(swVarTableStruct.hasField('ByteArray')){
-          const localNumbers = swVarTableStruct.getFieldByLabel('ByteArray').getChildStructs();
-          for(let i = 0; i < localNumbers.length; i++){
-            const data = localNumbers[i].getFieldByLabel('Variable').getValue();
-            this.setLocalNumber(i, data);
-          }
-        }
-      }
+      this.loadSWVarTable(this.template.RootNode.getFieldByLabel('SWVarTable').getChildStructs()[0]);
     }
 
     try{
@@ -676,12 +784,21 @@ export class ModuleTrigger extends ModuleObject {
     this.initialized = true;
 
     if(this.type == ModuleTriggerType.TRAP){
+      // A disabled trap (TrapFlag 0) can't be shown as detected, whatever the save says.
+      if(!this.isTrapArmed()){
+        this.trapDetected = false;
+        this.trapDetectedByFactions.clear();
+      }
       const trap = GameState.TwoDAManager.datatables.get('traps')?.rows[this.trapType];
       if(trap){
         this.trapName = GameState.TLKManager.GetStringById(trap.name).Value;
         this.trapModelResRef = trap.model;
         this.trapExplosionSound = trap.explosionsound;
         this.trapResRef = trap.resref;
+        // Saves made before TrapDisarmDC/TrapDetectDC were written: fall back to the 2DA row.
+        const dcs = SWTrapRules.rowDCs(trap);
+        if(this.trapDisarmDC === undefined || this.trapDisarmDC === null) this.trapDisarmDC = dcs.disarmDC;
+        if(this.trapDetectDC === undefined || this.trapDetectDC === null) this.trapDetectDC = dcs.detectDC;
       }
     }
 
@@ -708,7 +825,7 @@ export class ModuleTrigger extends ModuleObject {
     let actionList = gff.RootNode.addField( this.actionQueueToActionList() );
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'AutoRemoveKey') ).setValue(this.autoRemoveKey);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Commandable') ).setValue( this.commandable );
-    gff.RootNode.addField( new GFFField(GFFDataType.DWORD, 'CreatorId') ).setValue(2130706432);
+    gff.RootNode.addField( new GFFField(GFFDataType.DWORD, 'CreatorId') ).setValue(this.trapCreatorId ?? ModuleObjectConstant.OBJECT_INVALID);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Cursor') ).setValue(this.cursor);
     gff.RootNode.addField( new GFFField(GFFDataType.DWORD, 'Faction') ).setValue(this.faction ? this.faction.id : this.factionId);
 
@@ -754,9 +871,16 @@ export class ModuleTrigger extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.CEXOLOCSTRING, 'TransitionDestin') ).setValue(this.transitionDestin);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetectDC') ).setValue(this.trapDetectDC);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetectable') ).setValue(this.trapDetectable);
+    // TrapDetected/TrapDetectedBy are engine-local (no known retail field); TrapDisarmDC and CreatorId are UTT/GIT fields.
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetected') ).setValue(this.trapDetected ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapSpent') ).setValue(this.trapSpent ? 1 : 0);
+    this.saveTrapDetectedBy(gff.RootNode);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmDC') ).setValue(this.trapDisarmDC || 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmable') ).setValue(this.trapDisarmable);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue(this.trapFlag);
-    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue(this.trapOneShot);
+    // Write the effective values: an unset TrapFlag/TrapOneShot on a trap means armed/one-shot, not 0.
+    const isTrap = this.type == ModuleTriggerType.TRAP;
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue((isTrap ? this.isTrapArmed() : !!this.trapFlag) ? 1 : 0);
+    gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue((isTrap ? this.isTrapOneShot() : !!this.trapOneShot) ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapType') ).setValue(this.trapType);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'Type') ).setValue(this.type);
     gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'VarTable') );

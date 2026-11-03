@@ -37,6 +37,10 @@ export class ModuleObjectManager {
     if(id == ModuleObjectConstant.OBJECT_INVALID)
       return undefined;
 
+    // The module is not a ModuleObject, so it is not in ObjectList.
+    if(id == ModuleObjectConstant.MODULE_ID)
+      return GameState.module as unknown as ModuleObject;
+
     if(typeof id === 'object'){
       if(id.id >= 1){
         return id;
@@ -75,7 +79,11 @@ export class ModuleObjectManager {
 
   static RemoveObject(object: ModuleObject){
     if(!object) return;
-    this.RemoveObjectById(object.id);
+    // Only unregister this object: another live object may have taken the id meanwhile (a companion rebuilt from a
+    // template while its retired twin waited for its deferred destroy).
+    if(this.ObjectList.get(object.id) === object){
+      this.RemoveObjectById(object.id);
+    }
     GameState.CursorManager.notifyObjectDestroyed(object);
   }
 

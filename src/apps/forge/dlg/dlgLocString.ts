@@ -9,6 +9,7 @@
 import { CExoLocString } from "@/resource/CExoLocString";
 import { CExoLocSubString } from "@/resource/CExoLocSubString";
 import type { ForgeDLG } from "@/apps/forge/dlg/ForgeDLG";
+import type { ForgeDLGNode } from "@/apps/forge/dlg/ForgeDLGTypes";
 import { getLocalizationSettings, pickLocStringOverride } from "@/apps/forge/settings/forgeLocalizationSettings";
 
 export type DlgTlkLookup = (strRef: number) => string | undefined;

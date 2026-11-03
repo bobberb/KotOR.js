@@ -10,6 +10,14 @@ import { NWScriptDataType } from "@/enums/nwscript/NWScriptDataType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { BitWise } from "@/utility/BitWise";
 import type { INWScriptDefAction } from "@/interface/nwscript/INWScriptDefAction";
+import { mgDefaultOnBulletHit, mgDefaultOnDamage, mgDefaultOnDeath, mgDefaultOnObstacleHit, mgSetHitPoints } from "@/nwscript/builtins/minigame";
+
+/*
+ * Deliberate divergences from upstream (pinned in routinePort.test.ts):
+ * #591/#592/#598/#605 run the engine default handlers instead of commented-out no-ops;
+ * #604 sets the follower's hit points (upstream ran the caller's OnDamage);
+ * #625/#632 read/write the bullet model name (upstream returned/overwrote the bullet GFF template).
+ */
 
 /** Upstream 002dfe03, action #521: upstream-body-changed. */
 export const SWMG_GetLateralAccelerationPerSecond: INWScriptDefAction = {
@@ -40,9 +48,7 @@ export const SWMG_OnBulletHit: INWScriptDefAction = {
     type: NWScriptDataType.VOID,
     args: [],
     action: function(this: NWScriptInstance, args: []){
-      if(BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)){
-        //return this.caller.onBulletHit();
-      }
+      mgDefaultOnBulletHit(this.caller);
     }
   };
 
@@ -53,9 +59,7 @@ export const SWMG_OnObstacleHit: INWScriptDefAction = {
     type: NWScriptDataType.VOID,
     args: [],
     action: function(this: NWScriptInstance, args: []){
-      if(BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleMGObstacle)){
-        //return this.caller.onObstacleHit();
-      }
+      mgDefaultOnObstacleHit(this.caller);
     }
   };
 
@@ -66,9 +70,7 @@ export const SWMG_OnDeath: INWScriptDefAction = {
     type: NWScriptDataType.VOID,
     args: [],
     action: function(this: NWScriptInstance, args: []){
-      if(BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)){
-        //this.caller.onDeath();
-      }
+      mgDefaultOnDeath(this.caller);
     }
   };
 
@@ -79,9 +81,7 @@ export const SWMG_SetFollowerHitPoints: INWScriptDefAction = {
     type: NWScriptDataType.VOID,
     args: [NWScriptDataType.OBJECT, NWScriptDataType.INTEGER],
     action: function(this: NWScriptInstance, args: [ModuleObject, number]){
-      if(BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)){
-        this.caller.onDamaged();
-      }
+      mgSetHitPoints(args[0], args[1]);
     }
   };
 
@@ -92,9 +92,7 @@ export const SWMG_OnDamage: INWScriptDefAction = {
     type: NWScriptDataType.VOID,
     args: [],
     action: function(this: NWScriptInstance, args: []){
-      if(BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)){
-        //this.caller.onDamaged();
-      }
+      mgDefaultOnDamage(this.caller);
     }
   };
 
@@ -121,7 +119,7 @@ export const SWMG_GetGunBankBulletModel: INWScriptDefAction = {
       if(!Array.isArray(banks)) return '';
       const bank = banks[args[1]];
       if(!bank) return '';
-      return bank.bulletTemplate ?? '';
+      return bank.proto_bullet?.model_name ?? '';
     }
   };
 
@@ -150,8 +148,8 @@ export const SWMG_SetGunBankBulletModel: INWScriptDefAction = {
       const banks = (args[0] as any)?.gunBanks;
       if(!Array.isArray(banks)) return;
       const bank = banks[args[1]];
-      if(!bank) return;
-      bank.bulletTemplate = args[2];
+      if(!bank?.proto_bullet) return;
+      bank.proto_bullet.model_name = args[2];
       return;
     }
   };

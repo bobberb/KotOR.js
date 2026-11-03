@@ -60,7 +60,7 @@ export class TabState extends EventListenerModel {
   /** Status bar item ids published by this tab (`tab:{id}:…`). */
   #statusBarItemIds: string[] = [];
   
-  #tabContentView: JSX.Element = (<></>);
+  #tabContentView: React.JSX.Element = (<></>);
 
   #_onSaveStateChanged: (file: EditorFile) => void;
   #_onNameChanged: (file: EditorFile) => void;
@@ -274,7 +274,7 @@ export class TabState extends EventListenerModel {
     return this.#tabContentView;
   }
 
-  setContentView(tabContentView: JSX.Element){
+  setContentView(tabContentView: React.JSX.Element){
     this.#tabContentView = tabContentView;
   }
 
@@ -450,8 +450,8 @@ export class TabState extends EventListenerModel {
       return this.saveTypes.length ? Object.values(this.saveTypes.map( (type) => {
         return {
           name: type.description,
-          extensions: Object.keys(type.accept).map( (node) => {
-            return typeof type.accept[node] === 'string' ? type.accept[node].replace('.', '') : type.accept[node].map( (type) => type.replace('.', ''));
+          extensions: Object.values(type.accept || {}).map( (extensions) => {
+            return typeof extensions === 'string' ? extensions.replace('.', '') : extensions.map( (extension) => extension.replace('.', ''));
           }).flat()
         }
       })) : [

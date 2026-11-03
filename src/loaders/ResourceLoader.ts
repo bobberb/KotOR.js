@@ -94,7 +94,7 @@ export class ResourceLoader {
 
     const scope = ResourceLoader.CacheScopes[CacheScope.MODULE];
     await Promise.all(archives.map(async (archive) => {
-      if(isRIMArchive(archive) || archive instanceof RIMObject){
+      if(archive instanceof RIMObject || isRIMArchive(archive)){
         const resources = archive.resources;
         for(let i = 0; i < resources.length; i++){
           const resource = resources[i];
@@ -105,7 +105,7 @@ export class ResourceLoader {
             buffer
           );
         }
-      }else if(isERFArchive(archive) || archive instanceof ERFObject){
+      }else if(archive instanceof ERFObject || isERFArchive(archive)){
         const keyList = archive.keyList;
         for(let i = 0; i < keyList.length; i++){
           const key = keyList[i];
@@ -282,13 +282,13 @@ export class ResourceLoader {
 
     for(let i = 0; i < archiveCount; i++){
       const archive = this.ModuleArchives[i];
-      if(isRIMArchive(archive) || archive instanceof RIMObject){
+      if(archive instanceof RIMObject || isRIMArchive(archive)){
         if(!archive.hasResource(resRef, resId)){ continue; }
         const data = await archive.getResourceBufferByResRef(resRef, resId);
         if(data){
           return data;
         }
-      }else if(isERFArchive(archive) || archive instanceof ERFObject){
+      }else if(archive instanceof ERFObject || isERFArchive(archive)){
         if(!archive.hasResource(resRef, resId)){ continue; }
         const data = await archive.getResourceBufferByResRef(resRef, resId);
         if(data){

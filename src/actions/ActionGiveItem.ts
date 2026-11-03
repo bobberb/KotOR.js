@@ -50,13 +50,19 @@ export class ActionGiveItem extends Action {
       return ActionStatus.FAILED;
     }
 
+    const party = GameState.PartyManager.party;
+    if(party.indexOf(this.owner as any) >= 0 && party.indexOf(oGiveTo as any) >= 0){
+      // The party shares one inventory: nothing changes hands, no item events.
+      return ActionStatus.COMPLETE;
+    }
+
     const removed = this.owner.removeItem(oItem, oItem.getStackSize());
     if(!removed){
       return ActionStatus.FAILED;
     }
 
-    if(GameState.PartyManager.party.indexOf(oGiveTo as any) >= 0){
-      GameState.InventoryManager.addItem(removed);
+    if(party.indexOf(oGiveTo as any) >= 0){
+      GameState.InventoryManager.addItem(removed, false, { acquiredFrom: this.owner });
     }else{
       oGiveTo.addItem(removed);
     }

@@ -19,6 +19,10 @@ export const ActionGiveItem = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [objectParam<ModuleObject>("oItem"), objectParam<ModuleObject>("oGiveTo")] as const,
   kotor(this, oItem, oGiveTo) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) {
+      return;
+    }
+
     if (!BitWise.InstanceOfObject(oItem, ModuleObjectType.ModuleItem)) {
       return;
     }
@@ -41,6 +45,10 @@ export const ActionTakeItem = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [objectParam<ModuleObject>("oItem"), objectParam<ModuleObject>("oTakeFrom")] as const,
   kotor(this, oItem, oTakeFrom) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) {
+      return;
+    }
+
     if (!BitWise.InstanceOfObject(oItem, ModuleObjectType.ModuleItem)) {
       return;
     }

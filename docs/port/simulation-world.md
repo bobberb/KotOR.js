@@ -52,7 +52,7 @@ These are deliberate dependencies on the other slices of the integrated port, no
 - `EffectVisualEffect` asynchronous loading/removal must cooperate with the location-effect attached object and must not resurrect visuals after disposal.
 - `ModuleItem.save()` returns a `GFFStruct`; creature and module entity saves retain their existing `GFFObject` contracts.
 
-Minigame runtime-state persistence is explicitly unsupported in the original contribution for the marked classes. This port preserves that limitation; it does not claim to add complete mid-minigame save/load support.
+Minigame runtime-state persistence is explicitly unsupported in the original contribution for the marked classes. This port preserves that limitation; it does not claim to add complete mid-minigame save/load support. Saving is refused while a minigame is active. Swoop/turret gameplay, events and `SWMG_*` routines are documented in [minigames.md](minigames.md).
 
 ## Validation
 

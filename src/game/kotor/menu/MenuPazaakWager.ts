@@ -1,6 +1,7 @@
 import { GameState } from "@/GameState";
 import { GameMenu } from "@/gui";
 import type { GUILabel, GUIButton } from "@/gui";
+import { clampWager } from "@/engine/minigames/PazaakRules";
 
 /** TLK 32321: "Max wager" label prefix */
 const TLK_MAX_WAGER = 32321;
@@ -115,7 +116,7 @@ export class MenuPazaakWager extends GameMenu {
     const playerGold = this.getPlayerGold();
     const maxWager = Math.min(pm.MaxWager, playerGold);
 
-    pm.Wager = Math.max(pm.MinWager, Math.min(pm.Wager, maxWager));
+    pm.Wager = clampWager(pm.Wager, pm.MinWager, pm.MaxWager, playerGold);
 
     this.LBL_WAGERVAL.setText(pm.Wager.toString());
 

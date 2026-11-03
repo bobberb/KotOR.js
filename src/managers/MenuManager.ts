@@ -55,7 +55,9 @@ export class MenuManager {
   static MenuCharacter: KOTOR.MenuCharacter;
   static MenuChemicals: TSL.MenuChemicals;
   static MenuContainer: KOTOR.MenuContainer;
+  static MenuCredits: KOTOR.MenuCredits;
   static MenuEquipment: KOTOR.MenuEquipment;
+  static MenuGameOver: KOTOR.MenuGameOver;
   static MenuFeedback: KOTOR.MenuFeedback;
   static MenuGalaxyMap: KOTOR.MenuGalaxyMap;
   static MenuGameplay: KOTOR.MenuGameplay;
@@ -253,7 +255,46 @@ export class MenuManager {
     await menu.load();
     PerformanceMonitor.stop(menuConstructor.name+'.GameMenuLoader');
     return menu;
-  }  
+  }
+
+  /*
+   * Built on first use rather than with the in-game menus: a GUI resource
+   * missing from one game's data must not take the whole in-game menu set
+   * down with it (LoadInGameMenus loads them through one Promise.all).
+   */
+  static async GetMenuGameOver(): Promise<KOTOR.MenuGameOver> {
+    return MenuManager.LazyMenu('MenuGameOver',
+      GameState.GameKey == GameEngineType.TSL ? TSL.MenuGameOver : KOTOR.MenuGameOver
+    ) as Promise<KOTOR.MenuGameOver>;
+  }
+
+  static async GetMenuCredits(): Promise<KOTOR.MenuCredits> {
+    return MenuManager.LazyMenu('MenuCredits',
+      GameState.GameKey == GameEngineType.TSL ? TSL.MenuCredits : KOTOR.MenuCredits
+    ) as Promise<KOTOR.MenuCredits>;
+  }
+
+  static #lazyBuilds: Map<string, Promise<GameMenu>> = new Map();
+
+  /**
+   * Build a menu once and cache it on MenuManager[key]. Callers that arrive
+   * while it is still loading share that build: a second instance would
+   * replace the first in the cache while the first is already on screen.
+   */
+  static LazyMenu(key: 'MenuGameOver' | 'MenuCredits', menuConstructor: any): Promise<GameMenu> {
+    if(MenuManager[key]){ return Promise.resolve(MenuManager[key]); }
+    let build = MenuManager.#lazyBuilds.get(key);
+    if(!build){
+      build = MenuManager.GameMenuLoader(menuConstructor).then((menu) => {
+        MenuManager[key] = menu as any;
+        return menu;
+      }).finally(() => {
+        MenuManager.#lazyBuilds.delete(key);
+      });
+      MenuManager.#lazyBuilds.set(key, build);
+    }
+    return build;
+  }
   
   static async LoadMainGameMenus(){
     try{

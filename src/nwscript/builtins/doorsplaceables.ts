@@ -109,7 +109,12 @@ export const DoDoorAction = defineAction({
       switch (nDoorAction) {
         case 0: oTargetDoor.openDoor(this.caller); break;
         case 1: oTargetDoor.attemptUnlock(this.caller); break;
-        case 2: this.caller.attackCreature(oTargetDoor); break;
+        case 2:
+          // Bashing needs a creature; the module (Mod_* OBJECT_SELF) cannot.
+          if (BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) {
+            this.caller.attackCreature(oTargetDoor);
+          }
+        break;
       }
     }
   },
@@ -136,6 +141,7 @@ export const ActionUnlockObject = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [objectParam<ModuleObject>("oTarget")] as const,
   kotor(this: NWScriptInstance, oTarget) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     if (!BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleDoor) && !BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModulePlaceable)) return;
     const action = new GameState.ActionFactory.ActionUnlockObject();
     action.setParameter(0, ActionParameterType.DWORD, oTarget);
@@ -150,6 +156,7 @@ export const ActionLockObject = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [objectParam<ModuleObject>("oTarget")] as const,
   kotor(this: NWScriptInstance, oTarget) {
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     if (!BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleDoor) && !BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModulePlaceable)) return;
     const action = new GameState.ActionFactory.ActionLockObject();
     action.setParameter(0, ActionParameterType.DWORD, oTarget);

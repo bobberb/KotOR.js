@@ -32,6 +32,9 @@ export class ActionExamineMine extends Action {
   update(delta?: number): ActionStatus {
 
     this.target = this.getParameter<ModuleObject>(0);
+    if(!this.target){
+      return ActionStatus.FAILED;
+    }
 
     if(BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)){
       let distance = Utility.Distance2D(this.owner.position, this.target.position);

@@ -376,36 +376,13 @@ export const PazaakConfig = {
         ]
       },
       {
-        name: "1±2",
-        type: 1,
-        modifier: [1, 2],
-        modifierLabel: "1±2",
-        reversible: true,
-        negateModifier: true,
-        textures: [
-          'pcards_gold_p',
-          'pcards_gold_p'
-        ]
-      },
-      {
         name: "Double",
         type: 1,
-        modifier: [1, 0],
+        modifier: [0, 0],
         modifierLabel: "D",
         reversible: false,
         negateModifier: false,
-        textures: [
-          'pcards_gold_p',
-          'pcards_gold_p'
-        ]
-      },
-      {
-        name: "Tie Breaker",
-        type: 1,
-        modifier: [1, 0],
-        modifierLabel: "±1T",
-        reversible: false,
-        negateModifier: false,
+        effect: 'double' as const,
         textures: [
           'pcards_gold_p',
           'pcards_gold_p'
@@ -414,10 +391,12 @@ export const PazaakConfig = {
       {
         name: "Flip2&4",
         type: 1,
-        modifier: [-1, -1],
+        modifier: [0, 0],
         modifierLabel: "2&4",
-        reversible: true,
+        reversible: false,
         negateModifier: false,
+        effect: 'flip' as const,
+        flipValues: [2, 4],
         textures: [
           'pcards_gold_p',
           'pcards_gold_p'
@@ -426,8 +405,36 @@ export const PazaakConfig = {
       {
         name: "Flip 3&6",
         type: 1,
-        modifier: [-1, -1],
+        modifier: [0, 0],
         modifierLabel: "3&6",
+        reversible: false,
+        negateModifier: false,
+        effect: 'flip' as const,
+        flipValues: [3, 6],
+        textures: [
+          'pcards_gold_p',
+          'pcards_gold_p'
+        ]
+      },
+      {
+        name: "Tie Breaker",
+        type: 1,
+        modifier: [1, -1],
+        modifierLabel: "±1T",
+        reversible: true,
+        negateModifier: false,
+        effect: 'tiebreaker' as const,
+        textures: [
+          'pcards_gold_p',
+          'pcards_gold_p'
+        ]
+      },
+      {
+        name: "1±2",
+        type: 1,
+        modifier: [1, -1],
+        altModifier: [2, -2],
+        modifierLabel: "1±2",
         reversible: true,
         negateModifier: false,
         textures: [

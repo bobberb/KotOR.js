@@ -37,6 +37,8 @@ export const GetNearestCreature = defineAction({
     intParam("nThirdCriteriaValue"),
   ] as const,
   kotor(this: NWScriptInstance, nFirstCriteriaType, nFirstCriteriaValue, oTarget, nNth, nSecondCriteriaType, nSecondCriteriaValue, nThirdCriteriaType, nThirdCriteriaValue) {
+    // Nearest needs a position (and perception); the module has neither.
+    if (!BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleObject)) return undefined;
     return GameState.ModuleObjectManager.GetNearestCreature(
       nFirstCriteriaType,
       nFirstCriteriaValue,
@@ -104,6 +106,9 @@ export const ActionCastSpellAtObject = defineAction({
     if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) {
       return;
     }
+    if (!BitWise.InstanceOfObject(oTarget, ModuleObjectType.ModuleObject)) {
+      return;
+    }
 
     const action = new GameState.ActionFactory.ActionCastSpell();
     action.setParameter(0, ActionParameterType.INT, nSpell);
@@ -118,6 +123,8 @@ export const ActionCastSpellAtObject = defineAction({
     action.setParameter(9, ActionParameterType.INT, nProjectilePathType);
     action.setParameter(10, ActionParameterType.INT, -1);
     action.setParameter(11, ActionParameterType.INT, -1);
+    action.cheat = !!bCheat;
+    action.instant = !!bInstantSpell;
     this.caller.actionQueue.add(action);
   },
 });
@@ -149,7 +156,7 @@ export const GetSpellSaveDC = defineAction({
   params: [] as const,
   kotor(this: NWScriptInstance) {
     if (BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleCreature)) {
-      (this.caller as ModuleCreature).getSpellSaveDC();
+      return (this.caller as ModuleCreature).getSpellSaveDC();
     }
 
     return 10;

@@ -1,4 +1,5 @@
 import type { GUILabel, GUIButton } from "@/gui";
+import { GameState } from "@/GameState";
 import { MenuPazaakSetup as K1_MenuPazaakSetup } from "@/game/kotor/KOTOR";
 
 /**
@@ -122,6 +123,13 @@ export class MenuPazaakSetup extends K1_MenuPazaakSetup {
     await super.menuControlInitializer(true);
     if(skipInit) return;
     return new Promise<void>((resolve, reject) => {
+      // pazaaksetup_p has no BTN_YTEXT, so the K1 initializer is skipped and
+      // the shared bindings are wired here instead.
+      this.BTN_ATEXT.addEventListener('click', () => {
+        this.close();
+        GameState.MenuManager.MenuPazaakGame.open();
+      });
+      this.bindCardButtons();
       resolve();
     });
   }

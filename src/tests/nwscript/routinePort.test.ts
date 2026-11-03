@@ -1,9 +1,9 @@
 import { beforeAll, describe, expect, jest, test } from "@jest/globals";
 import * as fs from "fs";
 import * as path from "path";
-import * as vm from "vm";
 import * as ts from "typescript";
 import { createHash } from "crypto";
+import { harness } from "./routineHarness";
 
 const root = path.resolve(__dirname, "../../..");
 const fixture = (name: string) => JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8"));
@@ -11,44 +11,29 @@ const baseline = fixture("upstreamActionManifest.json");
 const preservation = fixture("upstreamPreservedBodies.json");
 
 /**
- * Load real definition/registration code without initializing the browser engine.
- * GameState is a controlled fixture; enum values, BitWise and Three are real.
- * This deliberately does not replace the separate full-project type/build check.
+ * Preserved upstream routines whose body we changed on purpose. The fixture keeps
+ * the upstream hash (it is upstream's record, not ours); the divergence is pinned
+ * by a behavioral test below instead. GetFortitude/Will/ReflexSavingThrow: saves
+ * are derived at runtime (ModuleCreature.getTotal*Save()), so the stored
+ * *SaveThrow field upstream returns is only the miscellaneous bonus.
+ * GetNearestTrapToObject (488): upstream read the VM arguments in the wrong
+ * order ([oTarget, nTrapDetected] was taken as [mask, oTarget]) so it always
+ * returned OBJECT_INVALID, ignored nTrapDetected, and tested raw trapFlag.
+ * Now: nearest armed trap (isObjectTrapped) to oTarget, detected by oTarget's
+ * side when nTrapDetected is TRUE. SetTrapDisabled (555): also
+ * clears the trap's detection (ModuleTrigger.disableTrap) so a disabled trap is
+ * not left visible and targetable. Both pinned in traps-security.test.ts.
+ * ActionCastFakeSpellAtObject (501): marks its ActionCastSpell as fake so it
+ * plays animations only, with no FP cost, impact script or combat round
+ * (pinned in force-powers.test.ts).
+ * SWMG_OnBulletHit/OnObstacleHit/OnDeath/OnDamage (591/592/598/605): upstream bodies
+ * were commented-out no-ops; they now run the engine default handlers.
+ * SWMG_SetFollowerHitPoints (604): upstream ran the caller's OnDamage instead of
+ * setting the follower's hit points. SWMG_Get/SetGunBankBulletModel (625/632):
+ * upstream returned/overwrote the bullet GFF template instead of the model name.
+ * Pinned by src/tests/minigames/swoop-turret-routines.test.ts.
  */
-function harness() {
-  const cache = new Map<string, any>();
-  const gameState: any = {};
-  const mock: any = new Proxy(function() {}, {
-    get(target, key) { if (key === "__esModule") return true; if (key === "prototype") return target.prototype; return mock; },
-    construct() { return mock; },
-    apply() { return mock; },
-  });
-  function load(filename: string): any {
-    filename = path.resolve(filename);
-    if (!path.extname(filename)) filename = fs.existsSync(filename + ".ts") ? filename + ".ts" : path.join(filename, "index.ts");
-    if (cache.has(filename)) return cache.get(filename);
-    const exports: any = {};
-    cache.set(filename, exports);
-    const code = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-    }).outputText;
-    const requireModule = (name: string): any => {
-      if (name === "three") return require("three");
-      const resolved = name.startsWith("@/") ? path.join(root, "src", name.slice(2)) : path.resolve(path.dirname(filename), name);
-      if (resolved === path.join(root, "src/GameState")) return { GameState: gameState };
-      if (/\/src\/effects\/(GameEffect|EffectDamage)$/.test(resolved)) return load(resolved);
-      if (resolved.includes("/nwscript/builtins") || resolved.includes("/src/enums/") ||
-          /\/(routineMetadata|reconciledActions|engineRoutineFallbacks|NWScriptConstants|NWScriptDef|NWScriptDefK1|NWScriptDefK2|BitWise)$/.test(resolved)) return load(resolved);
-      return mock;
-    };
-    vm.runInNewContext(code, { exports, require: requireModule, console, Object, Set, Map, WeakSet, Math }, { filename });
-    return exports;
-  }
-  const loadScript = (p: string) => load(path.join(root, "src/nwscript", p));
-  const kotor = loadScript("NWScriptDefK1").NWScriptDefK1.Actions;
-  const tsl = loadScript("NWScriptDefK2").NWScriptDefK2.Actions;
-  return { kotor, tsl, gameState, loadScript, load };
-}
+const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 501, 555, 591, 592, 598, 604, 605, 625, 632]);
 
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });
@@ -77,6 +62,7 @@ describe("ported action-table preservation", () => {
   test("all preserved bodies match independently extracted upstream AST hashes", () => {
     const printer = ts.createPrinter({ removeComments: true });
     for (const entry of preservation.preserved) {
+      if (DELIBERATE_DIVERGENCES.has(entry.id)) continue;
       const file = ts.createSourceFile(entry.file, fs.readFileSync(path.join(root, entry.file), "utf8"), ts.ScriptTarget.Latest, true);
       let body: ts.Node | undefined;
       function visit(node: ts.Node) {
@@ -237,5 +223,35 @@ describe("reconciled and recovered behavior", () => {
       expect(warn).toHaveBeenCalledTimes(2);
       expect(isEngineRoutineFallback(runtime.kotor[139])).toBe(false);
     } finally { warn.mockRestore(); }
+  });
+});
+
+describe("saving throw routines", () => {
+  test.each(["kotor", "tsl"] as const)("%s GetFortitude/Will/ReflexSavingThrow return the derived total, not the stored bonus", (engine) => {
+    const { ModuleObjectType } = runtime.load(path.join(root, "src/enums/module/ModuleObjectType"));
+    const creature = {
+      objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleCreature,
+      // The stored fields hold only the miscellaneous bonus once saves are derived.
+      fortitudeSaveThrow: 1, willSaveThrow: 1, reflexSaveThrow: 1,
+      getTotalFortitudeSave: () => 7, getTotalWillSave: () => 4, getTotalReflexSave: () => 5,
+    };
+    const actions = runtime[engine];
+    expect([491, 492, 493].map((id) => actions[id].name))
+      .toEqual(["GetFortitudeSavingThrow", "GetWillSavingThrow", "GetReflexSavingThrow"]);
+    expect(actions[491].action.call({}, [creature])).toBe(7);
+    expect(actions[492].action.call({}, [creature])).toBe(4);
+    expect(actions[493].action.call({}, [creature])).toBe(5);
+  });
+
+  test("an object without derived saves still reports its stored value, and a non-creature 0", () => {
+    const { ModuleObjectType } = runtime.load(path.join(root, "src/enums/module/ModuleObjectType"));
+    const creature = {
+      objectType: ModuleObjectType.ModuleObject | ModuleObjectType.ModuleCreature,
+      fortitudeSaveThrow: 3, willSaveThrow: 2, reflexSaveThrow: 1,
+    };
+    expect(runtime.kotor[491].action.call({}, [creature])).toBe(3);
+    expect(runtime.kotor[492].action.call({}, [creature])).toBe(2);
+    expect(runtime.kotor[493].action.call({}, [creature])).toBe(1);
+    expect(runtime.kotor[491].action.call({}, [{ objectType: ModuleObjectType.ModuleObject }])).toBe(0);
   });
 });

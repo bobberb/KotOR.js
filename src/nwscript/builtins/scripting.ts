@@ -17,7 +17,8 @@ export const AssignCommand = defineAction({
     actionParam<any>("aActionToAssign"),
   ] as const,
   kotor(this: NWScriptInstance, oActionSubject, aActionToAssign) {
-    if (BitWise.InstanceOfObject(oActionSubject, ModuleObjectType.ModuleObject)) {
+    // AssignCommand(GetModule(), ...) runs the command as the module.
+    if (BitWise.InstanceOfObject(oActionSubject, ModuleObjectType.ModuleObject) || (oActionSubject && (oActionSubject as unknown) === GameState.module)) {
       if (typeof aActionToAssign === "object") {
         aActionToAssign.script.caller = oActionSubject;
         aActionToAssign.script.seekTo(aActionToAssign.offset);
@@ -46,6 +47,8 @@ export const DelayCommand = defineAction({
     timedEvent.setTime(futureTime.pauseTime);
     timedEvent.setNWScript(aActionToDelay.script);
     timedEvent.setInstructionPtr(aActionToDelay.offset);
+    // Delayed actions from a minigame handler still read that event's SWMG_GetLast* values.
+    timedEvent.miniGameContext = GameState.module?.area?.miniGame?.captureContext?.();
 
     if (this.subRoutine instanceof NWScriptSubroutine) {
       this.delayCommands.push(timedEvent);
@@ -99,6 +102,8 @@ export const ActionDoCommand = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [actionParam<any>("aActionToDo")] as const,
   kotor(this: NWScriptInstance, aActionToDo) {
+    // Only live module objects have an action queue; as the module this is discarded, as is a destroyed caller.
+    if (!BitWise.InstanceOfObject(this.caller, ModuleObjectType.ModuleObject)) return;
     this.caller.doCommand(aActionToDo.script);
   },
 });

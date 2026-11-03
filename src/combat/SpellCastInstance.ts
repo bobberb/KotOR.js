@@ -1,10 +1,14 @@
-import type { ModuleObject } from "@/module";
+import type { ModuleCreature, ModuleObject } from "@/module";
 import type { TalentSpell } from "@/talents";
 import * as THREE from "three";
 import { OdysseyModel3D } from "@/three/odyssey";
-import { OdysseyModel } from "@/odyssey";
+import { OdysseyModel, OdysseyModelAnimation } from "@/odyssey";
 import { GameState } from "@/GameState";
 import { MDLLoader } from "@/loaders";
+import { BitWise } from "@/utility/BitWise";
+import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
+import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
+import type { ITwoDAAnimation } from "@/interface/twoDA/ITwoDAAnimation";
 
 /**
  * SpellCastInstance class.
@@ -42,19 +46,37 @@ export class SpellCastInstance {
   casthandvisual: string;
   flags: number;
 
+  /** ActionCastFakeSpellAt*: animations and visuals only, no impact script or combat bookkeeping. */
+  fake: boolean = false;
+  /** bCheat script cast: script intent, so it lands even if the target died meanwhile. */
+  cheat: boolean = false;
   impacted: boolean = false;
+  /** The caster died or was debilitated before impact, so the power never landed. */
+  interrupted: boolean = false;
+  private castAnimationStarted = false;
+  private conjureAnimation: ITwoDAAnimation | undefined;
   completed: boolean = false;
-  conjureTime = 3000;
+  conjureTime: number = 0;
   conjuring: boolean = false;
   castTime: number = 0;
   private disposed = false;
   private handEffectTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(caster: ModuleObject, target: ModuleObject, spell: TalentSpell){
-    this.context = caster.context;
+    this.context = caster?.context;
     this.owner = caster;
     this.target = target;
     this.spell = spell;
+    this.impactscript = spell?.impactscript || '';
+    this.casthandvisual = spell?.casthandvisual || '';
+    // spells.2da conjtime/casttime are milliseconds: conjure, then cast (projectile flight), then impact.
+    this.conjureTime = SpellCastInstance.ParseMilliseconds(spell?.conjtime);
+    this.castTime = SpellCastInstance.ParseMilliseconds(spell?.casttime);
+  }
+
+  static ParseMilliseconds(value: unknown): number {
+    const ms = Number(value);
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
   }
 
   init(){
@@ -74,6 +96,8 @@ export class SpellCastInstance {
       this.projectileTarget.y += Math.random() * 0.5 - 0.25;
       this.projectileCurve.v2.copy(this.projectileTarget);
     }
+
+    this.conjureAnimation = this.playCasterAnimation(this.spell?.getConjureAnimation?.(), ModuleCreatureAnimState.CASTOUT1, true);
 
     if(this.spell.projmodel){
       MDLLoader.loader.load(this.spell.projmodel.toLowerCase())
@@ -97,6 +121,10 @@ export class SpellCastInstance {
 
   update(delta: number = 0){
     if(this.disposed) return;
+    if(!this.impacted && this.shouldAbort()){
+      this.impact();
+      return;
+    }
     if(this.conjureTime > 0){
       this.conjuring = true;
       this.conjureTime -= 1000 * delta;
@@ -107,6 +135,7 @@ export class SpellCastInstance {
       }
     }else if(this.castTime > 0){
       this.conjuring = false;
+      this.startCastAnimation();
       this.castTimeProgress = Math.min(this.castTime / (this.spell.getCastTime() * 0.5), 1);
       if(this.projectile && !this.projectileDistance){
         this.projectileDistance = this.projectileTarget.clone().sub(this.projectileOrigin);
@@ -120,7 +149,8 @@ export class SpellCastInstance {
       this.castTime -= 1000 * delta;
     }else{
       this.conjuring = false;
-      if(this.spell.range == 'L') this.impact();
+      this.startCastAnimation();
+      this.impact();
       this.completed = true;
     }
     this.casthandmodel?.update(delta);
@@ -131,15 +161,21 @@ export class SpellCastInstance {
     if(this.disposed || this.impacted) return;
     this.impacted = true;
 
-    if(this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = true;
-    if(this.target?.combatData) this.target.combatData.lastForcePowerSuccess = true;
+    // A caster that dies or is stunned/paralyzed before the power lands loses it, and a target that dies first
+    // (e.g. killed by someone else mid-conjure) never receives it. Either way the force points stay spent; the
+    // round still reports the power via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
+    if(this.shouldAbort()){
+      if(!this.fake && this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
+      this.releaseConjureAnimation();
+      this.interrupted = true;
+      this.completed = true;
+      this.projectile?.dispose();
+      this.projectile = undefined;
+      return;
+    }
 
-    if(this.impactscript){
-      const instance = GameState.NWScript.Load(this.impactscript);
-      if(instance){
-        instance.talent = this.spell;
-        instance.run(this.owner, 0);
-      }
+    if(!this.fake){
+      this.applyImpact();
     }
 
     if(this.casthandvisual){
@@ -170,8 +206,87 @@ export class SpellCastInstance {
     this.projectile = undefined;
   }
 
+  /** Once, when conjuring ends: the spell's cast (release) animation, played once. */
+  private startCastAnimation(){
+    if(this.castAnimationStarted) return;
+    this.castAnimationStarted = true;
+    const released = this.playCasterAnimation(this.spell?.getCastingAnimation?.(), ModuleCreatureAnimState.CASTOUT1_LP, false);
+    if(!released) this.releaseConjureAnimation();
+  }
+
+  /** Drop the held conjure pose (abort, or a spell with no release clip) so the creature returns to idle/ready. */
+  private releaseConjureAnimation(){
+    if(!this.conjureAnimation || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return;
+    const creature = this.owner as ModuleCreature;
+    if(creature.animationState?.animation === this.conjureAnimation){
+      // Straight to READY in combat, as ModuleCreature.update would on the next frame anyway.
+      creature.setAnimationState(creature.combatData?.combatState ? ModuleCreatureAnimState.READY : ModuleCreatureAnimState.PAUSE);
+    }
+    this.conjureAnimation = undefined;
+  }
+
+  /**
+   * Plays a named animations.2da animation on a creature caster, the way combat rounds play attack animations:
+   * playTwoDAAnimation plus a non-PAUSE state index, otherwise ModuleCreature.update swaps a PAUSE state for READY
+   * in combat before the clip is ever shown. The conjure clip is held (looped) until release; the release clip
+   * plays once, after which the creature's own update returns it to idle (or ready, in combat).
+   */
+  private playCasterAnimation(name: string | undefined, index: ModuleCreatureAnimState, hold: boolean): ITwoDAAnimation | undefined {
+    if(!name || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return undefined;
+    const row = OdysseyModelAnimation.GetAnimation2DA(name);
+    if(!row) return undefined;
+    const animation: ITwoDAAnimation = hold ? { ...row, looping: '1', fireforget: '0' } : { ...row, looping: '0' };
+    const creature = this.owner as ModuleCreature;
+    creature.playTwoDAAnimation(animation);
+    creature.animationState.index = index;
+    return animation;
+  }
+
+  private shouldAbort(): boolean {
+    return this.isCasterIncapacitated() || this.isTargetDead();
+  }
+
+  private isCasterIncapacitated(): boolean {
+    if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return false;
+    return this.owner.isDead() || this.owner.isDebilitated();
+  }
+
+  private isTargetDead(): boolean {
+    // Fake (cutscene visuals) and cheat casts are script intent: they play out even if the target died.
+    if(this.fake || this.cheat || this.target === this.owner) return false;
+    return BitWise.InstanceOfObject(this.target, ModuleObjectType.ModuleCreature) && this.target.isDead();
+  }
+
+  private applyImpact(){
+    if(this.owner?.combatData){
+      this.owner.combatData.lastForcePowerSuccess = true;
+      // Re-assert: a combat round may have begun (and cleared it) between cast start and impact.
+      this.owner.combatData.lastSpellTarget = this.target;
+    }
+    if(this.target?.combatData){
+      this.target.combatData.lastSpellAttacker = this.owner;
+    }
+
+    if(!this.impactscript) return;
+    const instance = GameState.NWScript.Load(this.impactscript);
+    if(!instance) return;
+    if(this.spell){
+      this.spell.oCaster = this.owner;
+      this.spell.oTarget = this.target;
+      this.spell.targetLocation = this.targetLocation.clone();
+    }
+    instance.talent = this.spell;
+    instance.run(this.owner, 0);
+  }
+
+  /** Done for the purposes of whoever waits on it: completed, or torn down (e.g. area unloaded). */
+  isFinished(){
+    return this.completed || this.disposed;
+  }
+
   dispose(){
     if(this.disposed) return;
+    if(!this.castAnimationStarted) this.releaseConjureAnimation();
     this.disposed = true;
     if(this.handEffectTimer !== undefined) clearTimeout(this.handEffectTimer);
     this.handEffectTimer = undefined;
