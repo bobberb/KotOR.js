@@ -31,6 +31,7 @@ jest.mock('@/engine/CurrentGame', () => ({ CurrentGame: { WriteFile: (): void =>
 
 import { GameState } from '@/GameState';
 import { MDLLoader } from '@/loaders';
+import { OdysseyModel3D } from '@/three/odyssey';
 import { ActionCastSpell } from '@/actions/ActionCastSpell';
 import { ActionCombat } from '@/actions/ActionCombat';
 import { ActionMoveToPoint } from '@/actions/ActionMoveToPoint';
@@ -97,7 +98,18 @@ let impactRuns: ImpactRun[];
 let nextId = 1;
 
 /** The spell animations animations.2da names (rows trimmed to the columns the lookup reads). */
-const ANIMATIONS_2DA = { RowCount: 4, rows: [{ name: 'castout1' }, { name: 'castoutlp1' }, { name: 'castout3' }, { name: 'castoutlp3' }] };
+const ANIMATIONS_2DA = (() => {
+  const row = (name: string, looping: string, fireforget = '0') => ({ name, looping, fireforget });
+  const rows: any[] = Array.from({ length: 300 }, (_v, i) => row('unused' + i, '0'));
+  rows[6] = row('pause1', '1');            // PAUSE (healthy)
+  rows[8] = row('pauseinj', '1');          // PAUSE (injured)
+  rows[249] = row('g8r1', '1');            // READY, unarmed
+  rows[10] = row('castout1', '0', '1');    // assumed (no retail 2DA here): conjure clips fire-and-forget,
+  rows[11] = row('castoutlp1', '1');       // release (lp) clips loop
+  rows[12] = row('castout3', '0', '1');
+  rows[13] = row('castoutlp3', '1');
+  return { RowCount: rows.length, rows };
+})();
 
 function installSpells(rows: Record<number, any>){
   TwoDAManager.datatables = new Map([['spells', { rows } as any], ['animations', ANIMATIONS_2DA as any]]);
@@ -1857,14 +1869,159 @@ describe('caster animations', () => {
     expect(caster.animationState.started).toBe(true);
   });
 
-  test('a cast interrupted before release does not play the cast animation', () => {
+  test('a cast interrupted before release drops the held conjure pose and plays no release', () => {
     const caster = makeCreature();
     const target = makeCreature();
     ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
     tick([caster, target], 0.5);
+    expect(caster.animationState.animation?.name).toBe('castout1');
     jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
     tick([caster, target], 3);
-    expect(caster.animationState.animation?.name).toBe('castout1');
+    expect(caster.animationState.index).toBe(ModuleCreatureAnimState.PAUSE);
+    expect(caster.animationState.animation?.name).toBe('pause1');
+  });
+
+  test('an aborted cast does not stomp an animation something else started meanwhile', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 0.5);
+    const scripted: any = { name: 'scripted_anim', looping: '0', fireforget: '1' };
+    caster.playTwoDAAnimation(scripted); // e.g. a script-driven animation
+    jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    tick([caster, target], 0.2);
+    expect(caster.animationState.animation).toBe(scripted);
+  });
+
+  test('a conjure/cast animation name missing from animations.2da plays nothing', () => {
+    // conjanim "throw" on a non-saber spell: conjure "throwgren" (absent from the table), no release clip.
+    installSpells({ [SPELL_ID]: spellRow({ conjanim: 'throw' }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    const play = jest.spyOn(caster, 'playTwoDAAnimation');
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(1);
+    expect(play).not.toHaveBeenCalled();
+  });
+});
+
+describe('caster animations through the creature frame loop (fake model)', () => {
+  const CLIP_SECONDS = 1;
+
+  /** A model that records played clips; non-looping clips end after CLIP_SECONDS, looping ones never do. */
+  function fakeModel(){
+    const model: any = Object.create(OdysseyModel3D.prototype);
+    Object.assign(model, { played: [] as string[], current: '', looping: false, remaining: 0 });
+    model.getAnimationName = () => model.current;
+    model.playAnimation = (name: string, looping: boolean) => {
+      model.played.push(name + (looping ? '(loop)' : ''));
+      Object.assign(model, { current: name, looping, remaining: CLIP_SECONDS });
+    };
+    model.playOverlayAnimation = () => {};
+    model.advance = (delta: number) => {
+      if(model.current && !model.looping && (model.remaining -= delta) <= 0) model.current = '';
+    };
+    return model;
+  }
+
+  /** The order ModuleCreature.update and the area run each frame, for the parts that drive casting animations. */
+  function frames(creatures: ModuleCreature[], seconds: number, delta = 0.05, each?: () => void){
+    for(let t = 0; t < seconds - 1e-9; t += delta){
+      for(const creature of creatures){
+        creature.actionQueue.process(delta);
+        // ModuleCreature.update: in combat, a PAUSE state is swapped for READY before the animation update.
+        if(creature.combatData.combatState && creature.animationState.index == ModuleCreatureAnimState.PAUSE){
+          creature.setAnimationState(ModuleCreatureAnimState.READY);
+        }
+        creature.updateExcitedDuration(delta);
+        creature.combatRound.update(delta);
+      }
+      for(const instance of spellInstances.slice()){
+        instance.update(delta);
+        if(instance.completed) spellInstances.splice(spellInstances.indexOf(instance), 1);
+      }
+      for(const creature of creatures){
+        (creature.model as any)?.advance(delta);
+        creature.updateAnimationState();
+      }
+      each?.();
+    }
+  }
+
+  function setup(){
+    const caster = makeCreature();
+    const target = makeCreature();
+    caster.model = fakeModel();
+    // Settle into the idle pose before casting; record only what the cast plays.
+    frames([caster, target], 0.1);
+    (caster.model as any).played.length = 0;
+    return { caster, target, model: caster.model as any };
+  }
+
+  test('in combat: the conjure pose is shown and held, the release plays, then READY', () => {
+    const { caster, target, model } = setup();
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster); // hostile power: the caster becomes excited
+    let heldThroughConjure = true;
+    let t = 0;
+    frames([caster, target], 6, 0.05, () => {
+      t += 0.05;
+      if(t > 0.2 && t < 1.4 && model.current !== 'castout1') heldThroughConjure = false;
+    });
+    expect(caster.combatData.combatState).toBe(true);
+    expect(heldThroughConjure).toBe(true);
+    expect(model.played).toEqual(['castout1(loop)', 'castoutlp1', 'g8r1(loop)']);
+    expect(caster.animationState.index).toBe(ModuleCreatureAnimState.READY);
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  test('out of combat: conjure, release once (even though the 2DA row loops), then back to idle', () => {
+    const { caster, target, model } = setup();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    frames([caster, target], 1.0);
+    expect(model.current).toBe('castout1');
+    frames([caster, target], 5);
+    expect(caster.combatData.combatState).toBe(false);
+    expect(model.played).toEqual(['castout1(loop)', 'castoutlp1', 'pause1(loop)']);
+    expect(caster.animationState.animation?.name).toBe('pause1');
+  });
+
+  test('a fake (cutscene) cast animates the same way and returns to idle', () => {
+    const { caster, target, model } = setup();
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    frames([caster, target], 6);
+    expect(model.played).toEqual(['castout1(loop)', 'castoutlp1', 'pause1(loop)']);
+    expect(caster.actionQueue).toHaveLength(0);
+  });
+
+  test('a spell whose release clip is missing from animations.2da drops the conjure pose at release', () => {
+    const rows = ANIMATIONS_2DA.rows.map((row: any) => row.name === 'castoutlp1' ? { ...row, name: 'renamed' } : row);
+    TwoDAManager.datatables.set('animations', { RowCount: rows.length, rows } as any);
+    const { caster, target, model } = setup();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    frames([caster, target], 4);
+    expect(model.played).toEqual(['castout1(loop)', 'pause1(loop)']);
+  });
+
+  test('visuals torn down mid-conjure (area unloaded) drop the conjure pose', () => {
+    const { caster, target, model } = setup();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    frames([caster, target], 0.5);
+    spellInstances.pop().dispose();
+    frames([caster, target], 0.2);
+    expect(model.played).toEqual(['castout1(loop)', 'pause1(loop)']);
+  });
+
+  test('an interrupted cast in combat drops the conjure pose to READY', () => {
+    const { caster, target, model } = setup();
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    frames([caster, target], 0.5);
+    expect(model.current).toBe('castout1');
+    const stun = jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    frames([caster, target], 0.1);
+    stun.mockReturnValue(false);
+    frames([caster, target], 0.5);
+    expect(model.played).toEqual(['castout1(loop)', 'g8r1(loop)']);
   });
 });
 

@@ -7,6 +7,8 @@ import { GameState } from "@/GameState";
 import { MDLLoader } from "@/loaders";
 import { BitWise } from "@/utility/BitWise";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
+import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
+import type { ITwoDAAnimation } from "@/interface/twoDA/ITwoDAAnimation";
 
 /**
  * SpellCastInstance class.
@@ -52,6 +54,7 @@ export class SpellCastInstance {
   /** The caster died or was debilitated before impact, so the power never landed. */
   interrupted: boolean = false;
   private castAnimationStarted = false;
+  private conjureAnimation: ITwoDAAnimation | undefined;
   completed: boolean = false;
   conjureTime: number = 0;
   conjuring: boolean = false;
@@ -94,7 +97,7 @@ export class SpellCastInstance {
       this.projectileCurve.v2.copy(this.projectileTarget);
     }
 
-    this.playCasterAnimation(this.spell?.getConjureAnimation?.());
+    this.conjureAnimation = this.playCasterAnimation(this.spell?.getConjureAnimation?.(), ModuleCreatureAnimState.CASTOUT1, true);
 
     if(this.spell.projmodel){
       MDLLoader.loader.load(this.spell.projmodel.toLowerCase())
@@ -163,6 +166,7 @@ export class SpellCastInstance {
     // round still reports the power via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
     if(this.shouldAbort()){
       if(!this.fake && this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
+      this.releaseConjureAnimation();
       this.interrupted = true;
       this.completed = true;
       this.projectile?.dispose();
@@ -202,21 +206,40 @@ export class SpellCastInstance {
     this.projectile = undefined;
   }
 
-  /** Once, when conjuring ends: the spell's cast (release) animation. */
+  /** Once, when conjuring ends: the spell's cast (release) animation, played once. */
   private startCastAnimation(){
     if(this.castAnimationStarted) return;
     this.castAnimationStarted = true;
-    this.playCasterAnimation(this.spell?.getCastingAnimation?.());
+    const released = this.playCasterAnimation(this.spell?.getCastingAnimation?.(), ModuleCreatureAnimState.CASTOUT1_LP, false);
+    if(!released) this.releaseConjureAnimation();
+  }
+
+  /** Drop the held conjure pose (abort, or a spell with no release clip) so the creature returns to idle/ready. */
+  private releaseConjureAnimation(){
+    if(!this.conjureAnimation || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return;
+    const creature = this.owner as ModuleCreature;
+    if(creature.animationState?.animation === this.conjureAnimation){
+      // Straight to READY in combat, as ModuleCreature.update would on the next frame anyway.
+      creature.setAnimationState(creature.combatData?.combatState ? ModuleCreatureAnimState.READY : ModuleCreatureAnimState.PAUSE);
+    }
+    this.conjureAnimation = undefined;
   }
 
   /**
-   * Plays a named animations.2da animation on a creature caster, the way combat rounds play attack animations.
-   * Spell animations have no ModuleCreatureAnimState constant, so they go by name.
+   * Plays a named animations.2da animation on a creature caster, the way combat rounds play attack animations:
+   * playTwoDAAnimation plus a non-PAUSE state index, otherwise ModuleCreature.update swaps a PAUSE state for READY
+   * in combat before the clip is ever shown. The conjure clip is held (looped) until release; the release clip
+   * plays once, after which the creature's own update returns it to idle (or ready, in combat).
    */
-  private playCasterAnimation(name: string | undefined){
-    if(!name || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return;
-    const animation = OdysseyModelAnimation.GetAnimation2DA(name);
-    if(animation) (this.owner as ModuleCreature).playTwoDAAnimation(animation);
+  private playCasterAnimation(name: string | undefined, index: ModuleCreatureAnimState, hold: boolean): ITwoDAAnimation | undefined {
+    if(!name || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return undefined;
+    const row = OdysseyModelAnimation.GetAnimation2DA(name);
+    if(!row) return undefined;
+    const animation: ITwoDAAnimation = hold ? { ...row, looping: '1', fireforget: '0' } : { ...row, looping: '0' };
+    const creature = this.owner as ModuleCreature;
+    creature.playTwoDAAnimation(animation);
+    creature.animationState.index = index;
+    return animation;
   }
 
   private shouldAbort(): boolean {
@@ -263,6 +286,7 @@ export class SpellCastInstance {
 
   dispose(){
     if(this.disposed) return;
+    if(!this.castAnimationStarted) this.releaseConjureAnimation();
     this.disposed = true;
     if(this.handEffectTimer !== undefined) clearTimeout(this.handEffectTimer);
     this.handEffectTimer = undefined;
