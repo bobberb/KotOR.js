@@ -1216,7 +1216,7 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
   });
 
   // Measured: 20 / 13 / 7 replans with the range-tied threshold; 67 each with the move range's 0.5 m default.
-  test.each([['S', 10, 25], ['M', 15, 17], ['L', 28, 10]])('range %s: a 10 s chase replans the path about as often as a range-tied threshold allows', (rangeKey, range, maxPlans) => {
+  test.each([['S', 10, 16, 24], ['M', 15, 10, 16], ['L', 28, 6, 9]])('range %s: a 10 s chase replans the path at the range-tied rate (0.25 x approach range)', (rangeKey, range, minPlans, maxPlans) => {
     installSpells({ [SPELL_ID]: spellRow({ range: String(rangeKey) }) });
     const area: any = GameState.module.area;
     const traverse = area.path.traverseToPoint;
@@ -1227,6 +1227,7 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
     target.position.set(Number(range) + 20, 0, 0);
     ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
     chaseTick(caster, target, 10, 0.9);
+    expect(plans).toBeGreaterThanOrEqual(Number(minPlans));
     expect(plans).toBeLessThanOrEqual(Number(maxPlans));
   });
 });
@@ -1275,6 +1276,104 @@ describe('dead targets', () => {
     expect(impactRuns).toHaveLength(0);
     expect(caster.getFP()).toBe(20 - SPELL_COST);
     expect(GetWasForcePowerSuccessful.kotor.call({} as any, caster)).toBe(0);
+  });
+
+  test('a menu-queued power whose target dies before it runs is refused: round action cleared, AI gets its turn', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    caster.combatData.combatState = true;
+    const seen: number[] = [];
+    caster.scripts[ModuleObjectScript.CreatureOnEndRound] = { newInstance: () => ({ run(){
+      seen.push(GetLastForcePowerUsed.kotor.call({} as any, caster));
+    } }) } as any;
+    new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    target.currentHitPoints = -50;
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+    expect(caster.combatRound.action).toBeUndefined();
+    expect(seen).toEqual([-1]);
+  });
+});
+
+describe('script intent (fake and cheat casts) and dead targets', () => {
+  function kill(creature: ModuleCreature){ creature.currentHitPoints = -50; }
+
+  test('a fake cast at a corpse still plays its visuals and touches no bookkeeping', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    kill(target);
+    caster.combatData.lastForcePowerSuccess = true;
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 0.2);
+    expect(spellInstances).toHaveLength(1);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+    expect(caster.combatData.lastForcePowerSuccess).toBe(true);
+    expect(caster.combatData.lastForcePowerUsed).toBeUndefined();
+  });
+
+  test('a fake cast whose target dies mid-conjure finishes its visuals, uninterrupted, without bookkeeping', () => {
+    installSpells({ [SPELL_ID]: spellRow({ casthandvisual: 'v_fake_hand' }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    caster.combatData.lastForcePowerSuccess = true;
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 0.5);
+    const instance = spellInstances[0];
+    kill(target);
+    tick([caster, target], 4);
+    expect(instance.interrupted).toBe(false);
+    expect(instance.completed).toBe(true);
+    expect(MDLLoader.loader.load).toHaveBeenCalledWith('v_fake_hand');
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.combatData.lastForcePowerSuccess).toBe(true);
+  });
+
+  test('a fake cast interrupted by a caster stun writes no bookkeeping', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    caster.combatData.lastForcePowerSuccess = true;
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    tick([caster, target], 0.5);
+    const instance = spellInstances[0];
+    jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    tick([caster, target], 0.1);
+    expect(instance.interrupted).toBe(true);
+    expect(caster.combatData.lastForcePowerSuccess).toBe(true);
+  });
+
+  test('a fake cast that cannot reach its spot does not start a combat round on the (cutscene) caster', () => {
+    const caster = makeCreature();
+    let walk = 0;
+    jest.spyOn(ActionMoveToPoint.prototype, 'update').mockImplementation(() => { walk++; return ActionStatus.COMPLETE; });
+    ActionCastFakeSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0);
+    tick([caster], 2);
+    expect(walk).toBe(3);
+    expect(caster.actionQueue).toHaveLength(0);
+    expect(caster.combatRound.roundStarted).toBe(false);
+  });
+
+  test('a cheat cast at a corpse lands (script intent), costing no FP', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    kill(target);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 1, 0, 0, 0);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(1);
+    expect(impactRuns[0].spellTarget).toBe(target);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('a cheat cast whose target dies mid-conjure still lands', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 1, 0, 0, 0);
+    tick([caster, target], 0.5);
+    kill(target);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(1);
   });
 });
 

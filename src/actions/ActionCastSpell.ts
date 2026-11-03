@@ -90,7 +90,8 @@ export class ActionCastSpell extends Action {
 
     const target = this.target;
     // A corpse is not a valid target: no walk, no force points, no impact (e.g. the previous queued power killed it).
-    if(target != this.owner && BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature) && target.isDead()){
+    // Fake (cutscene visuals) and cheat casts are script intent and skip this gate.
+    if(!this.fake && !this.cheat && target != this.owner && BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature) && target.isDead()){
       return this.refuse(spell);
     }
     const castPoint = target
@@ -188,6 +189,7 @@ export class ActionCastSpell extends Action {
   private startSpellInstance(spell: TalentSpell){
     const spellCastInstance = new SpellCastInstance(this.owner, this.target, spell);
     spellCastInstance.fake = this.fake;
+    spellCastInstance.cheat = this.cheat;
     if(this.instant){
       spellCastInstance.conjureTime = 0;
       spellCastInstance.castTime = 0;
@@ -229,7 +231,8 @@ export class ActionCastSpell extends Action {
       if(pending && pending.actionType == CombatActionType.CAST_SPELL && pending.spellId == spell.id){
         combatRound.action = undefined;
       }
-      if(!combatRound.action && !combatRound.roundStarted) combatRound.beginCombatRound();
+      // Fake casts are cutscene visuals on possibly out-of-combat casters: never start a combat round for them.
+      if(!this.fake && !combatRound.action && !combatRound.roundStarted) combatRound.beginCombatRound();
     }
     return ActionStatus.FAILED;
   }

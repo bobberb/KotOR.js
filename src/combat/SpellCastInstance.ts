@@ -46,6 +46,8 @@ export class SpellCastInstance {
 
   /** ActionCastFakeSpellAt*: animations and visuals only, no impact script or combat bookkeeping. */
   fake: boolean = false;
+  /** bCheat script cast: script intent, so it lands even if the target died meanwhile. */
+  cheat: boolean = false;
   impacted: boolean = false;
   /** The caster died or was debilitated before impact, so the power never landed. */
   interrupted: boolean = false;
@@ -155,7 +157,7 @@ export class SpellCastInstance {
     // (e.g. killed by someone else mid-conjure) never receives it. Either way the force points stay spent; the
     // round still reports the power via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
     if(this.shouldAbort()){
-      if(this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
+      if(!this.fake && this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
       this.interrupted = true;
       this.completed = true;
       this.projectile?.dispose();
@@ -205,7 +207,8 @@ export class SpellCastInstance {
   }
 
   private isTargetDead(): boolean {
-    if(this.target === this.owner) return false;
+    // Fake (cutscene visuals) and cheat casts are script intent: they play out even if the target died.
+    if(this.fake || this.cheat || this.target === this.owner) return false;
     return BitWise.InstanceOfObject(this.target, ModuleObjectType.ModuleCreature) && this.target.isDead();
   }
 
