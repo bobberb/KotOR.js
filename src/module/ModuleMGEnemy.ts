@@ -62,6 +62,8 @@ export class ModuleMGEnemy extends ModuleObject {
   /** Trigger followers (e.g. swoop accelerator pads) only raise hit events; they never shoot. */
   trigger: boolean = false;
   loopsCompleted: number = 0;
+  /** Seconds of track animation travelled since the last loop. */
+  trackTime: number = 0;
 
   /** True while the player is inside this follower's sphere (hit events fire on entry). */
   collided: boolean = false;
@@ -163,12 +165,16 @@ export class ModuleMGEnemy extends ModuleObject {
       }else if(!this.alive && this.track.animationManager.currentAnimation){
         this.track.stopAnimation();
       }
-      const before = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
       this.track.update(delta);
-      const after = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
-      if(this.alive && after > before){
-        this.loopsCompleted += after - before;
-        this.onTrackLoop();
+      // Count loops from accumulated track time: the animation manager wraps at most once per update.
+      const length = this.track.animationManager?.currentAnimation?.length || 0;
+      if(this.alive && length > 0){
+        this.trackTime += delta;
+        while(this.trackTime >= length - 1e-9){
+          this.trackTime -= length;
+          this.loopsCompleted++;
+          this.onTrackLoop();
+        }
       }
     }
 
@@ -347,7 +353,7 @@ export class ModuleMGEnemy extends ModuleObject {
 
   /** The player ran into this follower. */
   onHitFollower(player?: ModuleObject){
-    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnHitFollower, { followerHit: player });
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGEnemyOnHitFollower, { followerHit: player, hitTarget: this });
   }
 
   onHitObstacle(obstacle?: ModuleObject){

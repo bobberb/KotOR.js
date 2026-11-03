@@ -141,7 +141,7 @@ export class ModuleMGObstacle extends ModuleObject {
 
   /** The player (a follower of its own track) ran into this obstacle: the hit pair is (player, this obstacle). */
   onHitFollower(follower?: ModuleObject){
-    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGObstacleOnHitFollower, { followerHit: follower, obstacleHit: this });
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGObstacleOnHitFollower, { followerHit: follower, obstacleHit: this, hitTarget: this });
   }
 
   loadScripts(){

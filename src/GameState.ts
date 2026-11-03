@@ -1330,6 +1330,7 @@ export class GameState implements EngineContext {
     if(GameState.module){
       if(GameState.module.area.miniGame){
         console.log('RestoreEnginePlayMode: MINIGAME');
+        GameState.module.area.miniGame.resumeInput?.();
         GameState.SetEngineMode(EngineMode.MINIGAME)
       }else{
         console.log('RestoreEnginePlayMode: INGAME');

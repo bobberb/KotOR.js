@@ -22,13 +22,16 @@ export interface IMiniGameCombatant extends ModuleObject {
 }
 
 /**
- * Values the SWMG_GetLast* routines read. They describe the event currently being
- * handled; a nested dispatch (e.g. OnDamage raised from inside OnHitBullet) gets
- * its own values and the outer handler's values are restored when it returns.
+ * The minigame's "last values" record, read by the SWMG_GetLast* routines. Like the
+ * engine-global retail state, a value stays until an event overwrites it, so a nested
+ * event (OnDamage raised inside OnHitBullet) still sees the bullet, and what it writes
+ * stays visible to the outer handler. Only `event`/`modelName` are restored on return.
  */
 export interface IMiniGameEventContext {
   event: string;
   modelName: string;
+  /** What the player ran into in the current/last player hit event (resolves SWMG_OnObstacleHit). */
+  hitTarget?: ModuleObject;
   followerHit?: ModuleObject;
   obstacleHit?: ModuleObject;
   bullet?: ModuleMGGunBullet;
@@ -56,6 +59,10 @@ export interface IMiniGameEventContext {
 export class ModuleMiniGame {
   /** Seconds between OnHeartbeat events, matching the engine's 3s object heartbeat. */
   static readonly HEARTBEAT_INTERVAL = 3;
+  /** Longest simulation step (seconds); longer frames are sub-stepped. */
+  static readonly MAX_STEP = 0.25;
+  /** Longest frame simulated (seconds); anything beyond is dropped like a pause. */
+  static readonly MAX_FRAME = 1;
 
   type: MiniGameType;
 
@@ -85,7 +92,7 @@ export class ModuleMiniGame {
   /** Seconds the minigame has been ticking (unpaused). */
   elapsed: number = 0;
 
-  /** Context of the handler being run; the empty base context outside any handler. */
+  /** The minigame's last-values record (see IMiniGameEventContext). */
   context: IMiniGameEventContext = ModuleMiniGame.EmptyContext();
   /** Number of minigame handlers on the stack (0 = no event is being handled). */
   private contextDepth: number = 0;
@@ -139,6 +146,7 @@ export class ModuleMiniGame {
     return {
       event: '',
       modelName: '',
+      hitTarget: undefined,
       followerHit: undefined,
       obstacleHit: undefined,
       bullet: undefined,
@@ -152,7 +160,23 @@ export class ModuleMiniGame {
     };
   }
 
+  /**
+   * Advance the minigame. Long frames are split into steps of at most MAX_STEP so
+   * collisions, bullets and laps stay consistent; a hitch longer than MAX_FRAME
+   * (a backgrounded tab, a debugger pause) only advances MAX_FRAME, like a pause.
+   */
   tick(delta: number = 0){
+    let remaining = Math.min(Math.max(0, delta), ModuleMiniGame.MAX_FRAME);
+    while(remaining > 1e-9){
+      const step = Math.min(remaining, ModuleMiniGame.MAX_STEP);
+      remaining -= step;
+      this.step(step);
+    }
+    // Steering is held input: it applies for the whole frame, then must be re-sent.
+    this.player.lateralInput = 0;
+  }
+
+  private step(delta: number){
     this.elapsed += delta;
 
     this.player.update(delta);
@@ -185,9 +209,18 @@ export class ModuleMiniGame {
   }
 
   /**
-   * Run an object's minigame script with the event context SWMG_GetLast* reads.
-   * Each event gets a fresh context (nothing carries over from the enclosing event or
-   * from calls made outside any handler). When the object has no script for the
+   * Input resumes after a pause or a menu: a fire/shift key still held from before must
+   * be released and pressed again before it acts.
+   */
+  resumeInput(){
+    this.player.shootNeedsRelease = true;
+  }
+
+  /**
+   * Run an object's minigame script. The event's own values (`context`) are written
+   * into the minigame's last-values record, which keeps everything else from earlier
+   * events; on return only `event`/`modelName` revert to the enclosing handler's, so
+   * values a nested event wrote stay visible. When the object has no script for the
    * event, `fallback` (the engine default, also reachable from scripts through
    * SWMG_OnBulletHit/OnObstacleHit/OnDamage/OnDeath) runs instead.
    */
@@ -203,27 +236,33 @@ export class ModuleMiniGame {
     const modelName = context.bullet ? (context.bullet.model_name || '').toLowerCase()
       : other ? (other.getEventModelName?.() ?? '')
       : ((object as any).getEventModelName?.() ?? '');
-    const eventContext: IMiniGameEventContext = {
-      ...ModuleMiniGame.EmptyContext(),
-      event: scriptKey,
-      modelName,
-      ...context,
-    };
-    return this.runInContext(eventContext, () => {
+    const record = this.context;
+    const previousEvent = record.event;
+    const previousModelName = record.modelName;
+    Object.assign(record, { event: scriptKey, modelName }, context);
+    this.contextDepth++;
+    try{
       const instance = object.scripts?.[scriptKey];
       if(!instance){
         fallback?.();
         return false;
       }
-      instance.mgFollower = eventContext.followerHit;
-      instance.mgObstacle = eventContext.obstacleHit;
-      instance.mgBullet = eventContext.bullet;
+      instance.mgFollower = record.followerHit;
+      instance.mgObstacle = record.obstacleHit;
+      instance.mgBullet = record.bullet;
       instance.run(object, 0);
       return true;
-    });
+    }finally{
+      this.contextDepth--;
+      record.event = previousEvent;
+      record.modelName = previousModelName;
+    }
   }
 
-  /** Run `body` with `context` as the current event context, restoring the previous one afterwards. */
+  /**
+   * Replay `body` against a captured snapshot (a DelayCommand scheduled inside a
+   * handler), then put the live last-values record back.
+   */
   runInContext<T>(context: IMiniGameEventContext, body: () => T): T {
     const previous = this.context;
     this.context = context;
@@ -237,7 +276,7 @@ export class ModuleMiniGame {
   }
 
   /**
-   * Snapshot of the running handler's context, for work a script schedules from inside
+   * Snapshot of the running handler's values, for work a script schedules from inside
    * it (DelayCommand), so SWMG_GetLast* still describe that event when it runs.
    */
   captureContext(): IMiniGameEventContext | undefined {
@@ -258,7 +297,7 @@ export class ModuleMiniGame {
 
   /**
    * Set or adjust hit points from script. Death fires once if the result is <= 0.
-   * Inside a handler the change is reported by SWMG_GetLastHPChange; outside one it is not recorded.
+   * Inside a handler the change becomes SWMG_GetLastHPChange; outside any handler it is not recorded.
    */
   adjustHitPoints(target: IMiniGameCombatant, amount: number = 0, absolute: boolean = false): number {
     if(!target){ return 0; }
@@ -273,12 +312,12 @@ export class ModuleMiniGame {
     return target.hit_points;
   }
 
+  /** OnDeath inherits the last values of the damage that caused it (hp change, bullet, shooter). */
   kill(target: IMiniGameCombatant){
     if(!target || !target.alive){ return; }
     target.alive = false;
     this.dispatchEvent(target, ModuleObjectScript.MGPlayerOnDeath, {}, () => target.defaultOnDeath());
   }
-
   /**
    * Swoop collisions: entering a follower's or obstacle's sphere fires the player's
    * OnHitFollower/OnHitObstacle, then the other object's OnHitFollower. Each contact

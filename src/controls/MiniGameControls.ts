@@ -28,11 +28,23 @@ export function inputHeld(keymap: IMiniGameKeymap): boolean {
 
 /** Minigame key handling for EngineMode.MINIGAME (registered by IngameControls). */
 export function processMiniGameAction(action: MiniGameAction, keymap: IMiniGameKeymap, delta: number = 0){
-  if(GameState.State != EngineState.RUNNING){ return; }
   const miniGame = GameState.module?.area?.miniGame;
   const player = miniGame?.player;
   if(!player){ return; }
+  if(GameState.State != EngineState.RUNNING){
+    miniGame.resumeInput();
+    return;
+  }
   const held = inputHeld(keymap);
+
+  // A fire/shift key held through a pause or menu acts only after a fresh press.
+  if(action === 'shoot' && player.shootNeedsRelease){
+    if(!held){
+      player.shootNeedsRelease = false;
+      player.setShiftInput(false);
+    }
+    return;
+  }
 
   if(miniGame.type == MiniGameType.SWOOPRACE){
     switch(action){

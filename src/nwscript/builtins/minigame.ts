@@ -72,7 +72,7 @@ export function mgDefaultOnObstacleHit(caller: unknown){
   const player = miniGame?.player;
   if(!player){ return; }
   const other = caller === player
-    ? (miniGame.context.obstacleHit ?? miniGame.context.followerHit)
+    ? miniGame.context.hitTarget
     : (mgIsObject(caller) ? caller as ModuleObject : undefined);
   player.defaultObstacleHit(other);
 }

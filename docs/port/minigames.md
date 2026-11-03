@@ -8,17 +8,30 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
 
 ## Runtime model
 
-- **Events.** Every minigame script runs through `ModuleMiniGame.dispatchEvent(object, scriptKey, context, fallback)`.
-  Each event gets a **fresh** context, which `SWMG_GetLastEvent`, `SWMG_GetLastEventModelName`,
+- **Events and last values.** Every minigame script runs through
+  `ModuleMiniGame.dispatchEvent(object, scriptKey, context, fallback)`. The minigame keeps one "last values"
+  record, like the engine-global retail state. `SWMG_GetLastEvent`, `SWMG_GetLastEventModelName`,
   `SWMG_GetLastBulletHit*`, `SWMG_GetLastBulletFired*`, `SWMG_GetLastFollowerHit`, `SWMG_GetLastObstacleHit` and
-  `SWMG_GetLastHPChange` read while the handler runs. Nothing carries over from an enclosing event or from calls
-  made outside any handler. A nested event (for example `OnDamage` raised by `SWMG_OnBulletHit` inside
-  `OnHitBullet`) gets its own context, and the outer handler's context comes back when it returns. Outside any
-  handler the routines return empty values. `SWMG_AdjustFollowerHitPoints`/`SWMG_SetFollowerHitPoints` record
-  `GetLastHPChange` only inside a handler.
-- **Scheduled work.** `DelayCommand` called inside a minigame handler stores a snapshot of that event's context on
-  the timed event (`EventTimedEvent.miniGameContext`, runtime only, never saved). The delayed action reads it when
-  it runs. `AssignCommand` runs synchronously, so it already runs inside the event.
+  `SWMG_GetLastHPChange` all read that record.
+  - An event writes only the values it defines; everything else keeps its last value. So `OnDamage` raised by a
+    bullet still sees the bullet's damage, shooter and part. `OnDeath` sees the HP change and the killer. A swoop's
+    `OnDamage` after a crash sees the obstacle it hit.
+  - Values written by a nested event (for example the `-4` HP change of `OnDamage` raised by `SWMG_OnBulletHit`
+    inside `OnHitBullet`) stay visible to the outer handler. Only `event`/`modelName` revert when the nested event
+    returns.
+  - Values persist after the event ends, until another event overwrites them.
+  - `SWMG_AdjustFollowerHitPoints`/`SWMG_SetFollowerHitPoints` record `GetLastHPChange` only inside a handler.
+    Calls outside any handler write nothing.
+- **Scheduled work.** `DelayCommand` called inside a minigame handler stores a snapshot of the last values on the
+  timed event (`EventTimedEvent.miniGameContext`, runtime only, never saved). The delayed action reads that
+  snapshot even if later events have changed the live record, which is put back afterwards. `AssignCommand` runs
+  synchronously, so it already runs inside the event.
+- **Time stepping.** `tick` splits a frame into steps of at most 0.25 s, so a long frame cannot skip collisions or
+  laps. A frame longer than 1 s only advances 1 s, which drops a hitch such as a backgrounded tab the way a pause
+  would.
+- **Input.** Minigame input is ignored while the game is paused. After a pause, or when a menu closes back into the
+  minigame (`GameState.RestoreEnginePlayMode` → `resumeInput`), a fire/shift key still held must be released and
+  pressed again before it acts.
 - `SWMG_GetLastEvent` is the script key (`OnHitObstacle`, `OnTrackLoop`, `OnAccelerate`, `OnHitBullet`, ...), or
   the MDL animation event name inside `OnAnimEvent`. For hit events the model name is the other party's model (or
   the bullet model); for other events it is the object's own first model.
@@ -57,13 +70,21 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
   - Lateral speed is capped by ARE `MovementPerSec` when it is set.
   - Without `UseInertia` the swoop slides at full lateral speed while steering and stops on release. With
     `UseInertia` it accelerates and coasts down at the lateral acceleration.
-  - The lateral offset from the lane centre is clamped to `TunnelXNeg..TunnelXPos`, as authored in the template,
-    unless the X axis is infinite. Hitting the wall stops lateral motion.
+  - Steering moves the swoop along **world X**, which only suits straight courses that run along Y. The lateral
+    axis of a curved animated path is not followed.
+  - The lateral offset from the lane centre is clamped to the current X tunnel limits, unless the X axis is
+    infinite. The lane centre is the track's start X, or the X given to `SWMG_SetPlayerOrigin`. The limits are
+    `TunnelXNeg..TunnelXPos` from the template, or whatever `SWMG_SetPlayerTunnelNeg/Pos` last set. Hitting the
+    wall stops lateral motion.
 - **Jumping** (`MGActionUp`) is off until a script sets a jump speed (TSL `SWMG_SetJumpSpeed`). Airborne swoops
   skip collisions.
 - **Laps.** If the player's track model has an animation, that animation carries the rider: it loops at a
-  playback rate of `speed / Maximum_Speed` (1 when there is no maximum), and each loop is one `OnTrackLoop`. This
-  is the same `elapsedCount` mechanism followers use.
+  playback rate of `speed / Maximum_Speed`.
+  - Without a `Maximum_Speed`, the rate is 1 while the swoop moves and 0 at speed 0, so a stopped swoop's track
+    is frozen.
+  - Laps are counted from the rider's accumulated animation time divided by the loop length, not from the
+    animation manager's wraps (it wraps at most once per update and drops the remainder), so every lap is
+    credited on time. Followers count their loops the same way.
   - A track with no animation only loops when `trackLength` is set explicitly. Then each length travelled is one
     `OnTrackLoop`, and the track jumps back to its start.
   - Without an animation or an explicit length there are no laps. Lap length is never guessed from room geometry.
@@ -107,13 +128,15 @@ No game assets or retail executable were used. These are reasoned choices, not o
 - **Collisions:** that accelerator pads are recognized by name; the crash response.
 - **Steering:** the meaning of ARE `LateralAccel`/`MovementPerSec`/`UseInertia` for steering; reading the swoop
   `TunnelX` limits as track units.
-- **Laps:** the animated-track lap rule and its speed-scaled playback rate.
+- **Laps:** the animated-track lap rule, its speed-scaled playback rate, and the frozen track at speed 0 without
+  a `Maximum_Speed`.
+- **Stepping:** the 0.25 s step and 1 s frame cap.
 - **Movement and timing:** jump physics (9.8 m/s²); heartbeat cadence (3 s, as for other objects).
 - **Event values:**
   - `SWMG_GetLastEvent` returning the script key for non-animation events.
   - The model name reported for hit events.
   - `SWMG_GetLastBulletHitPart` being the target's model name.
-  - Fresh per-event contexts. Retail may instead keep "last" values until the next event.
+  - The exact last-value rules: which fields each event overwrites, and that writes outside a handler are dropped.
 - **Objects and sound:** follower names coming from the first model; trigger followers (`Trigger` = 1) never
   shooting or being shot; sound slot defaults (volume 127; stored only, they drive no audio yet).
 - **Enemy fire:** the spread fields as cone half-angles in degrees, and aimed enemy shots.

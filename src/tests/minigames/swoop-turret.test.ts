@@ -17,6 +17,7 @@ jest.mock("@/three/odyssey", () => {
   const T = jest.requireActual("three") as typeof THREE;
   return { OdysseyModel3D: class extends T.Object3D {}, OdysseyObject3D: class extends T.Object3D {}, OdysseyLightsaberEffect: class {} };
 });
+jest.mock("@/odyssey/controllers/OdysseyController", () => ({ OdysseyController: class {} }));
 jest.mock("@/nwscript/NWScript", () => ({ NWScript: class {} }));
 jest.mock("@/nwscript/NWScriptInstance", () => ({ NWScriptInstance: class {} }));
 jest.mock("@/nwscript/events", () => ({ NWScriptEvent: class {} }));
@@ -340,7 +341,7 @@ describe("turret: gun banks, bullets, damage and death", () => {
         routine("kotor", GetLastBulletHitPart, self),
       ];
       routine("kotor", OnBulletHit, self); // the default: take the bullet's damage
-      expect(routine("kotor", GetLastHPChange, self)).toBe(0); // still this handler's context
+      expect(routine("kotor", GetLastHPChange, self)).toBe(-4); // the nested OnDamage's change stays visible
     }) as any;
     let fired: unknown[] = [];
     mg.player.scripts.OnFire = fakeScript((self) => {
@@ -418,32 +419,36 @@ describe("turret: gun banks, bullets, damage and death", () => {
   });
 });
 
-/** A track model whose looping animation carries the rider: `length` seconds per loop. */
+/**
+ * A track model whose looping animation carries the rider (`length` seconds per loop),
+ * driven by the engine's real OdysseyModelAnimationManager, so wraps behave as in game
+ * (at most one per update, remainder dropped).
+ */
+const { OdysseyModelAnimationManager: RealAnimationManager } =
+  jest.requireActual("@/odyssey/OdysseyModelAnimationManager") as typeof import("@/odyssey/OdysseyModelAnimationManager");
 class FakeAnimatedTrack extends (OdysseyModel3D as unknown as typeof THREE.Object3D) {
-  length: number;
-  t = 0;
+  bonesInitialized = true;
+  animateFrame = false;
+  animLoops: unknown[] = [];
   stopped = 0;
-  odysseyAnimations = [{ name: "trackloop" }];
-  animationManager: { currentAnimation: unknown; currentAnimationState: { elapsedCount: number } } =
-    { currentAnimation: undefined, currentAnimationState: { elapsedCount: 0 } };
+  odysseyAnimations: any[];
+  animationManager: any;
   constructor(length: number, y = 0) {
     super();
-    this.length = length;
     const hook = new THREE.Object3D();
     hook.name = "modelhook";
     this.add(hook);
     this.position.y = y;
+    this.odysseyAnimations = [{ type: "OdysseyModelAnimation", name: "trackloop", length, nodes: [], events: [], transition: 0 }];
+    this.animationManager = new RealAnimationManager(this as any);
   }
-  playAnimation() { this.animationManager.currentAnimation = this.odysseyAnimations[0]; }
+  playAnimation() {
+    const state = this.animationManager.createAnimationState();
+    state.loop = true;
+    this.animationManager.setCurrentAnimation(this.odysseyAnimations[0], state);
+  }
   stopAnimation() { this.animationManager.currentAnimation = undefined; this.stopped++; }
-  update(delta: number) {
-    if (!this.animationManager.currentAnimation) return;
-    this.t += delta;
-    while (this.t >= this.length - 1e-9) {
-      this.t -= this.length;
-      this.animationManager.currentAnimationState.elapsedCount++;
-    }
-  }
+  update(delta: number) { this.animationManager.update(delta); }
 }
 
 const held = { keyboardInput: { down: true, pressed: false } };
@@ -613,21 +618,19 @@ describe("review regressions", () => {
     mg.enemies[0].scripts.OnHitBullet = fakeScript((self) => {
       runtime.kotor[7].action.call({ caller: self, delayCommands: delayed }, [0.5, { script: scriptReading("delayed"), offset: 0 }]);
       runtime.kotor[6].action.call({ caller: self }, [self, { script: scriptReading("assigned"), offset: 0 }]);
-      routine("kotor", OnBulletHit, self); // raises OnDamage nested inside this event
-    }) as any;
-    mg.enemies[0].scripts.OnDamage = fakeScript((self) => {
-      // A nested event gets a fresh context: no bullet values carried over from OnHitBullet.
-      reads.nestedDamageEvent = [routine("kotor", GetLastEvent, self), routine("kotor", GetLastBulletHitDamage, self)];
     }) as any;
     mg.enemies[0].onHitBullet(mg.player.gunBanks[0].fire()!);
-    expect(reads.nestedDamageEvent).toEqual(["OnDamage", 0]);
-    delete reads.nestedDamageEvent;
-
-    expect(routine("kotor", GetLastBulletHitDamage, mg.player)).toBe(0); // the event is over
     expect(delayed).toHaveLength(1);
+
+    // A later, harder hit overwrites the last values before the delayed action runs.
+    mg.enemies[0].scripts.OnHitBullet = undefined as any;
+    routine("kotor", 634, mg.player, mg.player, 0, 1); // SWMG_SetGunBankDamage(player, 0, 1)
+    mg.enemies[0].onHitBullet(mg.player.gunBanks[0].fire()!);
+    expect(routine("kotor", GetLastBulletHitDamage, mg.player)).toBe(1); // last value persists after the event
+
     delayed[0].execute();
-    expect(reads).toEqual({ assigned: 4, delayed: 4 });
-    expect(routine("kotor", GetLastBulletHitDamage, mg.player)).toBe(0); // restored after the delayed action
+    expect(reads).toEqual({ assigned: 4, delayed: 4 }); // the delayed action reads its own event's values
+    expect(routine("kotor", GetLastBulletHitDamage, mg.player)).toBe(1); // live record restored afterwards
   });
 
   test("an animated track carries the swoop: each animation loop is one OnTrackLoop, at a rate set by speed", () => {
@@ -738,5 +741,233 @@ describe("review regressions", () => {
     const result = sweep(5);
     expect(result.fired).toBeGreaterThan(0);
     expect(result.hp).toBe(10 - result.fired);
+  });
+});
+
+describe("review round 2", () => {
+  beforeEach(() => { (GameState as any).State = EngineState.RUNNING; });
+
+  const fighter = (y: number, extra: Record<string, unknown> = {}) => ({
+    Track: `trk_${y}`, Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10, Models: [{ Model: "mgt_fighter", RotatingModel: 0 }], ...extra,
+  });
+
+  test("GetLastHPChange after SWMG_OnBulletHit and after SWMG_AdjustFollowerHitPoints in the same handler", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, [fighter(10)]);
+    const enemy = mg.enemies[0];
+    const seen: unknown[] = [];
+    enemy.scripts.OnHitBullet = fakeScript((self) => {
+      routine("kotor", OnBulletHit, self);
+      seen.push([self.hit_points, routine("kotor", GetLastHPChange, self)]);
+      routine("kotor", 590, self, self, -3, 0);
+      seen.push([self.hit_points, routine("kotor", GetLastHPChange, self)]);
+    }) as any;
+    mg.initMiniGameObjects();
+    enemy.onHitBullet(mg.player.gunBanks[0].fire()!);
+    expect(seen).toEqual([[6, -4], [3, -3]]);
+  });
+
+  test("OnDamage raised by a bullet sees the damage, shooter and part", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 4, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, [fighter(10)]);
+    const enemy = mg.enemies[0];
+    let seen: unknown[] = [];
+    enemy.scripts.OnDamage = fakeScript((self) => {
+      seen = [routine("kotor", GetLastEvent, self), routine("kotor", GetLastHPChange, self), routine("kotor", GetLastBulletHitDamage, self),
+        routine("kotor", GetLastBulletHitShooter, self), routine("kotor", GetLastBulletHitPart, self)];
+    }) as any;
+    mg.initMiniGameObjects();
+    enemy.onHitBullet(mg.player.gunBanks[0].fire()!);
+    expect(seen.length).toBe(5);
+    expect(seen.slice(0, 3)).toEqual(["OnDamage", -4, 4]);
+    expect(seen[3]).toBe(mg.player);
+    expect(seen[4]).toBe("mgt_fighter");
+  });
+
+  test("OnDeath from a lethal bullet sees the HP change, the damage and the killer", () => {
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 20, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, [fighter(10)]);
+    const enemy = mg.enemies[0];
+    let seen: unknown[] = [];
+    enemy.scripts.OnDeath = fakeScript((self) => {
+      seen = [routine("kotor", GetLastEvent, self), routine("kotor", GetLastHPChange, self),
+        routine("kotor", GetLastBulletHitDamage, self), routine("kotor", GetLastBulletHitShooter, self)];
+    }) as any;
+    mg.initMiniGameObjects();
+    enemy.onHitBullet(mg.player.gunBanks[0].fire()!);
+    expect(enemy.alive).toBe(false);
+    expect(seen.slice(0, 3)).toEqual(["OnDeath", -20, 20]);
+    expect(seen[3]).toBe(mg.player);
+  });
+
+  test("the swoop's OnDamage after a crash sees the rock it hit", async () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10, Bump_Damage: 3 });
+    const rock = await addObstacle(mg, "mgs_rock01", 2);
+    let seen: unknown[] = [];
+    mg.player.scripts.OnDamage = fakeScript((self) => {
+      seen = [routine("kotor", GetLastHPChange, self), routine("kotor", GetLastObstacleHit, self)];
+    }) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 1, 0.05);
+    expect(seen[0]).toBe(-3);
+    expect(seen[1]).toBe(rock);
+  });
+
+  test("SWMG_SetPlayerTunnelNeg/Pos change where swoop steering stops", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10, TunnelXNeg: -5, TunnelXPos: 5 }, [], { LateralAccel: 60 });
+    mg.initMiniGameObjects();
+    routine("kotor", 654, mg.player, { x: -1, y: 0, z: 0 });
+    routine("kotor", 652, mg.player, { x: 8, y: 0, z: 0 });
+    for (let i = 0; i < 20; i++) { processMiniGameAction("left", held, 0.05); mg.tick(0.05); }
+    expect(mg.player.track.position.x).toBeCloseTo(-1);
+    for (let i = 0; i < 20; i++) { processMiniGameAction("right", held, 0.05); mg.tick(0.05); }
+    expect(mg.player.track.position.x).toBeCloseTo(8);
+  });
+
+  test("the lane centre follows the track start and SWMG_SetPlayerOrigin", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0, TunnelXNeg: -5, TunnelXPos: 5 }, [], { LateralAccel: 60 });
+    mg.player.setTrack(makeTrack(10, 0, 0) as any);
+    for (let i = 0; i < 20; i++) { processMiniGameAction("left", held, 0.05); mg.tick(0.05); }
+    expect(mg.player.track.position.x).toBeCloseTo(5);
+    routine("kotor", 656, mg.player, { x: -20, y: 0, z: 0 }); // SWMG_SetPlayerOrigin
+    for (let i = 0; i < 20; i++) { processMiniGameAction("right", held, 0.05); mg.tick(0.05); }
+    expect(mg.player.track.position.x).toBeCloseTo(-15);
+  });
+
+  test("with UseInertia the swoop also coasts down from a rightward slide", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0 }, [], { LateralAccel: 10, MovementPerSec: 8, UseInertia: 1 });
+    const xs: number[] = [];
+    for (const input of [held, held, released, released, released]) {
+      processMiniGameAction("right", input, 0.25);
+      mg.tick(0.25);
+      xs.push(Math.round(mg.player.track.position.x * 1000) / 1000);
+    }
+    expect(xs).toEqual([0.625, 1.875, 2.5, 2.5, 2.5]);
+  });
+
+  test("minigame input is ignored while paused, and fire held through a pause or menu needs a fresh press", () => {
+    const swoop = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0 }, [], { LateralAccel: 10 });
+    (GameState as any).State = EngineState.PAUSED;
+    processMiniGameAction("left", held, 0.25);
+    swoop.tick(0.25);
+    expect(swoop.player.track.position.x).toBe(0);
+
+    const mg = turretGame({ Gun_Banks: [bulletBank({ Damage: 1, Lifespan: 5, Rate_Of_Fire: 0, Speed: 20 })] }, []);
+    const bullets = () => mg.player.gunBanks[0].bullets.length;
+    (GameState as any).State = EngineState.PAUSED;
+    processMiniGameAction("shoot", held, 0.1);  // fire held while paused
+    (GameState as any).State = EngineState.RUNNING;
+    processMiniGameAction("shoot", held, 0.1);  // still held after unpausing
+    expect(bullets()).toBe(0);
+    processMiniGameAction("shoot", released, 0.1);
+    processMiniGameAction("shoot", held, 0.1);
+    expect(bullets()).toBe(1);
+
+    mg.resumeInput(); // a menu closed back into the minigame (GameState.RestoreEnginePlayMode)
+    processMiniGameAction("shoot", held, 0.1);
+    expect(bullets()).toBe(1);
+    processMiniGameAction("shoot", released, 0.1);
+    processMiniGameAction("shoot", held, 0.1);
+    expect(bullets()).toBe(2);
+  });
+
+  test("the player never crashes into itself, and the default needs a hit target", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 50, Accel_Secs: 0, Bump_Damage: 3 });
+    mg.player.speed = 30;
+    mg.player.defaultObstacleHit(mg.player);
+    mg.player.scripts.OnHeartbeat = fakeScript((self) => routine("kotor", OnObstacleHit, self)) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 3);
+    expect([mg.player.hit_points, mg.player.speed]).toEqual([10, 30]);
+  });
+
+  test("player and follower scripts both calling SWMG_OnObstacleHit crash the swoop once per contact", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 50, Accel_Secs: 0, Bump_Damage: 3, Invince_Period: 0 }, [
+      { Track: "trk", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10, Models: [{ Model: "mgs_wall", RotatingModel: 0 }] },
+    ]);
+    mg.enemies[0].setTrack(makeTrack(0, 10, 0));
+    mg.player.scripts.OnHitFollower = fakeScript((self) => routine("kotor", OnObstacleHit, self)) as any;
+    mg.enemies[0].scripts.OnHitFollower = fakeScript((self) => routine("kotor", OnObstacleHit, self)) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    expect(mg.player.hit_points).toBe(7);
+  });
+
+  test("an obstacle's OnHitFollower reports the player's model as the event model", async () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10, Models: [{ Model: "mgs_swoop", RotatingModel: 0 }] });
+    const rock = await addObstacle(mg, "mgs_rock01", 10);
+    let model = "";
+    rock.scripts.OnHitFollower = fakeScript((self) => { model = routine("kotor", GetLastEventModelName, self); }) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    expect(model).toBe("mgs_swoop");
+  });
+
+  test("enemy shots deviate by up to Inaccuracy", () => {
+    const mg = turretGame({}, [fighter(10, { Gun_Banks: [bulletBank({ Damage: 1, Lifespan: 5, Rate_Of_Fire: 1, Speed: 20 }, { Inaccuracy: 30 })] })]);
+    mg.enemies[0].setTrack(aimedTrack(10, 0));
+    jest.spyOn(Math, "random").mockReturnValue(1); // the largest deviation
+    mg.initMiniGameObjects();
+    mg.tick(0.1);
+    const bullet = mg.enemies[0].gunBanks[0].bullets[0];
+    expect(THREE.MathUtils.radToDeg(bullet.direction.angleTo(new THREE.Vector3(0, -1, 0)))).toBeCloseTo(30);
+  });
+
+  test("a bank targets a player whose sphere contains the muzzle, and never fires backwards", () => {
+    const shooter = { Gun_Banks: [bulletBank({ Damage: 1, Lifespan: 5, Rate_Of_Fire: 1, Speed: 20 }, { Horiz_Spread: 179 })] };
+    const mg = turretGame({}, [fighter(0.5, shooter), fighter(10, shooter)]);
+    mg.enemies[0].setTrack(makeTrack(0, 0.5, 0)); // inside the player's sphere, facing away
+    mg.enemies[1].setTrack(makeTrack(0, 10, 0));  // player directly behind, very wide spread
+    mg.initMiniGameObjects();
+    mg.tick(0.1);
+    expect(mg.enemies.map((e) => e.gunBanks[0].targetting)).toEqual([true, false]);
+  });
+
+  test("laps are counted from accumulated track time: a loop shorter than a frame still credits every lap", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
+    const track = new FakeAnimatedTrack(0.2);
+    mg.player.setTrack(track as any);
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    expect(mg.player.loopsCompleted).toBe(5);
+    // the real animation manager wrapped at most once per update
+    expect(track.animationManager.currentAnimationState.elapsedCount).toBeLessThan(5);
+  });
+
+  test("a huge frame is sub-stepped and capped", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
+    mg.player.setTrack(new FakeAnimatedTrack(0.5) as any);
+    mg.initMiniGameObjects();
+    mg.tick(5); // e.g. a backgrounded tab
+    expect(mg.elapsed).toBe(ModuleMiniGame.MAX_FRAME);
+    expect(mg.player.loopsCompleted).toBe(2);
+  });
+
+  test("without Maximum_Speed an animated track stands still at speed 0 and runs at full rate once moving", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0, Accel_Secs: 0 });
+    mg.player.setTrack(new FakeAnimatedTrack(1) as any);
+    mg.initMiniGameObjects();
+    tickFor(mg, 3);
+    expect(mg.player.loopsCompleted).toBe(0);
+    mg.player.speed = 3;
+    tickFor(mg, 2);
+    expect(mg.player.loopsCompleted).toBe(2);
+  });
+});
+
+describe("review round 2: stepping", () => {
+  test("a long frame is simulated in steps, so a fast swoop cannot skip an obstacle", async () => {
+    const mg = swoopGame({ Minimum_Speed: 100, Maximum_Speed: 100 });
+    await addObstacle(mg, "mgs_rock01", 50);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitObstacle = hits as any;
+    mg.initMiniGameObjects();
+    mg.tick(1); // 100 units in one frame; steps of 0.25 land on y=50
+    expect(hits.calls).toBe(1);
+  });
+
+  test("followers credit every loop of a track shorter than a frame", () => {
+    const mg = swoopGame({}, [{ Track: "trk", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.enemies[0].setTrack(new FakeAnimatedTrack(0.2, 100));
+    mg.initMiniGameObjects();
+    tickFor(mg, 1);
+    expect(mg.enemies[0].loopsCompleted).toBe(5);
   });
 });

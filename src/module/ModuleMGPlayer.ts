@@ -82,18 +82,21 @@ export class ModuleMGPlayer extends ModuleObject {
   cameraRotate: any;
   num_loops: number;
 
-  /** Tunnel limits as authored (degrees for turret rotation, track units for swoop lateral offset). */
-  tunnelRaw: { neg: { x: number; y: number; z: number; }; pos: { x: number; y: number; z: number; }; } = {
-    neg: { x: 0, y: 0, z: 0 }, pos: { x: 0, y: 0, z: 0 },
-  };
-
-  /** Swoop steering: -1/0/1 from input this frame, current lateral velocity, lane centre on the track. */
+  /**
+   * Swoop steering: -1/0/1 held input for this frame (cleared by ModuleMiniGame.tick),
+   * current lateral velocity, and the lane centre on world X.
+   */
   lateralInput: number = 0;
   lateralVelocity: number = 0;
   laneOriginX: number = 0;
 
   /** Gear-shift key state, so a held key (or OS key repeat) shifts once per press. */
   shiftHeld: boolean = false;
+  /** After a pause or menu, MGshoot must be released before it acts again. */
+  shootNeedsRelease: boolean = false;
+
+  /** Rider time along an animated track (seconds of animation), for lap counting. */
+  trackTime: number = 0;
 
   /** Contacts whose default obstacle response already ran: object -> contact serial. */
   handledContacts: Map<ModuleObject, number> = new Map();
@@ -356,10 +359,10 @@ export class ModuleMGPlayer extends ModuleObject {
   /**
    * Without inertia the swoop slides sideways at full lateral speed while steering and
    * stops when released; with UseInertia it accelerates/decelerates at LateralAccel.
+   * The input stays set for the whole frame (all sub-steps); ModuleMiniGame.tick clears it.
    */
   updateLateralVelocity(delta: number){
     const input = this.lateralInput;
-    this.lateralInput = 0;
     const maxSpeed = this.getMaxLateralSpeed();
     if(!this.getMiniGame()?.useInertia){
       this.lateralVelocity = input * maxSpeed;
@@ -376,9 +379,14 @@ export class ModuleMGPlayer extends ModuleObject {
     this.lateralVelocity = Math.max(-maxSpeed, Math.min(maxSpeed, this.lateralVelocity));
   }
 
-  /** Keep the swoop inside TunnelXNeg..TunnelXPos (track units from the lane centre) unless X is infinite. */
+  /**
+   * Keep the swoop inside the X tunnel limits (TunnelXNeg..TunnelXPos, in track units
+   * from the lane centre along world X) unless X is infinite. Reads the live limits, so
+   * SWMG_SetPlayerTunnelNeg/Pos take effect.
+   */
   clampLateral(){
-    const neg = this.tunnelRaw.neg.x, pos = this.tunnelRaw.pos.x;
+    const neg = THREE.MathUtils.radToDeg(this.tunnel.neg.x);
+    const pos = THREE.MathUtils.radToDeg(this.tunnel.pos.x);
     if(this.tunnelInfinite.x || (neg === 0 && pos === 0) || neg > pos){ return; }
     const offset = this.track.position.x - this.laneOriginX;
     const clamped = Math.max(neg, Math.min(pos, offset));
@@ -388,21 +396,35 @@ export class ModuleMGPlayer extends ModuleObject {
     }
   }
 
-  /** Play the track animation looped at a rate proportional to speed; each wrap is one lap. */
+  /**
+   * Animation playback rate for an animated track: speed / Maximum_Speed. Without a
+   * Maximum_Speed the track runs at full rate while the swoop moves and stops at speed 0.
+   */
+  getTrackRate(): number {
+    if(this.speed_max > 0){ return Math.max(0, this.speed / this.speed_max); }
+    return this.speed > 0 ? 1 : 0;
+  }
+
+  /**
+   * Play the track animation looped at the speed-scaled rate. Laps are counted from the
+   * rider's accumulated animation time, not from the animation manager's wraps (it wraps
+   * at most once per update and drops the remainder), so every lap is credited on time.
+   */
   advanceTrackAnimation(delta: number){
     const track: any = this.track;
     if(!track.animationManager?.currentAnimation){
       track.playAnimation(0, true);
     }
-    const rate = this.speed_max > 0 ? this.speed / this.speed_max : 1;
-    const before = track.animationManager?.currentAnimationState?.elapsedCount || 0;
-    track.update(delta * rate);
-    const after = track.animationManager?.currentAnimationState?.elapsedCount || 0;
-    for(let i = before; i < after; i++){
+    const step = delta * this.getTrackRate();
+    track.update(step);
+    const length = track.animationManager?.currentAnimation?.length || 0;
+    if(!(length > 0)){ return; }
+    this.trackTime += step;
+    while(this.trackTime >= length - 1e-9){
+      this.trackTime -= length;
       this.completeLoop();
     }
   }
-
   completeLoop(){
     const miniGame = this.getMiniGame();
     const now = miniGame?.elapsed ?? 0;
@@ -963,11 +985,11 @@ export class ModuleMGPlayer extends ModuleObject {
   }
 
   onHitFollower( follower: ModuleMGEnemy ){
-    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitFollower, { followerHit: follower }, () => this.defaultObstacleHit(follower));
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitFollower, { followerHit: follower, hitTarget: follower }, () => this.defaultObstacleHit(follower));
   }
 
   onHitObstacle( obstacle: ModuleMGObstacle ){
-    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitObstacle, { obstacleHit: obstacle }, () => this.defaultObstacleHit(obstacle));
+    this.getMiniGame()?.dispatchEvent(this, ModuleObjectScript.MGPlayerOnHitObstacle, { obstacleHit: obstacle, hitTarget: obstacle }, () => this.defaultObstacleHit(obstacle));
   }
 
   onTrackLoop(){
@@ -1089,11 +1111,6 @@ export class ModuleMGPlayer extends ModuleObject {
 
     if(this.template.RootNode.hasField('TunnelZPos'))
       this.tunnel.pos.z = THREE.MathUtils.degToRad(this.template.getFieldByLabel('TunnelZPos').getValue());
-
-    for(const axis of ['x', 'y', 'z'] as const){
-      this.tunnelRaw.neg[axis] = THREE.MathUtils.radToDeg(this.tunnel.neg[axis]);
-      this.tunnelRaw.pos[axis] = THREE.MathUtils.radToDeg(this.tunnel.pos[axis]);
-    }
 
     // Some retail templates spell the label with a lowercase L ("Tunnellnfinite").
     const infiniteLabel = ['TunnelInfinite', 'Tunnellnfinite'].find((label) => this.template.RootNode.hasField(label));
