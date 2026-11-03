@@ -1963,13 +1963,17 @@ describe('caster animations through the creature frame loop (fake model)', () =>
     const { caster, target, model } = setup();
     new TalentSpell(SPELL_ID).useTalentOnObject(target, caster); // hostile power: the caster becomes excited
     let heldThroughConjure = true;
+    let midRelease: string | undefined;
     let t = 0;
     frames([caster, target], 6, 0.05, () => {
       t += 0.05;
       if(t > 0.2 && t < 1.4 && model.current !== 'castout1') heldThroughConjure = false;
+      // Partway through the 1 s release clip it must still be showing (a PAUSE index would let READY replace it).
+      if(Math.abs(t - 2.0) < 0.025) midRelease = model.current;
     });
     expect(caster.combatData.combatState).toBe(true);
     expect(heldThroughConjure).toBe(true);
+    expect(midRelease).toBe('castoutlp1');
     expect(model.played).toEqual(['castout1(loop)', 'castoutlp1', 'g8r1(loop)']);
     expect(caster.animationState.index).toBe(ModuleCreatureAnimState.READY);
     expect(impactRuns).toHaveLength(1);
