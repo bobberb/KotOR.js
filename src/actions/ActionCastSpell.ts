@@ -89,6 +89,10 @@ export class ActionCastSpell extends Action {
     if(combatRound.roundPaused) return ActionStatus.IN_PROGRESS;
 
     const target = this.target;
+    // A corpse is not a valid target: no walk, no force points, no impact (e.g. the previous queued power killed it).
+    if(target != this.owner && BitWise.InstanceOfObject(target, ModuleObjectType.ModuleCreature) && target.isDead()){
+      return this.refuse(spell);
+    }
     const castPoint = target
       ? target.position
       : new THREE.Vector3(this.getParameter<number>(6) || 0, this.getParameter<number>(7) || 0, this.getParameter<number>(8) || 0);
@@ -119,6 +123,8 @@ export class ActionCastSpell extends Action {
       });
       // Stop the walk the moment the (possibly moving) target is within approach range.
       move.stopWhen = () => spell.isPointInRange(this.owner, target ? target.position : castPoint, approachRange);
+      // Replan a chase about as often as a range-sized move would, not every half metre the target moves.
+      if(target) move.replanDistance = Math.max(0.5, approachRange * 0.25);
       return ActionStatus.IN_PROGRESS;
     }
 

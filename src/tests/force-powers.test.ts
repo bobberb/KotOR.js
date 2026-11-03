@@ -69,6 +69,7 @@ import { GFFStruct } from '@/resource/GFFStruct';
 import { ModuleObjectType } from '@/enums/module/ModuleObjectType';
 import { ModuleItemCostTable } from '@/enums/module/ModuleItemCostTable';
 import { ActionStatus } from '@/enums/actions/ActionStatus';
+import { ModuleCreatureAnimState } from '@/enums/module/ModuleCreatureAnimState';
 
 const SPELL_ID = 7;
 const SPELL_COST = 10;
@@ -1024,6 +1025,8 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
       tick(creatures, delta, delta);
       for(const creature of creatures){
         if(creature.force > 0) creature.position.addScaledVector(creature.forceVector, RUN_SPEED * delta);
+        // ModuleCreature.update ends every frame with force = 0; the move must set it again next frame.
+        creature.force = 0;
       }
     }
   }
@@ -1159,6 +1162,119 @@ describe('walking into cast range (real ActionMoveToPoint, stub pathfinding)', (
     expect(impactRuns).toHaveLength(2);
     expect(walksWhilePaused.length).toBeGreaterThan(0);
     expect(walksWhilePaused.every((paused) => !paused)).toBe(true);
+  });
+
+  /** Each walk "arrives" after carrying the caster the next scripted distance along +x. */
+  function scriptWalks(steps: number[]){
+    let walk = 0;
+    let current: ActionMoveToPoint | undefined;
+    jest.spyOn(ActionMoveToPoint.prototype, 'update').mockImplementation(function(this: ActionMoveToPoint){
+      if(current !== this){ current = this; this.owner.position.x += steps[walk++] ?? 0; }
+      return ActionStatus.COMPLETE;
+    });
+  }
+
+  test('a walk that gains ground resets the stall count: stall, stall, progress, stall, then in range still casts', () => {
+    const caster = makeCreature();
+    const moves = countMoves(caster);
+    scriptWalks([0, 0, 3, 0, 10]);
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(20, 0, 0), 0, 0, 0, 0);
+    tick([caster], 6);
+    expect(moves).toHaveLength(5);
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  test('progress smaller than the 0.25 m tolerance counts as a stall', () => {
+    const caster = makeCreature();
+    const moves = countMoves(caster);
+    scriptWalks([0.2, 0.2, 0.2, 0.2, 0.2, 0.2]);
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0, 0, 0, 0);
+    tick([caster], 6);
+    expect(moves).toHaveLength(3);
+    expect(impactRuns).toHaveLength(0);
+  });
+
+  test('a walk stopped early by its live range check leaves the creature idle, unforced and pathless', () => {
+    const caster = makeCreature();
+    (caster as any).context = { debug: {} };
+    ActionCastSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(30, 0, 0), 0, 0, 0, 0);
+    caster.actionQueue.process(0.05); // ActionCastSpell queues the walk
+    const walk = caster.actionQueue[0] as ActionMoveToPoint;
+    expect(walk).toBeInstanceOf(ActionMoveToPoint);
+    caster.actionQueue.process(0.05); // walking: path planned, force applied
+    expect(caster.force).toBe(1);
+    expect(caster.getComputedPath()).toBeDefined();
+    const anim = jest.spyOn(caster, 'setAnimationState');
+    caster.position.set(25, 0, 0); // now within 0.9 x range of the point
+    caster.speed = 5;
+    // Drive the walk directly: the queue would also clear the path when it disposes a finished action.
+    expect(walk.update(0.05)).toBe(ActionStatus.COMPLETE);
+    expect(caster.force).toBe(0);
+    expect(caster.speed).toBe(0);
+    expect(anim).toHaveBeenLastCalledWith(ModuleCreatureAnimState.IDLE);
+    expect(caster.getComputedPath()).toBeUndefined();
+  });
+
+  // Measured: 20 / 13 / 7 replans with the range-tied threshold; 67 each with the move range's 0.5 m default.
+  test.each([['S', 10, 25], ['M', 15, 17], ['L', 28, 10]])('range %s: a 10 s chase replans the path about as often as a range-tied threshold allows', (rangeKey, range, maxPlans) => {
+    installSpells({ [SPELL_ID]: spellRow({ range: String(rangeKey) }) });
+    const area: any = GameState.module.area;
+    const traverse = area.path.traverseToPoint;
+    let plans = 0;
+    area.path.traverseToPoint = (...args: any[]) => { plans++; return traverse(...args); };
+    const caster = makeCreature();
+    const target = makeCreature();
+    target.position.set(Number(range) + 20, 0, 0);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    chaseTick(caster, target, 10, 0.9);
+    expect(plans).toBeLessThanOrEqual(Number(maxPlans));
+  });
+});
+
+describe('dead targets', () => {
+  test('a cast at a creature that is already dead is refused without spending FP', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    target.position.set(5, 0, 0);
+    target.currentHitPoints = -50;
+    expect(target.isDead()).toBe(true);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target]);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20);
+  });
+
+  test('two queued casts where the first kills: the second is refused and FP is spent once', () => {
+    const caster = makeCreature({ base: 40, max: 40, current: 40 });
+    const target = makeCreature();
+    target.position.set(5, 0, 0);
+    // The impact script kills its target.
+    const load = (GameState as any).NWScript.Load;
+    (GameState as any).NWScript.Load = jest.fn((name: string) => {
+      const instance = load(name);
+      const run = instance.run;
+      instance.run = function(caller: any){ run.call(this, caller); target.currentHitPoints = -50; };
+      return instance;
+    });
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 10);
+    expect(impactRuns).toHaveLength(1);
+    expect(caster.getFP()).toBe(40 - SPELL_COST);
+  });
+
+  test('a target that dies mid-conjure does not receive the impact; FP stays spent and the power is unsuccessful', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 0.5);
+    target.currentHitPoints = -50;
+    tick([caster, target], 0.1);
+    expect(spellInstances).toHaveLength(0);
+    tick([caster, target], 4);
+    expect(impactRuns).toHaveLength(0);
+    expect(caster.getFP()).toBe(20 - SPELL_COST);
+    expect(GetWasForcePowerSuccessful.kotor.call({} as any, caster)).toBe(0);
   });
 });
 

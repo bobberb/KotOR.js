@@ -32,6 +32,8 @@ export class ActionMoveToPoint extends Action {
    * Runtime-only: a move restored from a save has none and arrives on its range parameter as usual.
    */
   stopWhen?: () => boolean;
+  /** Optional: how far a followed target may move before the path is replanned (default: half the move range). Runtime-only. */
+  replanDistance?: number;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -84,7 +86,7 @@ export class ActionMoveToPoint extends Action {
 
       if(this.computedPath?.realtime){
         const movedDistance = Utility.Distance2D(this.real_target_position, this.last_path_target_position);
-        if(movedDistance > Math.max(0.5, range * 0.5)){
+        if(movedDistance > (this.replanDistance ?? Math.max(0.5, range * 0.5))){
           this.setComputedPath(undefined);
         }
       }

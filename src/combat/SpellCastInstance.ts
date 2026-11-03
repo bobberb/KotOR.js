@@ -113,7 +113,7 @@ export class SpellCastInstance {
 
   update(delta: number = 0){
     if(this.disposed) return;
-    if(!this.impacted && this.isCasterIncapacitated()){
+    if(!this.impacted && this.shouldAbort()){
       this.impact();
       return;
     }
@@ -151,9 +151,10 @@ export class SpellCastInstance {
     if(this.disposed || this.impacted) return;
     this.impacted = true;
 
-    // A creature that dies or is stunned/paralyzed before the power lands loses it; the force points stay spent.
-    // The round still reports it via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
-    if(this.isCasterIncapacitated()){
+    // A caster that dies or is stunned/paralyzed before the power lands loses it, and a target that dies first
+    // (e.g. killed by someone else mid-conjure) never receives it. Either way the force points stay spent; the
+    // round still reports the power via GetLastForcePowerUsed, but GetWasForcePowerSuccessful is FALSE.
+    if(this.shouldAbort()){
       if(this.owner?.combatData) this.owner.combatData.lastForcePowerSuccess = false;
       this.interrupted = true;
       this.completed = true;
@@ -194,9 +195,18 @@ export class SpellCastInstance {
     this.projectile = undefined;
   }
 
+  private shouldAbort(): boolean {
+    return this.isCasterIncapacitated() || this.isTargetDead();
+  }
+
   private isCasterIncapacitated(): boolean {
     if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return false;
     return this.owner.isDead() || this.owner.isDebilitated();
+  }
+
+  private isTargetDead(): boolean {
+    if(this.target === this.owner) return false;
+    return BitWise.InstanceOfObject(this.target, ModuleObjectType.ModuleCreature) && this.target.isDead();
   }
 
   private applyImpact(){
