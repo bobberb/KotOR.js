@@ -64,6 +64,9 @@ export class ModuleMGEnemy extends ModuleObject {
   loopsCompleted: number = 0;
   /** Seconds of track animation travelled since the last loop. */
   trackTime: number = 0;
+  /** The track animation wrapped in the previous update / this step shows the jump back to the start. */
+  trackWrappedLastUpdate: boolean = false;
+  trackPoseJump: boolean = false;
 
   /** True while the player is inside this follower's sphere (hit events fire on entry). */
   collided: boolean = false;
@@ -165,7 +168,12 @@ export class ModuleMGEnemy extends ModuleObject {
       }else if(!this.alive && this.track.animationManager.currentAnimation){
         this.track.stopAnimation();
       }
+      const wrapsBefore = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
       this.track.update(delta);
+      const wrapsAfter = this.track.animationManager?.currentAnimationState?.elapsedCount || 0;
+      // The manager poses before advancing its clock: the visible jump is the update after a wrap.
+      this.trackPoseJump = this.trackWrappedLastUpdate;
+      this.trackWrappedLastUpdate = wrapsAfter > wrapsBefore;
       // Count loops from accumulated track time: the animation manager wraps at most once per update.
       const length = this.track.animationManager?.currentAnimation?.length || 0;
       if(this.alive && length > 0){

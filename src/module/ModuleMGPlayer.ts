@@ -100,10 +100,13 @@ export class ModuleMGPlayer extends ModuleObject {
 
   /** Lap resets during the current step: where the swoop left the track and where it re-entered. */
   stepBreaks: { end: THREE.Vector3; start: THREE.Vector3 }[] = [];
-  /** Steps left in which an animated track's lap jump may still show up (the pose lags one update). */
-  lapWindow: number = 0;
-  /** Distance the swoop moved in the last continuous step, to recognise a jump. */
-  lastStepDistance: number = 0;
+  /**
+   * The animated track's animation manager wrapped during the previous update. It poses
+   * the rider before advancing its clock, so the visible jump back to the start happens
+   * on the update after the wrap: `trackPoseJump` marks that step.
+   */
+  trackWrappedLastUpdate: boolean = false;
+  trackPoseJump: boolean = false;
 
   /** Contacts whose default obstacle response already ran: object -> contact serial. */
   handledContacts: Map<ModuleObject, number> = new Map();
@@ -420,6 +423,7 @@ export class ModuleMGPlayer extends ModuleObject {
    * Play the track animation looped at the speed-scaled rate. Laps are counted from the
    * rider's accumulated animation time, not from the animation manager's wraps (it wraps
    * at most once per update and drops the remainder), so every lap is credited on time.
+   * The visible pose jump is tracked separately from the manager's own wrap.
    */
   advanceTrackAnimation(delta: number){
     const track: any = this.track;
@@ -427,13 +431,16 @@ export class ModuleMGPlayer extends ModuleObject {
       track.playAnimation(0, true);
     }
     const step = delta * this.getTrackRate();
+    const wrapsBefore = track.animationManager?.currentAnimationState?.elapsedCount || 0;
     track.update(step);
+    const wrapsAfter = track.animationManager?.currentAnimationState?.elapsedCount || 0;
+    this.trackPoseJump = this.trackWrappedLastUpdate;
+    this.trackWrappedLastUpdate = wrapsAfter > wrapsBefore;
     const length = track.animationManager?.currentAnimation?.length || 0;
     if(!(length > 0)){ return; }
     this.trackTime += step;
     while(this.trackTime >= length - 1e-9){
       this.trackTime -= length;
-      this.lapWindow = 2;
       this.completeLoop();
     }
   }

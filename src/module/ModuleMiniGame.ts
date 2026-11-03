@@ -98,8 +98,6 @@ export class ModuleMiniGame {
   private contextDepth: number = 0;
   /** Serial of the latest contact; colliding objects carry `mgContact` for the contact they are in. */
   private contactSerial: number = 0;
-  /** Distance each follower moved in its last continuous step, to recognise a track-loop jump. */
-  private followerStepDistance: Map<ModuleMGEnemy, number> = new Map();
 
   private obstacleTemplates: GFFObject[] = [];
   private heartbeatTimers: Map<ModuleObject, number> = new Map();
@@ -201,7 +199,6 @@ export class ModuleMiniGame {
     if(this.type == MiniGameType.SWOOPRACE){
       this.updatePlayerCollisions(this.getPlayerPath(from), followersFrom);
     }
-    if(player.lapWindow > 0){ player.lapWindow--; }
 
     this.updateHeartbeats(delta);
   }
@@ -209,9 +206,9 @@ export class ModuleMiniGame {
   /**
    * The player's path over the step as segments, cut at track discontinuities:
    * - an unanimated track records the exact end/start points of each lap reset (stepBreaks);
-   * - an animated track poses the rider one update late, so the jump back to the start shows
-   *   up on the step after the lap (or the same one); within that window a displacement far
-   *   larger than the previous step's is treated as the jump, and only its two ends are tested.
+   * - an animated track's animation manager poses the rider before advancing its clock, so
+   *   the visible jump back to the start is the step after the manager wraps
+   *   (`player.trackPoseJump`); that step's two ends are tested, not the path between them.
    */
   getPlayerPath(from: THREE.Vector3): [THREE.Vector3, THREE.Vector3][] {
     const player = this.player;
@@ -224,12 +221,8 @@ export class ModuleMiniGame {
     }
     segments.push([cursor, to]);
 
-    const distance = from.distanceTo(to);
-    if(!player.stepBreaks.length && player.lapWindow > 0 && distance > 3 * player.lastStepDistance + 1e-6){
+    if(!player.stepBreaks.length && player.trackPoseJump){
       return [[from, from], [to, to]];
-    }
-    if(!player.stepBreaks.length){
-      player.lastStepDistance = distance;
     }
     return segments;
   }
@@ -245,8 +238,9 @@ export class ModuleMiniGame {
    * Followers move too, so their test uses the relative motion over the step (a
    * follower trailing the player at the same speed never "touches" it). When the
    * player's path is cut by a lap reset, a parked follower is swept like an obstacle and
-   * a moving one is compared at end positions; when the follower itself jumps (its own
-   * track loop), only end positions are compared.
+   * a moving one is compared at end positions; on the step where the follower's own track
+   * animation visibly jumps back to its start (the update after its manager wraps), only
+   * end positions are compared.
    */
   updatePlayerCollisions(
     path: [THREE.Vector3, THREE.Vector3][] = [[this.player.getWorldSphere().center.clone(), this.player.getWorldSphere().center.clone()]],
@@ -271,9 +265,7 @@ export class ModuleMiniGame {
       const f1 = enemySphere.center;
       const f0 = followersFrom.get(enemy) ?? f1;
       const moved = f0.distanceTo(f1);
-      const lastMoved = this.followerStepDistance.get(enemy) || 0;
-      const followerJumped = lastMoved > 0 && moved > 3 * lastMoved + 1e-6;
-      if(!followerJumped){ this.followerStepDistance.set(enemy, moved); }
+      const followerJumped = enemy.trackPoseJump;
       let reached: boolean;
       if(followerJumped){
         reached = to.distanceTo(f1) <= radius + enemySphere.radius;

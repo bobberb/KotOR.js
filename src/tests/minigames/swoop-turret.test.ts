@@ -1266,3 +1266,74 @@ describe("review round 4: edge cases", () => {
     expect(hits.calls).toBe(1);
   });
 });
+
+describe("review round 5: pose jumps follow the animation manager's own wraps", () => {
+  test.each([
+    [1.37, 30], [1.37, 60], [1.37, 144],
+    [3.71, 30], [3.71, 60], [3.71, 144],
+    [1.0, 30],
+  ])("track %s s at %s fps: one rock in the lane is hit exactly once per lap over 6 laps", async (length, fps) => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
+    mg.player.setTrack(new PosingTrack(length, 100 / length) as any); // course y 0..100
+    await addObstacle(mg, "mgs_rock01", 50);
+    const hitLaps: number[] = [];
+    mg.player.scripts.OnHitObstacle = fakeScript(() => hitLaps.push(mg.player.loopsCompleted)) as any;
+    mg.initMiniGameObjects();
+    const frames = Math.ceil((6 * length + 0.4) * fps);
+    for (let i = 0; i < frames; i++) mg.tick(1 / fps);
+    expect(mg.player.loopsCompleted).toBeGreaterThanOrEqual(6);
+    const perLap = [0, 1, 2, 3, 4, 5].map((lap) => hitLaps.filter((l) => l === lap).length);
+    expect(perLap).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+
+  test("a follower looping past a parked swoop hits it once per loop, never again on its jump back", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0 }, [{ Track: "f", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.player.setTrack(makeTrack(0, 50, 0) as any);
+    mg.enemies[0].setTrack(new PosingTrack(1.37, 100 / 1.37) as any);
+    const hits = fakeScript();
+    mg.player.scripts.OnHitFollower = hits as any;
+    mg.initMiniGameObjects();
+    for (let i = 0; i < Math.ceil(6 * 1.37 * 60) + 10; i++) mg.tick(1 / 60);
+    expect(mg.enemies[0].loopsCompleted).toBeGreaterThanOrEqual(6);
+    expect(hits.calls).toBe(mg.enemies[0].loopsCompleted);
+  });
+
+  test("a frame hitch does not let a moving follower pass through the swoop", () => {
+    const mg = swoopGame({ Minimum_Speed: 0, Maximum_Speed: 0 }, [{ Track: "f", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.player.setTrack(makeTrack(0, 50, 0) as any);
+    mg.enemies[0].setTrack(new PosingTrack(100, 60) as any); // 60 u/s, no loop in this test
+    const hits = fakeScript();
+    mg.player.scripts.OnHitFollower = hits as any;
+    mg.initMiniGameObjects();
+    for (let i = 0; i < 40; i++) mg.tick(1 / 60); // follower at about y=39
+    expect(hits.calls).toBe(0);
+    mg.tick(0.25); // a hitch: the follower crosses y=50 inside this step (pose shows it one update late)
+    mg.tick(1 / 60);
+    expect(mg.enemies[0].getWorldSphere().center.y).toBeGreaterThan(52);
+    expect(hits.calls).toBe(1);
+  });
+
+  test("an unanimated track lapped many times with a rock in the lane: one hit per lap", async () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40 });
+    mg.player.trackLength = 100;
+    await addObstacle(mg, "mgs_rock01", 50);
+    const hitLaps: number[] = [];
+    mg.player.scripts.OnHitObstacle = fakeScript(() => hitLaps.push(mg.player.loopsCompleted)) as any;
+    mg.initMiniGameObjects();
+    tickFor(mg, 15.5, 0.25); // 6 laps of 2.5 s, plus a little
+    expect(mg.player.loopsCompleted).toBe(6);
+    expect([0, 1, 2, 3, 4, 5].map((lap) => hitLaps.filter((l) => l === lap).length)).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+
+  test("a follower that kills the swoop gets no OnHitFollower of its own", () => {
+    const mg = swoopGame({ Minimum_Speed: 40, Maximum_Speed: 40, Bump_Damage: 10, Hit_Points: 10 }, [
+      { Track: "a", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10, Models: [{ Model: "mgs_wall", RotatingModel: 0 }] },
+    ]);
+    mg.enemies[0].setTrack(makeTrack(0, 5, 0));
+    const followerEvents = fakeScript();
+    mg.enemies[0].scripts.OnHitFollower = followerEvents as any;
+    mg.initMiniGameObjects();
+    mg.tick(0.25);
+    expect([mg.player.alive, followerEvents.calls]).toEqual([false, 0]);
+  });
+});
