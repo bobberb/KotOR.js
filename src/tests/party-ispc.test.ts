@@ -113,7 +113,9 @@ beforeEach(() => {
   jest.spyOn(ModuleCreature.prototype, 'loadScripts').mockImplementation(() => {});
   // The combat round is mocked out; there is no queue to clear.
   jest.spyOn(ModuleCreature.prototype, 'clearAllActions').mockImplementation(() => {});
+  PartyManager.PendingDestroy = [];
   // The real destroy tears down the renderer side; the state that matters here is the flag.
+  // Tests about destroy timing restore the real one.
   jest.spyOn(ModuleCreature.prototype, 'destroy').mockImplementation(function(this: ModuleCreature){ this.destroyed = true; });
   state.PartyManager = PartyManager;
   state.SWRuleSet = { skills: [], ranges: [], portraits: [], feats: [], classes: [] };
@@ -362,8 +364,8 @@ describe('a save made while a companion is in control survives save -> load -> s
 
     await moduleTransition();
     expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
-    // The companion in control stays listed, as the leader.
-    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }]);
+    // The companion in control stays listed, as the leader; CurrentMembers keeps join order (bao joined first).
+    expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 5 }, { isLeader: true, memberID: 2 }]);
 
     // and again: the duplicate must not come back on the next transition
     await moduleTransition();
@@ -445,6 +447,10 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(PartyManager.SwitchPlayerCharacter(2)).toBe(attonPM);
     expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
     expect(attonPM.isPC).toBe(0);
+    // Out of the party now; the real destroy is deferred to the next tick.
+    expect(exile.destroyed).toBe(false);
+    expect(PartyManager.PendingDestroy).toContain(exile);
+    PartyManager.FlushPendingDestroys();
     expect(exile.destroyed).toBe(true);
     expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }]);
     expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
@@ -462,6 +468,15 @@ describe('a save made while a companion is in control survives save -> load -> s
     return c;
   }
   async function flush(){ for(let i = 0; i < 10; i++) await Promise.resolve(); }
+  /** The real ModuleArea.dispose on an otherwise empty area: destroys the party and flushes pending destroys. */
+  function disposeArea(){
+    const area = realArea();
+    Object.assign(area, { rooms: [], areaOfEffects: [], creatures: [], items: [], placeables: [], doors: [], triggers: [],
+      waypoints: [], sounds: [], encounters: [], stores: [], spellInstances: [], textSprites: [], weather: { destroy(){} } });
+    area.dispose();
+  }
+  /** Let the deferred destroy of retired creatures (next tick) run. */
+  const tick = () => new Promise((r) => setTimeout(r, 0));
   function resolveModels(){
     (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValue({ userData: {} } as never);
     jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
@@ -513,6 +528,7 @@ describe('a save made while a companion is in control survives save -> load -> s
       await flush();
       expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
       expect(PartyManager.party[0]).toBe(hk);
+      await tick();
       expect(exile.destroyed).toBe(true);
       expect(carth.destroyed).toBe(false);
       expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }, { isLeader: true, memberID: 7 }]);
@@ -671,6 +687,7 @@ describe('a save made while a companion is in control survives save -> load -> s
       expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bao:4']);
       expect(count()).toBe(3);
       expect(memberIds()).toEqual([2, 4]);
+      await tick();
       expect(mand.destroyed).toBe(true);
       expect(bao.destroyed).toBe(false);
       expect(PartyManager.IsAvailable(6)).toBe(true);
@@ -722,10 +739,10 @@ describe('a save made while a companion is in control survives save -> load -> s
       });
       const onSpawn = jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
       const carth = PartyManager.SwitchPlayerCharacter(2)!;
-      expect(exile.destroyed).toBe(true); // not left for the model callback
+      expect(exile.destroyed).toBe(false); // deferred: the running script may still address it
       PartyManager.Save();
-      // ModuleArea.dispose: splice the party and destroy each member
-      PartyManager.party.splice(0, PartyManager.party.length).forEach((m) => m.destroy());
+      disposeArea(); // the real ModuleArea.dispose
+      expect(exile.destroyed).toBe(true); // flushed by the transition, not leaked
       const unhandled: any[] = [];
       const onUnhandled = (e: any) => unhandled.push(String(e));
       process.on('unhandledRejection', onUnhandled);
@@ -763,16 +780,161 @@ describe('a save made while a companion is in control survives save -> load -> s
       PartyManager.SwitchPlayerCharacter(-1);
       await flush();
       expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bao:4']);
+      await tick();
       expect(mand.destroyed).toBe(true);
     });
 
-    test('a protagonist whose destroy throws does not abort the switch', () => {
+    test('a deferred destroy that throws neither aborts the switch nor stops the other pending destroys', () => {
       const exile = PartyManager.Player;
       (exile as any).destroy = () => { throw new Error('renderer gone'); };
+      const other = member('stray', 9);
       const carth = PartyManager.SwitchPlayerCharacter(2)!;
       expect(PartyManager.Player).toBe(carth);
-      expect(carth.npcId).toBe(2);
       expect(roster()).toEqual(['carth:2(P)']);
+      PartyManager.RetireCreature(other);
+      expect(() => PartyManager.FlushPendingDestroys()).not.toThrow();
+      expect(other.destroyed).toBe(true);
+      expect(PartyManager.PendingDestroy).toEqual([]);
+    });
+
+    test('with the REAL destroy, a script that switches control can still address the old PC; it is destroyed next tick', async () => {
+      (ModuleCreature.prototype.destroy as jest.Mock).mockRestore();
+      state.ModuleObjectManager.RemoveObject = jest.fn();
+      state.CursorManager = { notifyObjectDestroyed: jest.fn() };
+      state.ActionFactory.ActionDoCommand = class { params: any[] = []; setParameter(i: number, _t: number, v: any){ this.params[i] = v; } dispose(){} };
+      const exile = PartyManager.Player;
+      if((exile as any).debugLabel){ (exile as any).debugLabel.dispose = () => {}; }
+      const scene = new (jest.requireActual('three') as typeof import('three')).Object3D();
+      scene.add(exile.container);
+
+      // object oPC = GetFirstPC(); SwitchPlayerCharacter(2); AssignCommand(oPC, ActionDoCommand(...));
+      const oPC = routine(require('@/nwscript/builtins/objects/party').GetFirstPC, 'tsl')();
+      expect(oPC).toBe(exile);
+      PartyManager.SwitchPlayerCharacter(2);
+      const assigned = { offset: 0, script: { caller: undefined as any, seekTo(){}, runScript(){ this.caller.doCommand({ name: 'k_follow' }); } } };
+      const { AssignCommand } = require('@/nwscript/builtins/scripting');
+      expect(() => routine(AssignCommand, 'tsl')(oPC, assigned)).not.toThrow();
+      expect(exile.actionQueue.length).toBe(1);
+      expect(PartyManager.party.includes(exile)).toBe(false);
+      expect(exile.isPM).toBe(false);
+      expect(exile.container.parent).toBeNull(); // out of the scene: not rendered, not pickable
+      expect(exile.destroyed).toBe(false);
+
+      await tick();
+      expect(console.error).not.toHaveBeenCalledWith('FlushPendingDestroys: failed to destroy', expect.anything());
+      expect(exile.destroyed).toBe(true);
+      expect(exile.actionQueue).toBeUndefined();
+      // A later script still holding the dead PC: no-op, no throw.
+      expect(() => exile.doCommand({} as any)).not.toThrow();
+      expect(() => routine(require('@/nwscript/builtins/scripting').ActionDoCommand, 'tsl', exile)({ script: {} })).not.toThrow();
+    });
+
+    test('with the REAL destroy, a transition during the deferral destroys the old PC', () => {
+      (ModuleCreature.prototype.destroy as jest.Mock).mockRestore();
+      state.ModuleObjectManager.RemoveObject = jest.fn();
+      state.CursorManager = { notifyObjectDestroyed: jest.fn() };
+      const exile = PartyManager.Player;
+      if((exile as any).debugLabel){ (exile as any).debugLabel.dispose = () => {}; }
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      if((carth as any).debugLabel){ (carth as any).debugLabel.dispose = () => {}; }
+      PartyManager.Save();
+      disposeArea();
+      expect(exile.destroyed).toBe(true);
+      expect(exile.actionQueue).toBeUndefined();
+      expect(PartyManager.PendingDestroy).toEqual([]);
+    });
+
+    test('the switched-in creature appears where the outgoing one stood', () => {
+      const exile = PartyManager.Player;
+      exile.position.set(12, -4, 3);
+      exile.quaternion.set(0, 0, 0.6, 0.8);
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      expect([carth.position.x, carth.position.y, carth.position.z]).toEqual([12, -4, 3]);
+      expect([carth.quaternion.z, carth.quaternion.w]).toEqual([0.6, 0.8]);
+    });
+
+    test('switching with no player creature (no module loaded) is refused', () => {
+      PartyManager.Player = undefined;
+      PartyManager.party = [];
+      expect(PartyManager.SwitchPlayerCharacter(2)).toBeUndefined();
+      expect(PartyManager.Player).toBeUndefined();
+      expect(PartyManager.party).toEqual([]);
+    });
+
+    test('switching between companions over capacity drops the outgoing companion, not one a script just added', async () => {
+      const { bao, mand } = await companionOnlySegment();
+      const carth = PartyManager.Player;
+      PartyManager.SwitchPlayerCharacter(7);
+      await flush();
+      expect(roster()).toEqual(['hk:7(P)', 'bao:4', 'mand:6']);
+      expect(memberIds()).toEqual([4, 6, 7]);
+      await tick();
+      expect(carth.destroyed).toBe(true);
+      expect(bao.destroyed || mand.destroyed).toBe(false);
+      expect(PartyManager.IsAvailable(2)).toBe(true);
+      expect(PartyManager.NPCS[2].template.RootNode.getFieldByLabel('Tag').getValue()).toBe('carth');
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+    });
+
+    test('join order survives a party reorder, a transition and a PARTYTABLE save, and decides who leaves', async () => {
+      const { bao, mand } = await companionOnlySegment();
+      // Reorder the world party (e.g. a leader change): join order must not follow it.
+      PartyManager.party = [PartyManager.Player, mand, bao];
+      await moduleTransition();
+      expect(memberIds()).toEqual([2, 4, 6]);
+      PartyManager.party = [PartyManager.party[0], ...PartyManager.party.slice(1).reverse()];
+      await PartyManager.Export('save');
+      const ids = new GFFObject(exported).RootNode.getFieldByLabel('PT_MEMBERS').getChildStructs().map((s) => s.getFieldByLabel('PT_MEMBER_ID').getValue());
+      expect(ids).toEqual([2, 4, 6]);
+      PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+      PartyManager.SwitchPlayerCharacter(-1);
+      await flush();
+      expect(roster().sort()).toEqual(['bao:4', 'carth:2', 'exile:-1(P)']); // mand joined last
+    });
+
+    test('AddNPCById on a full party lists nobody (no phantom member)', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [PartyManager.Player, carth, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      await PartyManager.AddNPCById(7);
+      expect(memberIds()).toEqual([2, 5]);
+      expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(7)).toBe(0);
+    });
+
+    test('loadParty keeps going past a member whose slot has no template', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
+      PartyManager.NPCS[2].template = undefined;
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      await realArea().loadParty();
+      expect(PartyManager.party.map((p) => p.getTag())).toEqual(['exile', 'bastila']);
+    });
+
+    test('loadPlayer with the player still alive places it without holes', async () => {
+      const exile = PartyManager.Player;
+      jest.spyOn(exile, 'load').mockImplementation(() => {});
+      (exile as any).collisionManager = {};
+      PartyManager.party = [];
+      PartyManager.CurrentMembers = [{ isLeader: true, memberID: 5 }];
+      await areaLoadPlayer();
+      expect(PartyManager.party).toEqual([exile]);
+    });
+
+    test('a model that resolves to nothing is skipped quietly', async () => {
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockResolvedValue(undefined as never);
+      const onSpawn = jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+      PartyManager.SwitchPlayerCharacter(2);
+      await flush();
+      expect(onSpawn).not.toHaveBeenCalled();
+      expect(console.error).not.toHaveBeenCalledWith('SwitchPlayerCharacter: model load failed', 2, expect.anything());
+    });
+
+    test('SavePartyMember tolerates a hole in the party', async () => {
+      PartyManager.party = [undefined as any, member('carth', 2)];
+      await expect(PartyManager.SavePartyMember(9)).resolves.toBeUndefined();
     });
 
     test('a model that resolves after the switched-in creature was destroyed is not added to the scene', async () => {

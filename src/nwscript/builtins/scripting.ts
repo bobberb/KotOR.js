@@ -99,7 +99,7 @@ export const ActionDoCommand = defineAction({
   returnType: NWScriptDataType.VOID,
   params: [actionParam<any>("aActionToDo")] as const,
   kotor(this: NWScriptInstance, aActionToDo) {
-    this.caller.doCommand(aActionToDo.script);
+    this.caller?.doCommand?.(aActionToDo.script);
   },
 });
 

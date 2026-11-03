@@ -1902,6 +1902,8 @@ export class ModuleObject {
    */
   doCommand(script: NWScriptInstance){
     //console.log('doCommand', this.getTag(), script, action, instruction);
+    // A script may still hold a creature that has since been destroyed (e.g. the PC after a switch).
+    if(this.destroyed || !this.actionQueue){ return; }
     let action = new GameState.ActionFactory.ActionDoCommand();
     action.setParameter(0, ActionParameterType.SCRIPT_SITUATION, script);
     this.actionQueue.add(action);

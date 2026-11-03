@@ -522,10 +522,11 @@ export class PartyManager {
       let ptMembersList = partytable.RootNode.addField(new GFFField(GFFDataType.LIST, 'PT_MEMBERS'));
 
       let numMembers = 0;
-      for(let i = 0; i < GameState.PartyManager.party.length; i++){
-        let member = GameState.PartyManager.party[i];
-        // Every slot member, including a companion in control (it is flagged PT_IS_LEADER when it leads).
-        if(member instanceof ModuleCreature && PartyManager.IsValidNPCSlot(member.npcId)){
+      // Every slot member in join order, including a companion in control (flagged PT_IS_LEADER when it leads).
+      const slotMembers = PartyManager.GetSlotMembersInJoinOrder();
+      for(let i = 0; i < slotMembers.length; i++){
+        let member = slotMembers[i];
+        if(PartyManager.IsValidNPCSlot(member.npcId)){
           let memberStruct = new GFFStruct();
           memberStruct.addField( new GFFField(GFFDataType.BYTE, 'PT_IS_LEADER') ).setValue( GameState.getCurrentPlayer() == member ? 1 : 0 );
           memberStruct.addField( new GFFField(GFFDataType.INT, 'PT_MEMBER_ID') ).setValue( member.npcId );
@@ -643,6 +644,11 @@ export class PartyManager {
 
   static async AddNPCById(npcId = 0){
     if(PartyManager.IsNPCInParty(npcId) || PartyManager.IsControlledNPC(npcId)){
+      return;
+    }
+    // Refuse before listing it: a refused load would otherwise leave a member with no creature behind it.
+    if(PartyManager.GetCompanionMemberCount() >= PartyManager.MaxNPCCount || PartyManager.party.filter(Boolean).length >= PartyManager.MaxSize){
+      console.warn('AddNPCById: party is full', npcId);
       return;
     }
 
@@ -1305,8 +1311,12 @@ export class PartyManager {
     if(npcId != -1 && !PartyManager.IsValidNPCSlot(npcId)){
       return undefined;
     }
+    // Nothing to switch from (no module loaded yet): refuse rather than spawn a creature at the origin.
+    if(!(oldPC instanceof ModuleCreature)){
+      return undefined;
+    }
 
-    const oldIsCreature = oldPC instanceof ModuleCreature;
+    const oldIsCreature = true;
     const oldIsProtagonist = oldIsCreature && PartyManager.IsProtagonist(oldPC);
     if(oldIsProtagonist){
       PartyManager.ActualPlayerTemplate = oldPC.save();
@@ -1339,15 +1349,13 @@ export class PartyManager {
       PartyManager.CurrentMembers.push({ isLeader: false, memberID: oldPC.npcId });
     }
 
-    PartyManager.EnforcePartyCapacity([partyMember, oldIsProtagonist ? undefined : oldPC]);
+    PartyManager.EnforcePartyCapacity(partyMember, oldPC, oldIsProtagonist, npcId >= 0);
 
     try{
-      const spawn = oldIsCreature ? oldPC.position.clone() : undefined;
-      const quaternion = oldIsCreature ? oldPC.quaternion.clone() : undefined;
-      // Destroyed now, not when the new model arrives: a module transition in between disposes only what is
-      // in the party, and the protagonist already left it.
+      const spawn = oldPC.position.clone();
+      const quaternion = oldPC.quaternion.clone();
       if(oldIsProtagonist){
-        try{ oldPC.destroy(); }catch(e){ console.error('SwitchPlayerCharacter: failed to destroy the outgoing protagonist', e); }
+        PartyManager.RetireCreature(oldPC);
       }
 
       if(member){
@@ -1390,19 +1398,78 @@ export class PartyManager {
   }
 
   /**
-   * The party in the world is at most MaxSize (the leader + 2). When a switch would exceed it (control returning
-   * to the protagonist while three companions are present), the most recently joined companion that is not kept
-   * leaves the party the way RemovePartyMember does: its creature goes, its slot stays available for the party
-   * selection screen. Unverified against retail, which may refuse the switch instead.
+   * The party in the world is at most MaxSize (the leader + 2). When a switch would exceed it, one companion
+   * leaves the party (creature retired, slot still available with its template saved):
+   * - switching between two companions: the outgoing one, never a member a script just added;
+   * - control returning to the protagonist: the most recently joined companion other than the one that was in
+   *   control. CurrentMembers is kept in join order (Save and PT_MEMBERS preserve it), so this survives saves
+   *   and transitions.
+   * Unverified against retail, which may refuse the switch instead.
    */
-  static EnforcePartyCapacity(keep: ModuleCreature[] = []){
+  static EnforcePartyCapacity(newPlayer: ModuleCreature, oldPC: ModuleCreature, oldIsProtagonist: boolean, newIsCompanion: boolean){
     while(PartyManager.party.filter(Boolean).length > PartyManager.MaxSize){
-      const order = PartyManager.CurrentMembers.map((m) => m.memberID);
-      const candidates = PartyManager.party.filter((pm) => pm && !keep.includes(pm) && PartyManager.IsValidNPCSlot(pm.npcId));
-      if(!candidates.length){ break; }
-      candidates.sort((a, b) => order.indexOf(b.npcId) - order.indexOf(a.npcId));
-      candidates[0].save(); // its slot template keeps what it has now, for when it rejoins
-      PartyManager.RemoveNPCById(candidates[0].npcId, false);
+      let leaving: ModuleCreature;
+      if(!oldIsProtagonist && newIsCompanion && PartyManager.party.includes(oldPC)){
+        leaving = oldPC;
+      }else{
+        const order = PartyManager.CurrentMembers.map((m) => m.memberID);
+        const candidates = PartyManager.party.filter((pm) => pm && pm !== newPlayer && pm !== oldPC && PartyManager.IsValidNPCSlot(pm.npcId));
+        if(!candidates.length){ break; }
+        candidates.sort((a, b) => order.indexOf(b.npcId) - order.indexOf(a.npcId));
+        leaving = candidates[0];
+      }
+      PartyManager.DropFromParty(leaving);
+    }
+  }
+
+  /**
+   * Take a companion out of the world party; its slot stays available with an up-to-date template.
+   */
+  static DropFromParty(creature: ModuleCreature){
+    creature.save();
+    PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
+    if(PartyManager.IsValidNPCSlot(creature.npcId)){
+      PartyManager.RemoveCurrentMemberByNPCId(creature.npcId);
+    }
+    PartyManager.RetireCreature(creature);
+    PartyManager.RebuildPortraitOrder();
+  }
+
+  static PendingDestroy: ModuleCreature[] = [];
+
+  /**
+   * Party creatures that hold an NPC slot, in the order they joined: the existing CurrentMembers order first,
+   * anything not listed yet after it in party order.
+   */
+  static GetSlotMembersInJoinOrder(): ModuleCreature[] {
+    const order = PartyManager.CurrentMembers.map((m) => m.memberID);
+    const rank = (pm: ModuleCreature) => { const i = order.indexOf(pm.npcId); return i < 0 ? order.length : i; };
+    return PartyManager.party
+      .filter((pm) => pm instanceof ModuleCreature && pm.npcId >= 0)
+      .map((pm, i) => ({ pm, i }))
+      .sort((a, b) => (rank(a.pm) - rank(b.pm)) || (a.i - b.i))
+      .map(({ pm }) => pm);
+  }
+
+  /**
+   * A creature leaving the world mid-script (the outgoing protagonist, a companion dropped for capacity): it leaves
+   * the party and the scene now, but the real destroy waits for the next tick, so the rest of the running script
+   * can still address it (AssignCommand, ActionX on OBJECT_SELF) without hitting a torn-down object.
+   * ModuleArea.dispose flushes it, so a transition in between cannot leak it.
+   */
+  static RetireCreature(creature: ModuleCreature){
+    if(!creature || creature.destroyed || PartyManager.PendingDestroy.includes(creature)){ return; }
+    creature.isPM = false;
+    try{ creature.container?.removeFromParent(); }catch(e){ console.error('RetireCreature: failed to detach', e); }
+    PartyManager.PendingDestroy.push(creature);
+    setTimeout(() => PartyManager.FlushPendingDestroys(), 0);
+  }
+
+  static FlushPendingDestroys(){
+    const pending = PartyManager.PendingDestroy.splice(0, PartyManager.PendingDestroy.length);
+    for(const creature of pending){
+      if(creature.destroyed){ continue; }
+      try{ creature.destroy(); }catch(e){ console.error('FlushPendingDestroys: failed to destroy', e); }
     }
   }
 
@@ -1413,7 +1480,7 @@ export class PartyManager {
 
     // The companion in control stays listed (with isLeader when it leads); ModuleArea.loadPlayer rebuilds it as
     // the Player and LoadPartyMember skips its entry, so it is not spawned twice.
-    const npcs = PartyManager.party.filter( (pm) => pm instanceof ModuleCreature && pm.npcId >= 0 );
+    const npcs = PartyManager.GetSlotMembersInJoinOrder();
     PartyManager.CurrentMembers = npcs.map((pm) => {
       return {
         isLeader: PartyManager.party[0] == pm,

@@ -376,6 +376,8 @@ export class ModuleArea extends ModuleObject {
       }
     }
 
+    // Creatures already out of the party but waiting for their deferred destroy (an outgoing protagonist).
+    GameState.PartyManager.FlushPendingDestroys();
     const partyMembers = GameState.PartyManager.party.splice(0, GameState.PartyManager.party.length);
     for(let i = 0; i < partyMembers.length; i++){
       try{
