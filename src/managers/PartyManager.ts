@@ -701,11 +701,21 @@ export class PartyManager {
   static GetPartyMemberByNPCId(npcId = 0){
     for(let i = 0; i < PartyManager.party.length; i++){
       const pm = PartyManager.party[i];
-      if(pm.npcId == npcId){
+      if(pm?.npcId == npcId){
         return pm;
       }
     }
     return null;
+  }
+
+  /**
+   * Put a creature in the party at (or as near as possible to) index, never leaving holes:
+   * the party array is what GetPartyMemberCount / GetPartyMemberByIndex and every party loop read.
+   */
+  static PlaceInParty(creature: ModuleCreature, index: number){
+    PartyManager.party = PartyManager.party.filter((pm) => pm && pm !== creature);
+    const at = Math.max(0, Math.min(Number.isFinite(index) ? index : PartyManager.party.length, PartyManager.party.length));
+    PartyManager.party.splice(at, 0, creature);
   }
 
   static RemovePartyMemberByNPCId(npcId = 0){
@@ -1329,17 +1339,23 @@ export class PartyManager {
       PartyManager.CurrentMembers.push({ isLeader: false, memberID: oldPC.npcId });
     }
 
+    PartyManager.EnforcePartyCapacity([partyMember, oldIsProtagonist ? undefined : oldPC]);
+
     try{
+      const spawn = oldIsCreature ? oldPC.position.clone() : undefined;
+      const quaternion = oldIsCreature ? oldPC.quaternion.clone() : undefined;
+      // Destroyed now, not when the new model arrives: a module transition in between disposes only what is
+      // in the party, and the protagonist already left it.
+      if(oldIsProtagonist){
+        try{ oldPC.destroy(); }catch(e){ console.error('SwitchPlayerCharacter: failed to destroy the outgoing protagonist', e); }
+      }
+
       if(member){
         member.isPC = 0;
         member.clearAllActions();
-        if(oldIsProtagonist){ oldPC.destroy(); }
         PartyManager.UpdateLeader();
         return member;
       }
-
-      const spawn = oldPC.position.clone();
-      const quaternion = oldPC.quaternion.clone();
 
       partyMember.isPM = true;
       partyMember.npcId = npcId;
@@ -1349,24 +1365,44 @@ export class PartyManager {
       // load(), which would otherwise restore whatever IsPC the template carried.
       partyMember.isPC = npcId == -1 ? 1 : 0;
       partyMember.clearAllActions();
-      partyMember.position.copy(spawn);
-      partyMember.quaternion.copy(quaternion);
+      if(spawn){ partyMember.position.copy(spawn); }
+      if(quaternion){ partyMember.quaternion.copy(quaternion); }
       partyMember.loadScripts();
       PartyManager.UpdateLeader();
       partyMember.loadModel().then( (model: OdysseyModel3D) => {
+        // The area may have been disposed (and this creature destroyed) while the model loaded.
+        if(partyMember.destroyed || !model){ return; }
         model.userData.moduleObject = partyMember;
-        partyMember.position.copy(spawn);
-        partyMember.quaternion.copy(quaternion);
+        if(spawn){ partyMember.position.copy(spawn); }
+        if(quaternion){ partyMember.quaternion.copy(quaternion); }
         model.hasCollision = true;
 
         GameState.group.party.add( partyMember.container );
-        if(oldIsProtagonist){ oldPC.destroy(); }
         partyMember.onSpawn();
+      }).catch((e: any) => {
+        console.error('SwitchPlayerCharacter: model load failed', npcId, e);
       });
       return partyMember;
     }catch(e){
       console.error(e);
       return undefined;
+    }
+  }
+
+  /**
+   * The party in the world is at most MaxSize (the leader + 2). When a switch would exceed it (control returning
+   * to the protagonist while three companions are present), the most recently joined companion that is not kept
+   * leaves the party the way RemovePartyMember does: its creature goes, its slot stays available for the party
+   * selection screen. Unverified against retail, which may refuse the switch instead.
+   */
+  static EnforcePartyCapacity(keep: ModuleCreature[] = []){
+    while(PartyManager.party.filter(Boolean).length > PartyManager.MaxSize){
+      const order = PartyManager.CurrentMembers.map((m) => m.memberID);
+      const candidates = PartyManager.party.filter((pm) => pm && !keep.includes(pm) && PartyManager.IsValidNPCSlot(pm.npcId));
+      if(!candidates.length){ break; }
+      candidates.sort((a, b) => order.indexOf(b.npcId) - order.indexOf(a.npcId));
+      candidates[0].save(); // its slot template keeps what it has now, for when it rejoins
+      PartyManager.RemoveNPCById(candidates[0].npcId, false);
     }
   }
 
@@ -1434,7 +1470,7 @@ export class PartyManager {
    * @returns PartyMember
    */
   static GetPMByNPCId(npcId: number = -1){
-    return PartyManager.party.find( (obj) => obj.npcId == npcId);
+    return PartyManager.party.find( (obj) => obj?.npcId == npcId);
   }
 
   /**
@@ -1534,15 +1570,24 @@ export class PartyManager {
       // Already in the world as the Player (saves written before Save() excluded it).
       return;
     }
+    // CurrentMembers holds up to 3 entries while a companion is in control (it is listed too, and the
+    // protagonist is out of the world); the world party itself never exceeds MaxSize.
+    if(nIdx < 0 || nIdx >= PartyManager.CurrentMembers.length){
+      console.log('LoadPartyMember', 'Wrong index', nIdx);
+      return;
+    }
+    if(PartyManager.party.filter(Boolean).length >= PartyManager.MaxSize){
+      console.warn('LoadPartyMember: party is full', nIdx, PartyManager.CurrentMembers[nIdx]);
+      return;
+    }
     const npc = PartyManager.NPCS[PartyManager.CurrentMembers[nIdx].memberID];
+    if(!(npc?.template instanceof GFFObject)){
+      console.warn('LoadPartyMember: no template for slot', PartyManager.CurrentMembers[nIdx].memberID);
+      return;
+    }
     const template = npc.template;
     template.RootNode.addField( new GFFField(GFFDataType.DWORD, 'ObjectId') ).setValue( GameState.ModuleObjectManager.GetNextPlayerId() );
     const partyMember = new ModuleCreature(template);
-
-    if(nIdx < 0 || nIdx > 1){
-      console.log('LoadPartyMember', 'Wrong index', nIdx, npc, partyMember);
-      return;
-    }
 
     let currentSlot: ModuleCreature;
 
@@ -1558,7 +1603,7 @@ export class PartyManager {
           PartyManager.party.unshift(PartyManager.party.splice(nIdx+1, 1)[0]);
         }*/
         PartyManager.AddPortraitToOrder( partyMember.getPortraitResRef() );
-        PartyManager.party[ PartyManager.GetCreatureStartingPartyIndex(partyMember) ] = partyMember;
+        PartyManager.PlaceInParty(partyMember, PartyManager.GetCreatureStartingPartyIndex(partyMember));
         let spawn = PartyManager.GetSpawnLocation(partyMember);
         partyMember.position.copy(spawn.position);
         partyMember.setFacing(spawn.getFacing(), true);
@@ -1849,7 +1894,7 @@ export class PartyManager {
    * @returns void
    */
   public static async SavePartyMember(npcId: number = 0){
-    const pm = PartyManager.party.find( (pm) => pm.npcId == npcId );
+    const pm = PartyManager.party.find( (pm) => pm?.npcId == npcId );
     if(pm) pm.save();
     const npc = PartyManager.NPCS[npcId];
     if(!npc){ return; }

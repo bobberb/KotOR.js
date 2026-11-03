@@ -1776,7 +1776,7 @@ export class ModuleArea extends ModuleObject {
 
         if(!this.miniGame){
           const playerSlot = GameState.PartyManager.GetCreatureStartingPartyIndex(player);
-          GameState.PartyManager.party[playerSlot] = player;
+          GameState.PartyManager.PlaceInParty(player, playerSlot);
           GameState.group.party.add( player.container );
         }
 
@@ -1823,7 +1823,7 @@ export class ModuleArea extends ModuleObject {
       
         if(!this.miniGame){
           const playerSlot = GameState.PartyManager.GetCreatureStartingPartyIndex(player);
-          GameState.PartyManager.party[playerSlot] = player;
+          GameState.PartyManager.PlaceInParty(player, playerSlot);
           GameState.group.party.add( player.container );
         }
 

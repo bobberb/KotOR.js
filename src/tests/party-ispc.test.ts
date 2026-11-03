@@ -113,6 +113,8 @@ beforeEach(() => {
   jest.spyOn(ModuleCreature.prototype, 'loadScripts').mockImplementation(() => {});
   // The combat round is mocked out; there is no queue to clear.
   jest.spyOn(ModuleCreature.prototype, 'clearAllActions').mockImplementation(() => {});
+  // The real destroy tears down the renderer side; the state that matters here is the flag.
+  jest.spyOn(ModuleCreature.prototype, 'destroy').mockImplementation(function(this: ModuleCreature){ this.destroyed = true; });
   state.PartyManager = PartyManager;
   state.SWRuleSet = { skills: [], ranges: [], portraits: [], feats: [], classes: [] };
   state.ModuleObjectManager = { AddObjectById: jest.fn(), GetNextPlayerId: jest.fn(() => 1) };
@@ -401,7 +403,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
     PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
     const atton = PartyManager.SwitchPlayerCharacter(2)!;
-    const destroy = jest.spyOn(atton, 'destroy').mockImplementation(() => {});
+    
     PartyManager.party = [atton];
     PartyManager.Save();
     expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }]);
@@ -423,7 +425,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(menu.getCurrentMemberCount()).toBe(0);
     PartyManager.RemoveNPCById(2, false);
     expect(PartyManager.party).toEqual([atton]);
-    expect(destroy).not.toHaveBeenCalled();
+    expect(atton.destroyed).toBe(false);
   });
 
   test('switching into a companion already in the party takes over that creature, no duplicate', () => {
@@ -431,7 +433,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     PartyManager.NPCS[2] = { template: creatureTemplate('atton', 0), available: true, canSelect: true, spawned: false };
     PartyManager.NPCS[5] = { template: creatureTemplate('bao', 0), available: true, canSelect: true, spawned: false };
     const exile = PartyManager.Player;
-    jest.spyOn(exile, 'destroy').mockImplementation(() => {});
+    
     jest.spyOn(PartyManager, 'RebuildPortraitOrder').mockImplementation(() => {});
     // An older companion template that still says IsPC=1: in control it must save 0.
     const attonPM = new ModuleCreature(creatureTemplate('atton', 1)); attonPM.load(); attonPM.npcId = 2; attonPM.isPM = true;
@@ -443,7 +445,7 @@ describe('a save made while a companion is in control survives save -> load -> s
     expect(PartyManager.SwitchPlayerCharacter(2)).toBe(attonPM);
     expect(roster()).toEqual(['atton:2(P)', 'bao:5']);
     expect(attonPM.isPC).toBe(0);
-    expect(exile.destroy).toHaveBeenCalled();
+    expect(exile.destroyed).toBe(true);
     expect(PartyManager.CurrentMembers).toEqual([{ isLeader: true, memberID: 2 }, { isLeader: false, memberID: 5 }]);
     expect(PartyManager.ActualPlayerTemplate.RootNode.getFieldByLabel('Tag').getValue()).toBe('exile');
 
@@ -456,7 +458,7 @@ describe('a save made while a companion is in control survives save -> load -> s
 
   function member(tag: string, slot: number){
     const c = new ModuleCreature(creatureTemplate(tag, 0)); c.load(); c.npcId = slot; c.isPM = true;
-    jest.spyOn(c, 'destroy').mockImplementation(() => {});
+    
     return c;
   }
   async function flush(){ for(let i = 0; i < 10; i++) await Promise.resolve(); }
@@ -471,7 +473,7 @@ describe('a save made while a companion is in control survives save -> load -> s
       PartyManager.ResetPartyTableState();
       PartyManager.CurrentMembers = [];
       PartyManager.party = [PartyManager.Player];
-      jest.spyOn(PartyManager.Player, 'destroy').mockImplementation(() => {});
+      
       for(const [slot, tag] of [[2, 'carth'], [5, 'bastila'], [7, 'hk']] as const){
         PartyManager.NPCS[slot] = { template: creatureTemplate(tag, 0), available: true, canSelect: true, spawned: false };
       }
@@ -490,7 +492,7 @@ describe('a save made while a companion is in control survives save -> load -> s
       await flush();
       expect(back.getTag()).toBe('exile');
       expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bastila:5']);
-      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(carth.destroyed).toBe(false);
       expect(memberIds()).toEqual([2, 5]);
       expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(2)).toBe(1);
       expect(PartyManager.NPCS[2].template.RootNode.getFieldByLabel('Experience').getValue()).toBe(1234);
@@ -511,8 +513,8 @@ describe('a save made while a companion is in control survives save -> load -> s
       await flush();
       expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
       expect(PartyManager.party[0]).toBe(hk);
-      expect(exile.destroy).toHaveBeenCalled();
-      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(exile.destroyed).toBe(true);
+      expect(carth.destroyed).toBe(false);
       expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }, { isLeader: true, memberID: 7 }]);
       (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
     });
@@ -538,7 +540,7 @@ describe('a save made while a companion is in control survives save -> load -> s
       PartyManager.SwitchPlayerCharacter(7);
       await flush();
       expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
-      expect(carth.destroy).not.toHaveBeenCalled();
+      expect(carth.destroyed).toBe(false);
       expect(memberIds()).toEqual([2, 5, 7]);
       (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
     });
@@ -620,6 +622,199 @@ describe('a save made while a companion is in control survives save -> load -> s
       PartyManager.CurrentMembers = [{ isLeader: true, memberID: 2 }];
       expect(() => PartyManager.UpdateLeader()).not.toThrow();
       expect(PartyManager.CurrentMembers).toEqual([{ isLeader: false, memberID: 2 }]);
+    });
+
+    /** Switch to non-party NPC 2, then AddPartyMember 4 and 6 in the same script: controlled + 2, protagonist out. */
+    async function companionOnlySegment(){
+      state.module = { area: { creatures: [] } };
+      resolveModels();
+      PartyManager.party = [PartyManager.Player];
+      PartyManager.SwitchPlayerCharacter(2);
+      const add = routine(partyRoutines.AddPartyMember, 'kotor');
+      const bao = member('bao', -1), mand = member('mand', -1);
+      bao.npcId = undefined; mand.npcId = undefined;
+      expect(add(4, bao)).toBe(1);
+      expect(add(6, mand)).toBe(1);
+      await flush();
+      PartyManager.NPCS[4].template = bao.save();
+      PartyManager.NPCS[6].template = mand.save();
+      return { bao, mand };
+    }
+    const count = () => routine(partyRoutines.GetPartyMemberCount, 'kotor')();
+
+    test('a companion-only segment of three survives a module transition', async () => {
+      await companionOnlySegment();
+      await moduleTransition();
+      expect(roster()).toEqual(['carth:2(P)', 'bao:4', 'mand:6']);
+      expect(memberIds()).toEqual([2, 4, 6]);
+    });
+
+    test('a full party switched to a non-party NPC keeps both companions through a transition', async () => {
+      const exile = PartyManager.Player;
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [exile, carth, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }];
+      resolveModels();
+      PartyManager.SwitchPlayerCharacter(7);
+      await flush();
+      await moduleTransition();
+      expect(roster()).toEqual(['hk:7(P)', 'carth:2', 'bastila:5']);
+    });
+
+    test('switching back to the protagonist with three companions keeps the party at three', async () => {
+      const { bao, mand } = await companionOnlySegment();
+      mand.experience = 77; // earned after joining; must be in the slot template when it leaves
+      PartyManager.ActualPlayerTemplate = creatureTemplate('exile', 1);
+      PartyManager.SwitchPlayerCharacter(-1);
+      await flush();
+      // The previously controlled companion stays; the most recently joined one leaves but stays available.
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bao:4']);
+      expect(count()).toBe(3);
+      expect(memberIds()).toEqual([2, 4]);
+      expect(mand.destroyed).toBe(true);
+      expect(bao.destroyed).toBe(false);
+      expect(PartyManager.IsAvailable(6)).toBe(true);
+      expect(PartyManager.NPCS[6].template.RootNode.getFieldByLabel('Tag').getValue()).toBe('mand');
+      expect(PartyManager.NPCS[6].template.RootNode.getFieldByLabel('Experience').getValue()).toBe(77);
+
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(new Promise(() => {}) as never);
+      await moduleTransition();
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bao:4']);
+    });
+
+    function stubSpawnLocation(){
+      const THREE = jest.requireActual('three') as typeof import('three');
+      jest.spyOn(PartyManager, 'GetSpawnLocation').mockImplementation(() => ({ position: new THREE.Vector3(), getFacing: () => 0 }) as any);
+    }
+
+    test('the party selection screen adds members while a companion is in control without leaving holes', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      PartyManager.SwitchPlayerCharacter(2);
+      await flush();
+      await PartyManager.AddNPCById(5);
+      expect(PartyManager.party.map((p) => p?.getTag())).toEqual(['carth', 'bastila']);
+      expect(count()).toBe(2);
+      expect(routine(partyRoutines.GetPartyMemberByIndex, 'kotor')(1)?.getTag()).toBe('bastila');
+      expect(PartyManager.GetPartyMemberByNPCId(9)).toBeNull();
+
+      await PartyManager.AddNPCById(7);
+      expect(PartyManager.party.map((p) => p?.getTag())).toEqual(['carth', 'bastila', 'hk']);
+      expect(routine(partyRoutines.IsNPCPartyMember, 'kotor')(7)).toBe(1);
+    });
+
+    test('LoadPartyMember never grows the world party past three', async () => {
+      resolveModels();
+      stubSpawnLocation();
+      const carth = member('carth', 2), bastila = member('bastila', 5);
+      PartyManager.party = [PartyManager.Player, carth, bastila];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }, { isLeader: false, memberID: 5 }, { isLeader: false, memberID: 7 }];
+      await PartyManager.LoadPartyMember(2);
+      expect(PartyManager.party).toEqual([PartyManager.Player, carth, bastila]);
+    });
+
+    test('a module transition while the switch\'s model loads neither leaks the protagonist nor runs on a disposed companion', async () => {
+      const exile = PartyManager.Player;
+      const resolvers: Function[] = [];
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockImplementation(function(this: any){
+        // The real loadModel resolves with this.model, undefined once the creature was destroyed mid-load.
+        return new Promise((r) => resolvers.push(() => r(this.destroyed ? this.model : { userData: {} }))) as any;
+      });
+      const onSpawn = jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      expect(exile.destroyed).toBe(true); // not left for the model callback
+      PartyManager.Save();
+      // ModuleArea.dispose: splice the party and destroy each member
+      PartyManager.party.splice(0, PartyManager.party.length).forEach((m) => m.destroy());
+      const unhandled: any[] = [];
+      const onUnhandled = (e: any) => unhandled.push(String(e));
+      process.on('unhandledRejection', onUnhandled);
+      resolvers.forEach((r) => r());
+      await flush(); await new Promise((r) => setTimeout(r, 10));
+      process.off('unhandledRejection', onUnhandled);
+      expect(carth.destroyed).toBe(true);
+      expect(onSpawn).not.toHaveBeenCalled();
+      expect(state.group.party.add).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    });
+
+    test('a failed model load during a switch is reported, not left as an unhandled rejection', async () => {
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockReturnValue(Promise.reject(new Error('bad appearance')) as never);
+      const unhandled: any[] = [];
+      const onUnhandled = (e: any) => unhandled.push(String(e));
+      process.on('unhandledRejection', onUnhandled);
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      await flush(); await new Promise((r) => setTimeout(r, 10));
+      process.off('unhandledRejection', onUnhandled);
+      expect(unhandled).toEqual([]);
+      expect(PartyManager.Player).toBe(carth);
+      expect(console.error).toHaveBeenCalledWith('SwitchPlayerCharacter: model load failed', 2, expect.any(Error));
+    });
+
+    test('over capacity on switching back, the previously controlled companion stays even if it joined last', async () => {
+      state.module = { area: { creatures: [] } };
+      resolveModels();
+      const bao = member('bao', 4), mand = member('mand', 6);
+      PartyManager.party = [PartyManager.Player, bao, mand];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 4 }, { isLeader: false, memberID: 6 }];
+      PartyManager.SwitchPlayerCharacter(2); // carth joins as the controlled companion, listed last
+      await flush();
+      expect(memberIds()).toEqual([4, 6, 2]);
+      PartyManager.SwitchPlayerCharacter(-1);
+      await flush();
+      expect(roster()).toEqual(['exile:-1(P)', 'carth:2', 'bao:4']);
+      expect(mand.destroyed).toBe(true);
+    });
+
+    test('a protagonist whose destroy throws does not abort the switch', () => {
+      const exile = PartyManager.Player;
+      (exile as any).destroy = () => { throw new Error('renderer gone'); };
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      expect(PartyManager.Player).toBe(carth);
+      expect(carth.npcId).toBe(2);
+      expect(roster()).toEqual(['carth:2(P)']);
+    });
+
+    test('a model that resolves after the switched-in creature was destroyed is not added to the scene', async () => {
+      const resolvers: Function[] = [];
+      (ModuleCreature.prototype.loadModel as jest.Mock).mockImplementation(() => new Promise((r) => resolvers.push(() => r({ userData: {} }))) as any);
+      const onSpawn = jest.spyOn(ModuleCreature.prototype, 'onSpawn').mockImplementation(() => {});
+      const carth = PartyManager.SwitchPlayerCharacter(2)!;
+      carth.destroy();
+      resolvers.forEach((r) => r());
+      await flush();
+      expect(onSpawn).not.toHaveBeenCalled();
+      expect(state.group.party.add).not.toHaveBeenCalled();
+    });
+
+    test('party placement never leaves holes, and lookups survive one if it exists', () => {
+      const carth = member('carth', 2), bastila = member('bastila', 5), hk = member('hk', 7);
+      PartyManager.party = [carth, undefined as any, bastila];
+      expect(PartyManager.GetPartyMemberByNPCId(9)).toBeNull();
+      expect(PartyManager.GetPMByNPCId(9)).toBeUndefined();
+      PartyManager.PlaceInParty(hk, 7);
+      expect(PartyManager.party).toEqual([carth, bastila, hk]);
+      PartyManager.PlaceInParty(hk, 0);
+      expect(PartyManager.party).toEqual([hk, carth, bastila]);
+    });
+
+    test('loadPlayer leaves no hole when the saved leader is a companion still to be loaded', async () => {
+      PartyManager.PlayerTemplate = creatureTemplate('exile', 1);
+      PartyManager.CurrentMembers = [{ isLeader: true, memberID: 5 }];
+      PartyManager.Player = undefined;
+      PartyManager.party = [];
+      await areaLoadPlayer();
+      expect(PartyManager.party.length).toBe(1);
+      expect(PartyManager.party[0]).toBe(PartyManager.Player);
+    });
+
+    test('taking over an in-party companion clears its queued actions', () => {
+      const carth = member('carth', 2);
+      PartyManager.party = [PartyManager.Player, carth];
+      PartyManager.CurrentMembers = [{ isLeader: false, memberID: 2 }];
+      (ModuleCreature.prototype.clearAllActions as jest.Mock).mockClear();
+      PartyManager.SwitchPlayerCharacter(2);
+      expect((ModuleCreature.prototype.clearAllActions as jest.Mock).mock.contexts).toContain(carth);
     });
 
     test('re-slotting a member (2 -> 3) unbinds slot 2 so nothing can spawn a second copy', () => {
