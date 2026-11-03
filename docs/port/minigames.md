@@ -59,8 +59,8 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
     - On an animated track, the engine's animation manager poses the rider before advancing its clock. So the
       visible jump is always the update right after the manager's own wrap (`elapsedCount` increasing). On that
       step only the two end positions are tested.
-    - The jump is not tied to lap credit: laps come from `trackTime`, which keeps the remainder the manager drops,
-      so lap credit and the visible jump drift apart over a race.
+    - The lap is credited on that same update (see Laps), so the path cut, `OnTrackLoop` and the visible crossing
+      always coincide.
   - Obstacles are static, so they are swept against the player's path segments.
     - Followers move, so they use the relative motion over the step. A follower trailing the player at the same
       speed never touches it, while one crossing the player's path inside a step does.
@@ -102,9 +102,11 @@ DelayCommand context capture in `builtins/scripting.ts` / `src/events/EventTimed
   playback rate of `speed / Maximum_Speed`.
   - Without a `Maximum_Speed`, the rate is 1 while the swoop moves and 0 at speed 0, so a stopped swoop's track
     is frozen.
-  - Laps are counted from the rider's accumulated animation time divided by the loop length, not from the
-    animation manager's wraps (it wraps at most once per update and drops the remainder), so every lap is
-    credited on time. Followers count their loops the same way.
+  - A lap is one wrap of the track animation manager. It is credited on the update after the wrap, when the rider is
+    posed back at the start, so `OnTrackLoop` and `finishTime` coincide with the visible crossing. Followers count
+    their loops the same way.
+  - The manager wraps at most once per update and drops the remainder. A loop shorter than one step therefore
+    counts once per step, and over a race the laps run as long as the animation actually plays them.
   - A track with no animation only loops when `trackLength` is set explicitly. Then each length travelled is one
     `OnTrackLoop`, and the track jumps back to its start.
   - Without an animation or an explicit length there are no laps. Lap length is never guessed from room geometry.

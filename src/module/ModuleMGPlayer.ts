@@ -95,8 +95,6 @@ export class ModuleMGPlayer extends ModuleObject {
   /** After a pause or menu, MGshoot must be released before it acts again. */
   shootNeedsRelease: boolean = false;
 
-  /** Rider time along an animated track (seconds of animation), for lap counting. */
-  trackTime: number = 0;
 
   /** Lap resets during the current step: where the swoop left the track and where it re-entered. */
   stepBreaks: { end: THREE.Vector3; start: THREE.Vector3 }[] = [];
@@ -420,10 +418,10 @@ export class ModuleMGPlayer extends ModuleObject {
   }
 
   /**
-   * Play the track animation looped at the speed-scaled rate. Laps are counted from the
-   * rider's accumulated animation time, not from the animation manager's wraps (it wraps
-   * at most once per update and drops the remainder), so every lap is credited on time.
-   * The visible pose jump is tracked separately from the manager's own wrap.
+   * Play the track animation looped at the speed-scaled rate. The animation manager poses
+   * the rider before advancing its clock, so the visible jump back to the start is the update
+   * after the manager's wrap (`trackPoseJump`). The lap is credited on that update, so
+   * OnTrackLoop and finishTime coincide with the rider crossing the line.
    */
   advanceTrackAnimation(delta: number){
     const track: any = this.track;
@@ -436,11 +434,7 @@ export class ModuleMGPlayer extends ModuleObject {
     const wrapsAfter = track.animationManager?.currentAnimationState?.elapsedCount || 0;
     this.trackPoseJump = this.trackWrappedLastUpdate;
     this.trackWrappedLastUpdate = wrapsAfter > wrapsBefore;
-    const length = track.animationManager?.currentAnimation?.length || 0;
-    if(!(length > 0)){ return; }
-    this.trackTime += step;
-    while(this.trackTime >= length - 1e-9){
-      this.trackTime -= length;
+    if(this.trackPoseJump){
       this.completeLoop();
     }
   }

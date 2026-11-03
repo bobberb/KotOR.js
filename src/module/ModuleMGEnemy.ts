@@ -62,8 +62,6 @@ export class ModuleMGEnemy extends ModuleObject {
   /** Trigger followers (e.g. swoop accelerator pads) only raise hit events; they never shoot. */
   trigger: boolean = false;
   loopsCompleted: number = 0;
-  /** Seconds of track animation travelled since the last loop. */
-  trackTime: number = 0;
   /** The track animation wrapped in the previous update / this step shows the jump back to the start. */
   trackWrappedLastUpdate: boolean = false;
   trackPoseJump: boolean = false;
@@ -174,15 +172,10 @@ export class ModuleMGEnemy extends ModuleObject {
       // The manager poses before advancing its clock: the visible jump is the update after a wrap.
       this.trackPoseJump = this.trackWrappedLastUpdate;
       this.trackWrappedLastUpdate = wrapsAfter > wrapsBefore;
-      // Count loops from accumulated track time: the animation manager wraps at most once per update.
-      const length = this.track.animationManager?.currentAnimation?.length || 0;
-      if(this.alive && length > 0){
-        this.trackTime += delta;
-        while(this.trackTime >= length - 1e-9){
-          this.trackTime -= length;
-          this.loopsCompleted++;
-          this.onTrackLoop();
-        }
+      // A loop is credited when the follower visibly jumps back to its track start.
+      if(this.alive && this.trackPoseJump){
+        this.loopsCompleted++;
+        this.onTrackLoop();
       }
     }
 

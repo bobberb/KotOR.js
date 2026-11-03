@@ -640,19 +640,21 @@ describe("review regressions", () => {
     const loops = fakeScript((self) => expect(routine("kotor", GetLastEvent, self)).toBe("OnTrackLoop"));
     mg.player.scripts.OnTrackLoop = loops as any;
     mg.initMiniGameObjects();
-    tickFor(mg, 1.75);
+    // The manager wraps on the update reaching t=2.0; the rider is posed back at the start on
+    // the next update (t=2.25), which is when the lap is credited.
+    tickFor(mg, 2);
     expect(loops.calls).toBe(0);
     tickFor(mg, 0.25);
     expect(loops.calls).toBe(1);
     expect(track.position.y).toBe(0); // the animation, not a translation, moves the rider
     tickFor(mg, 2);
-    expect([loops.calls, mg.player.finishTime]).toEqual([2, 4]);
+    expect([loops.calls, mg.player.finishTime]).toEqual([2, 4.25]);
 
     const slow = swoopGame({ Minimum_Speed: 5, Maximum_Speed: 10, Accel_Secs: 0 });
     const slowTrack = new FakeAnimatedTrack(2);
     slow.player.setTrack(slowTrack as any);
-    tickFor(slow, 3.75);
-    expect(slow.player.loopsCompleted).toBe(0); // half speed: one loop per 4 s
+    tickFor(slow, 4);
+    expect(slow.player.loopsCompleted).toBe(0); // half speed: the clock wraps at 4 s
     tickFor(slow, 0.25);
     expect(slow.player.loopsCompleted).toBe(1);
   });
@@ -920,24 +922,26 @@ describe("review round 2", () => {
     expect(mg.enemies.map((e) => e.gunBanks[0].targetting)).toEqual([true, false]);
   });
 
-  test("laps are counted from accumulated track time: a loop shorter than a frame still credits every lap", () => {
+  test("laps follow the animation manager's wraps: each wrap is credited on the next update, when the rider is back at the start", () => {
     const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
     const track = new FakeAnimatedTrack(0.2);
     mg.player.setTrack(track as any);
     mg.initMiniGameObjects();
-    tickFor(mg, 1);
-    expect(mg.player.loopsCompleted).toBe(5);
-    // the real animation manager wrapped at most once per update
-    expect(track.animationManager.currentAnimationState.elapsedCount).toBeLessThan(5);
+    tickFor(mg, 1); // a 0.2 s loop with 0.25 s steps wraps on every one of the 4 updates
+    const wraps = track.animationManager.currentAnimationState.elapsedCount;
+    expect(wraps).toBe(4);
+    expect(mg.player.loopsCompleted).toBe(wraps - 1); // the last wrap shows on the next update
+    mg.tick(0.25);
+    expect(mg.player.loopsCompleted).toBe(4);
   });
 
   test("a huge frame is sub-stepped and capped", () => {
     const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10 });
     mg.player.setTrack(new FakeAnimatedTrack(0.5) as any);
     mg.initMiniGameObjects();
-    mg.tick(5); // e.g. a backgrounded tab
+    mg.tick(5); // e.g. a backgrounded tab: 1 s in four 0.25 s steps
     expect(mg.elapsed).toBe(ModuleMiniGame.MAX_FRAME);
-    expect(mg.player.loopsCompleted).toBe(2);
+    expect(mg.player.loopsCompleted).toBe(1); // wraps on steps 2 and 4; the second shows next update
   });
 
   test("without Maximum_Speed an animated track stands still at speed 0 and runs at full rate once moving", () => {
@@ -947,7 +951,7 @@ describe("review round 2", () => {
     tickFor(mg, 3);
     expect(mg.player.loopsCompleted).toBe(0);
     mg.player.speed = 3;
-    tickFor(mg, 2);
+    tickFor(mg, 2.25); // wraps at +1.0 and +2.0, each shown one update later
     expect(mg.player.loopsCompleted).toBe(2);
   });
 });
@@ -963,12 +967,14 @@ describe("review round 2: stepping", () => {
     expect(hits.calls).toBe(1);
   });
 
-  test("followers credit every loop of a track shorter than a frame", () => {
+  test("followers credit each of their track's wraps on the update it becomes visible", () => {
     const mg = swoopGame({}, [{ Track: "trk", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
-    mg.enemies[0].setTrack(new FakeAnimatedTrack(0.2, 100));
+    const track = new FakeAnimatedTrack(0.2, 100);
+    mg.enemies[0].setTrack(track);
     mg.initMiniGameObjects();
     tickFor(mg, 1);
-    expect(mg.enemies[0].loopsCompleted).toBe(5);
+    expect(mg.enemies[0].loopsCompleted).toBe(track.animationManager.currentAnimationState.elapsedCount - 1);
+    expect(mg.enemies[0].loopsCompleted).toBe(3);
   });
 });
 
@@ -1335,5 +1341,52 @@ describe("review round 5: pose jumps follow the animation manager's own wraps", 
     mg.initMiniGameObjects();
     mg.tick(0.25);
     expect([mg.player.alive, followerEvents.calls]).toEqual([false, 0]);
+  });
+});
+
+describe("review round 6: lap credit coincides with the visible crossing", () => {
+  /** Deterministic frame times: mostly 60 fps with hitches of 0.1-0.25 s. */
+  const frames = (n: number) => Array.from({ length: n }, (_, i) => (i % 37 === 13 ? 0.25 : i % 23 === 7 ? 0.1 : 1 / 60));
+
+  test("over 10 laps with hitches, every lap is credited on the step the rider jumps back to the start", () => {
+    const mg = swoopGame({ Minimum_Speed: 10, Maximum_Speed: 10, Num_Loops: 10 });
+    mg.player.setTrack(new PosingTrack(1.37, 100 / 1.37) as any);
+    mg.initMiniGameObjects();
+    const creditSteps: number[] = [];
+    const jumpSteps: number[] = [];
+    let finishElapsed = -1;
+    let y = mg.player.getWorldSphere().center.y;
+    frames(1400).forEach((dt, i) => {
+      const loops = mg.player.loopsCompleted;
+      mg.tick(dt);
+      const ny = mg.player.getWorldSphere().center.y;
+      if (ny < y - 50) jumpSteps.push(i);
+      if (mg.player.loopsCompleted > loops) creditSteps.push(i);
+      if (mg.player.loopsCompleted === 10 && finishElapsed < 0) finishElapsed = mg.elapsed;
+      y = ny;
+    });
+    expect(jumpSteps.length).toBeGreaterThanOrEqual(10);
+    expect(creditSteps).toEqual(jumpSteps);
+    expect(mg.player.finishTime).toBe(finishElapsed);
+  });
+
+  test("followers credit their loops on the step they visibly jump back too", () => {
+    const mg = swoopGame({}, [{ Track: "f", Sphere_Radius: 1, Hit_Points: 10, Max_HPs: 10 }]);
+    mg.player.setTrack(makeTrack(50, 0, 0) as any); // out of the follower's lane
+    mg.enemies[0].setTrack(new PosingTrack(1.37, 100 / 1.37) as any);
+    mg.initMiniGameObjects();
+    const creditSteps: number[] = [];
+    const jumpSteps: number[] = [];
+    let y = mg.enemies[0].getWorldSphere().center.y;
+    frames(1400).forEach((dt, i) => {
+      const loops = mg.enemies[0].loopsCompleted;
+      mg.tick(dt);
+      const ny = mg.enemies[0].getWorldSphere().center.y;
+      if (ny < y - 50) jumpSteps.push(i);
+      if (mg.enemies[0].loopsCompleted > loops) creditSteps.push(i);
+      y = ny;
+    });
+    expect(jumpSteps.length).toBeGreaterThanOrEqual(10);
+    expect(creditSteps).toEqual(jumpSteps);
   });
 });
