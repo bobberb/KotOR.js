@@ -120,6 +120,7 @@ export const SetTrapDisabled: INWScriptDefAction = {
         const trap = args[0] as any;
         if(typeof trap.disableTrap === 'function') trap.disableTrap();
         else trap.trapFlag = false;
+        // (ModuleObject.disableTrap also clears door/placeable detection.)
       }
       return;
     }

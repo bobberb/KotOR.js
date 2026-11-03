@@ -252,7 +252,11 @@ beforeEach(() => {
     GetObjectById: (id: number) => registry.get(id),
   };
   state.FactionManager = { factions, AddCreatureToFaction: jest.fn(), IsHostile: hostile };
-  state.AppearanceManager = { GetCreatureAppearanceById: (): undefined => undefined };
+  state.AppearanceManager = {
+    GetCreatureAppearanceById: (): undefined => undefined,
+    GetDoorAppearanceById: (): undefined => undefined,
+    GetPlaceableAppearanceById: (): undefined => undefined,
+  };
   state.ActionFactory = {
     FromStruct: jest.fn(() => undefined),
     ActionFlagMine,
@@ -1456,5 +1460,112 @@ describe('a trap that is not live cannot be detected', () => {
     const reloaded = reload(trap);
     expect(reloaded.trapDetected).toBe(false);
     expect(reloaded.isTrapDetectedBy(pc)).toBe(false);
+  });
+});
+
+/*
+ * Round 6 (critic of b325a32, passed with follow-ups): trapped doors and
+ * placeables, GetTrapBaseType on non-traps, and GetNearestTrapToObject edges.
+ */
+
+describe('trapped doors and placeables', () => {
+  test.each([
+    ['door', () => lockedDoor(1)],
+    ['placeable', () => lockedPlaceable(1)],
+  ] as const)('%s: detection works while trapped, is refused once disabled, and SetTrapDisabled clears it', (_, make) => {
+    const { SetTrapDisabled } = require('@/nwscript/builtins/upstream/world');
+    const pc = creature({ party: true });
+    const untrapped: any = make();
+    expect(routines.SetTrapDetectedBy.kotor.call({}, untrapped, pc)).toBe(0);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, untrapped, pc)).toBe(0);
+
+    const trapped: any = make();
+    trapped.trapFlag = true;
+    expect(routines.SetTrapDetectedBy.kotor.call({}, trapped, pc)).toBe(1);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trapped, pc)).toBe(1);
+    SetTrapDisabled.action.call({}, [trapped]);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trapped, pc)).toBe(0);
+    expect(routines.SetTrapDetectedBy.kotor.call({}, trapped, pc)).toBe(0);
+    expect(routines.GetTrapDetectedBy.kotor.call({}, trapped, pc)).toBe(0);
+  });
+
+  test.each([
+    ['door', (gff: GFFObject) => new ModuleDoor(gff)],
+    ['placeable', (gff: GFFObject) => new ModulePlaceable(gff)],
+  ] as const)('%s trap detection round-trips through save/load', (_, make) => {
+    const pc = creature({ party: true });
+    const enemy = creature({ party: false, faction: FACTION_HOSTILE });
+    const trapped: any = register(make(new GFFObject()) as any);
+    trapped.initProperties();
+    trapped.trapFlag = true;
+    trapped.setTrapDetectedBy(pc, true);
+    const reloaded: any = make(new GFFObject(trapped.save().getExportBuffer()));
+    reloaded.initProperties();
+    expect(reloaded.trapFlag).toBe(true);
+    expect(reloaded.isTrapDetectedBy(pc)).toBe(true);
+    expect(reloaded.isTrapDetectedBy(enemy)).toBe(false);
+  });
+});
+
+describe('GetTrapBaseType', () => {
+  test('returns the trap type for traps and -1 for anything else', () => {
+    const pc = creature({ party: true });
+    const trap = trapTrigger();
+    const door: any = lockedDoor(1);
+    const generic = new ModuleTrigger(new GFFObject());
+    expect(routines.GetTrapBaseType.kotor.call({}, trap)).toBe(TRAP_FRAG);
+    expect(routines.GetTrapBaseType.kotor.call({}, pc)).toBe(-1);
+    expect(routines.GetTrapBaseType.kotor.call({}, door)).toBe(-1);
+    expect(routines.GetTrapBaseType.kotor.call({}, generic)).toBe(-1);
+    door.trapFlag = true;
+    door.trapType = TRAP_GAS;
+    expect(routines.GetTrapBaseType.kotor.call({}, door)).toBe(TRAP_GAS);
+  });
+});
+
+describe('GetNearestTrapToObject edges (VM order, reconciled K1 map)', () => {
+  let runtime: ReturnType<typeof harness>;
+  beforeAll(() => { runtime = harness(); });
+  const nearestTrap = (caller: any, target: any, detected: number) =>
+    runtime.kotor[488].action.call({ caller }, [target, detected]);
+
+  test('a trap asking for its nearest trap does not get itself', () => {
+    const a = trapTrigger({ at: [0, 0] });
+    const b = trapTrigger({ at: [4, 0] });
+    expect(nearestTrap(a, a, 0)).toBe(b);
+  });
+
+  test('a target in another area gets that area\'s trap; no area gives OBJECT_INVALID', () => {
+    const pc = creature({ party: true, at: [0, 0] });
+    trapTrigger({ at: [0.5, 0] }); // in the module area, close
+    const otherArea: any = { triggers: [], doors: [], placeables: [], attachObject(o: any){ o.area = this; this.triggers.push(o); } };
+    const far = trapTrigger({ at: [9, 0] });
+    area.detachObject(far);
+    otherArea.attachObject(far);
+    runtime.gameState.module = { area }; // the module's own area, which must not be used as a fallback
+    pc.area = otherArea;
+    expect(nearestTrap(pc, pc, 0)).toBe(far);
+    pc.area = undefined;
+    expect(nearestTrap(pc, pc, 0)).toBeUndefined();
+  });
+
+  test('nTrapDetected TRUE means detected by oTarget: an NPC does not see the party\'s finds', () => {
+    const pc = creature({ party: true, at: [0, 0] });
+    const npc = creature({ party: false, faction: FACTION_HOSTILE, at: [0, 0] });
+    const trap = trapTrigger({ at: [1, 0] });
+    trap.detectTrap(pc);
+    expect(nearestTrap(pc, pc, 1)).toBe(trap);
+    expect(nearestTrap(npc, npc, 1)).toBeUndefined();
+    expect(nearestTrap(npc, npc, 0)).toBe(trap);
+  });
+
+  test('trapped placeables are candidates', () => {
+    const pc = creature({ party: true, at: [0, 0] });
+    const chest: any = lockedPlaceable(1);
+    chest.trapFlag = true;
+    chest.position.set(2, 0, 0);
+    area.placeables = [chest];
+    area.doors = [];
+    expect(nearestTrap(pc, pc, 0)).toBe(chest);
   });
 });

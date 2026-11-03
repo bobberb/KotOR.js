@@ -266,12 +266,18 @@ export class ModuleTrigger extends ModuleObject {
     return true;
   }
 
-  setTrapDetectedBy(detector: ModuleObject, detected = true){
-    if(detected && this.type == ModuleTriggerType.TRAP && !SWTrapRules.isLive(this)){ return; }
-    super.setTrapDetectedBy(detector, detected);
+  /** A mine is active while live (not disabled, spent or removed); other triggers by TrapFlag. */
+  isTrapActive(): boolean {
+    if(this.type == ModuleTriggerType.TRAP) return SWTrapRules.isLive(this);
+    return super.isTrapActive();
+  }
+
+  setTrapDetectedBy(detector: ModuleObject, detected = true): boolean {
+    if(!super.setTrapDetectedBy(detector, detected)){ return false; }
     if(detector && SWTrapRules.isPartyMember(detector)){
       this.trapDetected = !!detected;
     }
+    return true;
   }
 
   /**
@@ -399,9 +405,8 @@ export class ModuleTrigger extends ModuleObject {
 
   /** SetTrapDisabled: disarm the trap in place; nobody can see or target it any more. */
   disableTrap(){
-    this.trapFlag = false;
+    super.disableTrap();
     this.trapDetected = false;
-    this.trapDetectedByFactions.clear();
   }
 
   /** Counts down a spent one-shot trap and removes it. @returns true once removed */
@@ -729,6 +734,7 @@ export class ModuleTrigger extends ModuleObject {
         }
       }
     }
+    // (A disabled mine's detection is cleared once TrapFlag is known, below.)
 
     if(this.template.RootNode.hasField('TrapFlag'))
       this.trapFlag = this.template.getFieldByLabel('TrapFlag').getValue();
@@ -887,12 +893,7 @@ export class ModuleTrigger extends ModuleObject {
     // TrapDetected/TrapDetectedBy are engine-local (no known retail field); TrapDisarmDC and CreatorId are UTT/GIT fields.
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetected') ).setValue(this.trapDetected ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapSpent') ).setValue(this.trapSpent ? 1 : 0);
-    const detectedBy = gff.RootNode.addField( new GFFField(GFFDataType.LIST, 'TrapDetectedBy') );
-    for(const factionId of this.trapDetectedByFactions){
-      const struct = new GFFStruct();
-      struct.addField( new GFFField(GFFDataType.INT, 'FactionId') ).setValue(factionId);
-      detectedBy.addChildStruct(struct);
-    }
+    this.saveTrapDetectedBy(gff.RootNode);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmDC') ).setValue(this.trapDisarmDC || 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmable') ).setValue(this.trapDisarmable);
     // Write the effective values: an unset TrapFlag/TrapOneShot on a trap means armed/one-shot, not 0.

@@ -96,7 +96,8 @@ export const GetNearestTrapToObject: INWScriptDefAction = {
     action: function(this: NWScriptInstance, args: [ModuleObject, number]){
       const target: any = args[0] ? args[0] : this.caller;
       if(!target?.position) return undefined;
-      const area: any = target.area ?? GameState.module?.area;
+      // No area (e.g. an item in an inventory): OBJECT_INVALID, not the module's area.
+      const area: any = target.area;
       if(!area) return undefined;
       const onlyDetected = !!args[1];
       const candidates: any[] = [...(area.triggers || []), ...(area.doors || []), ...(area.placeables || [])];

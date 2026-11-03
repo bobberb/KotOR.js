@@ -73,7 +73,11 @@ export const GetTrapBaseType = defineAction({
   returnType: NWScriptDataType.INTEGER,
   params: [objectParam<ModuleObject>("oTrapObject")] as const,
   kotor(this: NWScriptInstance, oTrapObject) {
-    if (BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleObject)) {
+    // -1 for anything that is not a trap: a non-trap trigger, an untrapped door/placeable, a creature.
+    const isTrapTrigger = BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleTrigger) && (oTrapObject as any).type == ModuleTriggerType.TRAP;
+    const isTrappedObject = (BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModuleDoor) ||
+      BitWise.InstanceOfObject(oTrapObject, ModuleObjectType.ModulePlaceable)) && !!oTrapObject.trapFlag;
+    if ((isTrapTrigger || isTrappedObject) && typeof oTrapObject.trapType === 'number') {
       return oTrapObject.trapType;
     }
     return -1;
@@ -235,10 +239,8 @@ export const SetTrapDetectedBy = defineAction({
     if (!isTrappable(oTrap) || !BitWise.InstanceOfObject(oDetector, ModuleObjectType.ModuleObject)) return NW_FALSE;
     if (BitWise.InstanceOfObject(oTrap, ModuleObjectType.ModuleTrigger)) {
       return (oTrap as unknown as ModuleTrigger).detectTrap(oDetector) ? NW_TRUE : NW_FALSE;
-    } else {
-      oTrap.setTrapDetectedBy(oDetector, true);
     }
-    return NW_TRUE;
+    return oTrap.setTrapDetectedBy(oDetector, true) ? NW_TRUE : NW_FALSE;
   },
 });
 

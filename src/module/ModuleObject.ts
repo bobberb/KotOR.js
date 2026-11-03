@@ -1998,8 +1998,18 @@ export class ModuleObject {
     return this.trapDetectedByFactions.has(this.getTrapDetectorFactionId(detector));
   }
 
-  setTrapDetectedBy(detector: ModuleObject, detected = true){
-    if(!detector) return;
+  /**
+   * Whether this object is a trap that can still be found: a trapped door or
+   * placeable (TrapFlag set). ModuleTrigger overrides this for mines.
+   */
+  isTrapActive(): boolean {
+    return !this.destroyed && !!this.trapFlag;
+  }
+
+  /** @returns false when refused (detecting a trap that is not active) */
+  setTrapDetectedBy(detector: ModuleObject, detected = true): boolean {
+    if(!detector) return false;
+    if(detected && !this.isTrapActive()) return false;
     const factionId = this.getTrapDetectorFactionId(detector);
     if(detected){
       this.trapDetectedByFactions.add(factionId);
@@ -2007,6 +2017,34 @@ export class ModuleObject {
     }else{
       this.trapDetectedByFactions.delete(factionId);
     }
+    return true;
+  }
+
+  /** SetTrapDisabled: the trap stays in place, disarmed, and nobody knows about it any more. */
+  disableTrap(){
+    this.trapFlag = false;
+    this.trapDetectedByFactions.clear();
+  }
+
+  /** Engine-local TrapDetectedBy list (faction / party detection keys). */
+  saveTrapDetectedBy(root: GFFStruct){
+    const detectedBy = root.addField( new GFFField(GFFDataType.LIST, 'TrapDetectedBy') );
+    for(const factionId of this.trapDetectedByFactions){
+      const struct = new GFFStruct();
+      struct.addField( new GFFField(GFFDataType.INT, 'FactionId') ).setValue(factionId);
+      detectedBy.addChildStruct(struct);
+    }
+  }
+
+  loadTrapDetectedBy(root: GFFStruct){
+    if(!root?.hasField('TrapDetectedBy')) return;
+    this.trapDetectedByFactions.clear();
+    for(const struct of root.getFieldByLabel('TrapDetectedBy').getChildStructs()){
+      if(struct.hasField('FactionId')){
+        this.trapDetectedByFactions.add(struct.getFieldByLabel('FactionId').getValue());
+      }
+    }
+    if(!this.isTrapActive()) this.trapDetectedByFactions.clear();
   }
 
   getTrapCreator(): ModuleObject {

@@ -1150,6 +1150,8 @@ export class ModuleDoor extends ModuleObject {
     if(this.template.RootNode.hasField('TrapFlag'))
       this.trapFlag = !!this.template.RootNode.getFieldByLabel('TrapFlag').getValue();
 
+    this.loadTrapDetectedBy(this.template.RootNode);
+
     if(this.template.RootNode.hasField('TrapOneShot'))
       this.trapOneShot = !!this.template.getFieldByLabel('TrapOneShot').getValue();
 
@@ -1342,6 +1344,7 @@ export class ModuleDoor extends ModuleObject {
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDetectable') ).setValue(this.trapDetectable);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapDisarmable') ).setValue(this.trapDisarmable);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapFlag') ).setValue(this.trapFlag);
+    this.saveTrapDetectedBy(gff.RootNode);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'UseTweakColor') ).setValue(this.useTweakColor ? 1 : 0);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapOneShot') ).setValue(this.trapOneShot);
     gff.RootNode.addField( new GFFField(GFFDataType.BYTE, 'TrapType') ).setValue(this.trapType);
