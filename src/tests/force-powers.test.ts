@@ -10,7 +10,9 @@ jest.mock('@/loaders', () => ({
   ResourceLoader: {}, TextureLoader: {},
 }));
 jest.mock('@/odyssey', () => ({
-  OdysseyModel: class {}, OdysseyModelAnimation: class { static GetAnimation2DA(): any { return undefined; } }, OdysseyWalkMesh: class {},
+  OdysseyModel: class {}, OdysseyWalkMesh: class {},
+  // The real name lookup against animations.2da (installed by the tests).
+  OdysseyModelAnimation: jest.requireActual<any>('@/odyssey/OdysseyModelAnimation').OdysseyModelAnimation,
 }));
 jest.mock('@/three/odyssey', () => {
   const THREE = jest.requireActual<typeof import('three')>('three');
@@ -94,8 +96,11 @@ let spellInstances: SpellCastInstance[];
 let impactRuns: ImpactRun[];
 let nextId = 1;
 
+/** The spell animations animations.2da names (rows trimmed to the columns the lookup reads). */
+const ANIMATIONS_2DA = { RowCount: 4, rows: [{ name: 'castout1' }, { name: 'castoutlp1' }, { name: 'castout3' }, { name: 'castoutlp3' }] };
+
 function installSpells(rows: Record<number, any>){
-  TwoDAManager.datatables = new Map([['spells', { rows } as any]]);
+  TwoDAManager.datatables = new Map([['spells', { rows } as any], ['animations', ANIMATIONS_2DA as any]]);
 }
 
 type FP = { base: number, max: number | undefined, current: number };
@@ -606,12 +611,17 @@ describe('fake casts (animation only)', () => {
     (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
     const action = caster.actionQueue[0] as ActionCastSpell;
     expect(action.fake).toBe(true);
-    const anim = jest.spyOn(caster, 'setAnimationState');
+    caster.force = 1;
+    caster.speed = 3;
     tick([caster, target], 0.2);
-    expect(anim).toHaveBeenCalledWith(ModuleCreatureAnimState.CASTOUT1);
+    // It stops moving and plays the spell's conjure animation, resolved by name from animations.2da.
+    expect([caster.force, caster.speed]).toEqual([0, 0]);
+    expect(caster.animationState.animation?.name).toBe('castout1');
     expect(spellInstances).toHaveLength(1);
     // The action holds the queue until the visuals finish.
     expect(caster.actionQueue[0]).toBe(action);
+    tick([caster, target], 1.5);
+    expect(caster.animationState.animation?.name).toBe('castoutlp1');
     tick([caster, target]);
     expect(GameState.NWScript.Load).not.toHaveBeenCalled();
     expect(impactRuns).toHaveLength(0);
@@ -1805,5 +1815,93 @@ describe('party slot templates', () => {
     PartyManager.RefreshNPCTemplate(0);
     expect(PartyManager.NPCS[0].template).not.toBe(original);
     expect(PartyManager.NPCS[0].template.RootNode.getFieldByLabel('CurrentForce').getValue()).toBe(21);
+  });
+});
+
+describe('caster animations', () => {
+  test.each([
+    ['hand', 'script', 'castout1', 'castoutlp1'],
+    ['up', 'menu', 'castout3', 'castoutlp3'],
+  ])('a real cast (conjanim %s, %s path) plays its conjure then cast animation from animations.2da', (conjanim, path, conjure, cast) => {
+    installSpells({ [SPELL_ID]: spellRow({ conjanim: String(conjanim) }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    if(path === 'menu') new TalentSpell(SPELL_ID).useTalentOnObject(target, caster);
+    else ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 0.2);
+    expect(caster.animationState.animation?.name).toBe(conjure);
+    tick([caster, target], 1.5);
+    expect(caster.animationState.animation?.name).toBe(cast);
+    expect(impactRuns).toHaveLength(1);
+  });
+
+  test('a spell with no cast time plays its cast animation at release', () => {
+    installSpells({ [SPELL_ID]: spellRow({ casttime: '****' }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 2);
+    expect(impactRuns).toHaveLength(1);
+    expect(caster.animationState.animation?.name).toBe('castoutlp1');
+  });
+
+  test('the cast animation starts once and is not restarted every frame of the cast phase', () => {
+    installSpells({ [SPELL_ID]: spellRow({ range: 'L', casttime: '1000' }) });
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 1.6);
+    expect(caster.animationState.animation?.name).toBe('castoutlp1');
+    caster.animationState.started = true; // the creature's animation update has picked it up
+    tick([caster, target], 0.2);
+    expect(caster.animationState.started).toBe(true);
+  });
+
+  test('a cast interrupted before release does not play the cast animation', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    ActionCastSpellAtObject.kotor.call({ caller: caster } as any, SPELL_ID, target, 0, 0, 0, 0, 0);
+    tick([caster, target], 0.5);
+    jest.spyOn(caster, 'isDebilitated').mockReturnValue(true);
+    tick([caster, target], 3);
+    expect(caster.animationState.animation?.name).toBe('castout1');
+  });
+});
+
+describe('fake cast edge cases', () => {
+  test('a fake cast that cannot reach its spot leaves a pending real round action for the same power', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    const pending = new CombatRoundAction(caster);
+    pending.actionType = CombatActionType.CAST_SPELL;
+    pending.target = target;
+    pending.setSpell(new TalentSpell(SPELL_ID));
+    caster.combatRound.action = pending;
+    jest.spyOn(ActionMoveToPoint.prototype, 'update').mockReturnValue(ActionStatus.COMPLETE);
+    ActionCastFakeSpellAtLocation.kotor.call({ caller: caster } as any, SPELL_ID, location(40, 0, 0), 0);
+    tick([caster], 2);
+    expect(caster.actionQueue).toHaveLength(0);
+    expect(caster.combatRound.action).toBe(pending);
+  });
+
+  test('a fake cast with no area to show visuals in completes at once instead of holding the queue', () => {
+    const caster = makeCreature();
+    const target = makeCreature();
+    caster.area = undefined;
+    (GameState as any).module = { area: undefined };
+    (ActionCastFakeSpellAtObject as any).action.call({ caller: caster }, [SPELL_ID, target, 0]);
+    caster.actionQueue.process(0.05);
+    expect(caster.actionQueue).toHaveLength(0);
+  });
+
+  test('param 3 holding a foreign value: negative or non-INT reads as no flags', () => {
+    const negative = new ActionCastSpell();
+    negative.setParameter(3, ActionParameterType.INT, -1);
+    expect([negative.cheat, negative.instant, negative.fake]).toEqual([false, false, false]);
+    negative.fake = true;
+    expect([negative.cheat, negative.instant, negative.fake]).toEqual([false, false, true]);
+    const dword = new ActionCastSpell();
+    dword.setParameter(3, ActionParameterType.DWORD, ActionCastSpell.FLAG_FAKE | ActionCastSpell.FLAG_CHEAT);
+    expect([dword.cheat, dword.fake]).toEqual([false, false]);
   });
 });

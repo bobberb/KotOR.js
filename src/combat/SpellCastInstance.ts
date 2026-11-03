@@ -1,8 +1,8 @@
-import type { ModuleObject } from "@/module";
+import type { ModuleCreature, ModuleObject } from "@/module";
 import type { TalentSpell } from "@/talents";
 import * as THREE from "three";
 import { OdysseyModel3D } from "@/three/odyssey";
-import { OdysseyModel } from "@/odyssey";
+import { OdysseyModel, OdysseyModelAnimation } from "@/odyssey";
 import { GameState } from "@/GameState";
 import { MDLLoader } from "@/loaders";
 import { BitWise } from "@/utility/BitWise";
@@ -51,6 +51,7 @@ export class SpellCastInstance {
   impacted: boolean = false;
   /** The caster died or was debilitated before impact, so the power never landed. */
   interrupted: boolean = false;
+  private castAnimationStarted = false;
   completed: boolean = false;
   conjureTime: number = 0;
   conjuring: boolean = false;
@@ -93,6 +94,8 @@ export class SpellCastInstance {
       this.projectileCurve.v2.copy(this.projectileTarget);
     }
 
+    this.playCasterAnimation(this.spell?.getConjureAnimation?.());
+
     if(this.spell.projmodel){
       MDLLoader.loader.load(this.spell.projmodel.toLowerCase())
         .then((mdl: OdysseyModel) => {
@@ -129,6 +132,7 @@ export class SpellCastInstance {
       }
     }else if(this.castTime > 0){
       this.conjuring = false;
+      this.startCastAnimation();
       this.castTimeProgress = Math.min(this.castTime / (this.spell.getCastTime() * 0.5), 1);
       if(this.projectile && !this.projectileDistance){
         this.projectileDistance = this.projectileTarget.clone().sub(this.projectileOrigin);
@@ -142,6 +146,7 @@ export class SpellCastInstance {
       this.castTime -= 1000 * delta;
     }else{
       this.conjuring = false;
+      this.startCastAnimation();
       this.impact();
       this.completed = true;
     }
@@ -195,6 +200,23 @@ export class SpellCastInstance {
 
     this.projectile?.dispose();
     this.projectile = undefined;
+  }
+
+  /** Once, when conjuring ends: the spell's cast (release) animation. */
+  private startCastAnimation(){
+    if(this.castAnimationStarted) return;
+    this.castAnimationStarted = true;
+    this.playCasterAnimation(this.spell?.getCastingAnimation?.());
+  }
+
+  /**
+   * Plays a named animations.2da animation on a creature caster, the way combat rounds play attack animations.
+   * Spell animations have no ModuleCreatureAnimState constant, so they go by name.
+   */
+  private playCasterAnimation(name: string | undefined){
+    if(!name || !BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature)) return;
+    const animation = OdysseyModelAnimation.GetAnimation2DA(name);
+    if(animation) (this.owner as ModuleCreature).playTwoDAAnimation(animation);
   }
 
   private shouldAbort(): boolean {

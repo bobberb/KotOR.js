@@ -5,7 +5,6 @@ import { CombatActionType } from "@/enums/combat/CombatActionType";
 import { ModuleObjectType } from "@/enums/module/ModuleObjectType";
 import { ActionStatus } from "@/enums/actions/ActionStatus";
 import { ActionType } from "@/enums/actions/ActionType";
-import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
 import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { GameState } from "@/GameState";
 import { enqueueMoveToPoint } from "@/actions/helpers/enqueueMoveToPoint";
@@ -36,20 +35,26 @@ export class ActionCastSpell extends Action {
 
   /**
    * Script flags live in high bits of param 3 ("unknown, always 0" in retail saves) so they survive a save/load
-   * of the queued action; a retail 0 means no flags.
+   * of the queued action; a retail 0 means no flags. A negative value (other unknown params use -1) is not ours
+   * and reads as no flags.
    */
   static FLAG_CHEAT = 0x10000;
   static FLAG_INSTANT = 0x20000;
   static FLAG_FAKE = 0x40000;
 
-  private getFlag(flag: number): boolean {
+  private getFlagBits(): number {
     const param = this.parameters[3];
-    return param?.type === ActionParameterType.INT && ((Number(param.value) || 0) & flag) === flag;
+    if(param?.type !== ActionParameterType.INT) return 0;
+    const value = Number(param.value) || 0;
+    return value > 0 ? value : 0;
+  }
+
+  private getFlag(flag: number): boolean {
+    return (this.getFlagBits() & flag) === flag;
   }
 
   private setFlag(flag: number, on: boolean){
-    const param = this.parameters[3];
-    const current = param?.type === ActionParameterType.INT ? (Number(param.value) || 0) : 0;
+    const current = this.getFlagBits();
     this.setParameter(3, ActionParameterType.INT, on ? (current | flag) : (current & ~flag));
   }
 
@@ -169,10 +174,11 @@ export class ActionCastSpell extends Action {
 
     if(this.fake){
       // Visuals only: no combat round (which would clear or report combat bookkeeping and fire OnEndRound),
-      // no pending round action touched, no force points.
+      // no pending round action touched, no force points. The instance plays the conjure/cast animations.
       this.owner.force = 0;
       this.owner.speed = 0;
-      this.owner.setAnimationState(ModuleCreatureAnimState.CASTOUT1);
+      // Without an area nothing would ever update the visuals, so there is nothing to wait for.
+      if(!(this.owner.area || GameState.module?.area)) return ActionStatus.COMPLETE;
       this.fakeInstance = this.startSpellInstance(spell);
       return ActionStatus.IN_PROGRESS;
     }
@@ -209,8 +215,7 @@ export class ActionCastSpell extends Action {
       combatAction.isUserAction = this.isUserAction;
       combatRound.action = combatAction;
     }
-    combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
-    combatAction.animationName = castSpell.getConjureAnimation();
+    // The caster's conjure/cast animations are played by the SpellCastInstance, by name from animations.2da.
 
     combatRound.beginCombatRound();
     combatRound.pauseRound(this.owner, combatRound.roundLength);
@@ -273,7 +278,7 @@ export class ActionCastSpell extends Action {
     const combatRound = this.owner.combatRound;
     if(combatRound){
       const pending = combatRound.action;
-      if(pending && pending.actionType == CombatActionType.CAST_SPELL && pending.spellId == spell.id){
+      if(!this.fake && pending && pending.actionType == CombatActionType.CAST_SPELL && pending.spellId == spell.id){
         combatRound.action = undefined;
       }
       // Fake casts are cutscene visuals on possibly out-of-combat casters: never start a combat round for them.
