@@ -48,6 +48,7 @@ import { GameEffectDurationType } from "@/enums/effects/GameEffectDurationType";
 import { BitWise } from "@/utility/BitWise";
 import { ModuleObjectConstant } from "@/enums/module/ModuleObjectConstant";
 import { PerceptionType } from "@/enums/engine/PerceptionType";
+import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { AudioEmitterType } from "@/enums/audio/AudioEmitterType";
 import { AudioPriorityGroup } from "@/enums/audio/AudioPriorityGroup";
 import { CombatActionType } from "@/enums/combat/CombatActionType";
@@ -1414,27 +1415,24 @@ export class ModuleCreature extends ModuleObject {
   useTalent(talent: TalentObject, oTarget: ModuleObject): Action {
     let action: Action;
     if (talent instanceof TalentObject) {
-      const combatAction = new CombatRoundAction();
-      switch (talent.objectType) {
-        case 1: //FEAT
-          combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
-          combatAction.target = oTarget;
-          combatAction.setFeat(talent as TalentFeat);
-          this.combatRound.addAction(combatAction);
-          break;
-        case 2: //SKILL
-          if (talent.id == 6) { //Security
-            action = new GameState.ActionFactory.ActionUnlockObject();
-            action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
-            this.actionQueue.add(action);
-          }
-          break;
-        case 0: //SPELL
-          combatAction.actionType = CombatActionType.CAST_SPELL;
-          combatAction.setSpell(talent as TalentSpell);
-          combatAction.target = oTarget;
-          this.combatRound.addAction(combatAction);
-          break;
+      // objectType is a TalentObjectType bit mask (TalentObject | subtype), not the NWScript TALENT_TYPE_* index.
+      if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentFeat)) {
+        const combatAction = new CombatRoundAction();
+        combatAction.actionType = CombatActionType.ATTACK_USE_FEAT;
+        combatAction.target = oTarget;
+        combatAction.setFeat(talent as TalentFeat);
+        this.combatRound.addAction(combatAction);
+        if (!this.actionQueue.actionTypeExists(ActionType.ActionCombat)) {
+          this.actionQueue.add(new GameState.ActionFactory.ActionCombat(0xFFFF));
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSkill)) {
+        if (talent.id == 6) { //Security
+          action = new GameState.ActionFactory.ActionUnlockObject();
+          action.setParameter(0, ActionParameterType.DWORD, oTarget.id || ModuleObjectConstant.OBJECT_INVALID);
+          this.actionQueue.add(action);
+        }
+      } else if (BitWise.InstanceOf(talent.objectType, TalentObjectType.TalentSpell)) {
+        talent.useTalentOnObject(oTarget, this);
       }
     }
     return action;
@@ -2614,15 +2612,20 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getFP() {
-    return this.forcePoints;
+    // Mirrors getHP: currentForce is relative to the base pool (forcePoints); max adds bonuses. setFP/addFP/subtractFP all write currentForce.
+    return (this.getMaxFP() + (Number(this.currentForce) || 0)) - (Number(this.forcePoints) || 0);
   }
 
   getMaxFP() {
-    return this.maxForcePoints;
+    const base = Number(this.forcePoints) || 0;
+    const max = Number(this.maxForcePoints);
+    // UTC blueprints have no MaxForcePoints field, and earlier builds saved that absent max as 0.
+    if (!Number.isFinite(max) || (max === 0 && base > 0)) return base;
+    return max;
   }
 
   setFP(nAmount = 0) {
-    let bonus = this.maxForcePoints - this.forcePoints;
+    let bonus = this.getMaxFP() - (Number(this.forcePoints) || 0);
     this.currentForce = nAmount - bonus;
   }
 
@@ -2853,8 +2856,16 @@ export class ModuleCreature extends ModuleObject {
     }
   }
 
+  /**
+   * Force power save DC. KotOR 1 community mechanics references (GameFAQs mechanics FAQs, Deadly Stream)
+   * give DC = 5 + caster level + Wisdom modifier; unverified against the TSL engine, which may differ
+   * (e.g. Force Focus / alignment bonuses are not modelled here).
+   * Caster level is the sum of spellcaster (Jedi) class levels, falling back to character level for
+   * creatures that cast without a spellcaster class.
+   */
   getSpellSaveDC() {
-    return 10 + this.getSpellCasterLevel();
+    const casterLevel = this.getSpellCasterLevel() || this.getTotalClassLevel();
+    return 5 + casterLevel + CombatRound.GetMod(this.getWIS());
   }
 
   getSpellCasterLevel() {
@@ -3252,9 +3263,15 @@ export class ModuleCreature extends ModuleObject {
     return spells;
   }
 
+  /** Force powers the creature cannot pay for are not offered to the AI; item-granted powers cost no FP. */
+  canAffordTalent(talent: TalentObject): boolean {
+    if (!BitWise.InstanceOf(talent?.objectType, TalentObjectType.TalentSpell) || talent.item) return true;
+    return this.getFP() >= (talent as TalentSpell).getForcePointCost();
+  }
+
   getRandomTalent(category = 0, category2 = 0) {
 
-    let talents = this.getTalents().filter((talent: TalentObject) => talent.category == category || talent.category == category2);
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category == category || talent.category == category2) && this.canAffordTalent(talent));
     let talent = talents[Math.floor(Math.random() * talents.length)];
     //console.log('getRandomTalent', talent);
     return talent;
@@ -3262,8 +3279,9 @@ export class ModuleCreature extends ModuleObject {
   }
 
   getTalentBest(nCategory = 0, nCRMax = 0, nInclusion = 0, nExcludeType = -1, nExcludeId = -1) {
-    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax));
-    talents.sort((a: TalentObject, b: TalentObject) => (a.maxCR > b.maxCR) ? 1 : -1);
+    let talents = this.getTalents().filter((talent: TalentObject) => (talent.category > -1 && ((talent.category & nCategory) == nCategory) && talent.maxCR <= nCRMax) && this.canAffordTalent(talent));
+    // GetCreatureTalentBest: the strongest talent whose CR does not exceed nCRMax.
+    talents.sort((a: TalentObject, b: TalentObject) => b.maxCR - a.maxCR);
     //console.log('getTalentBest', talents);
     if (talents.length) {
       return talents[0];
@@ -4550,7 +4568,7 @@ export class ModuleCreature extends ModuleObject {
     gff.RootNode.addField(new GFFField(GFFDataType.CEXOLOCSTRING, 'LastName')).setValue(this.template.RootNode.getFieldByLabel('LastName')?.getCExoLocString());
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Listening')).setValue(this.isListening);
 
-    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.maxForcePoints));
+    gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxForcePoints')).setValue(clampShort(this.getMaxFP()));
     gff.RootNode.addField(new GFFField(GFFDataType.SHORT, 'MaxHitPoints')).setValue(clampShort(this.maxHitPoints));
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'Min1HP')).setValue(this.min1HP);
     gff.RootNode.addField(new GFFField(GFFDataType.BYTE, 'MovementRate')).setValue(0);

@@ -23,8 +23,11 @@ const preservation = fixture("upstreamPreservedBodies.json");
  * side when nTrapDetected is TRUE. SetTrapDisabled (555): also
  * clears the trap's detection (ModuleTrigger.disableTrap) so a disabled trap is
  * not left visible and targetable. Both pinned in traps-security.test.ts.
+ * ActionCastFakeSpellAtObject (501): marks its ActionCastSpell as fake so it
+ * plays animations only, with no FP cost, impact script or combat round
+ * (pinned in force-powers.test.ts).
  */
-const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 555]);
+const DELIBERATE_DIVERGENCES = new Set([488, 491, 492, 493, 501, 555]);
 
 let runtime: ReturnType<typeof harness>;
 beforeAll(() => { runtime = harness(); });

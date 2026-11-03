@@ -17,6 +17,7 @@ import { Dice } from '../../utility/Dice';
 import { CombatAttackDamage } from '../../combat/CombatAttackDamage';
 import { BitWise } from '../../utility/BitWise';
 import { ModuleObjectType } from '../../enums/module/ModuleObjectType';
+import { ModuleCreatureAnimState } from '../../enums/module/ModuleCreatureAnimState';
 
 // Execute real implementation source with engine-boundary doubles; no browser,
 // audio device or proprietary data is initialized. Integrated tsc remains separate.
@@ -254,6 +255,7 @@ describe('item-property compatibility and cancelled spell visuals', () => {
     const SpellCastInstance = load('combat/SpellCastInstance.ts', 'SpellCastInstance', {
       '@/loaders': { MDLLoader: { loader: { load: async () => ({}) } } },
       '@/three/odyssey': { OdysseyModel3D: { FromMDL: () => pending } },
+      '@/enums/module/ModuleCreatureAnimState': { ModuleCreatureAnimState },
     });
     const owner = { context: { group: { effects: { add: attach } } }, model: { rhand: {} } };
     const spell = new SpellCastInstance(owner, undefined, { projmodel: 'test' });

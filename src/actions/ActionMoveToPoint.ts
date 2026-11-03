@@ -27,6 +27,13 @@ export class ActionMoveToPoint extends Action {
   target_position: THREE.Vector3 = new THREE.Vector3();
   real_target_position: THREE.Vector3 = new THREE.Vector3();
   last_path_target_position: THREE.Vector3 = new THREE.Vector3();
+  /**
+   * Optional live arrival test checked every frame before moving (e.g. "the target is now in cast range").
+   * Runtime-only: a move restored from a save has none and arrives on its range parameter as usual.
+   */
+  stopWhen?: () => boolean;
+  /** Optional: how far a followed target may move before the path is replanned (default: half the move range). Runtime-only. */
+  replanDistance?: number;
 
   constructor( actionId: number = -1, groupId: number = -1 ){
     super(actionId, groupId);
@@ -48,6 +55,14 @@ export class ActionMoveToPoint extends Action {
   update(delta: number = 0): ActionStatus {
     if(!BitWise.InstanceOfObject(this.owner, ModuleObjectType.ModuleCreature))
       return ActionStatus.FAILED;
+
+    if(this.stopWhen?.()){
+      this.owner.setAnimationState(ModuleCreatureAnimState.IDLE);
+      this.owner.force = 0;
+      this.owner.speed = 0;
+      this.setComputedPath(undefined);
+      return ActionStatus.COMPLETE;
+    }
 
     this.target_position.set(
       this.getParameter<number>(0),
@@ -71,7 +86,7 @@ export class ActionMoveToPoint extends Action {
 
       if(this.computedPath?.realtime){
         const movedDistance = Utility.Distance2D(this.real_target_position, this.last_path_target_position);
-        if(movedDistance > Math.max(0.5, range * 0.5)){
+        if(movedDistance > (this.replanDistance ?? Math.max(0.5, range * 0.5))){
           this.setComputedPath(undefined);
         }
       }

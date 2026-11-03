@@ -831,6 +831,43 @@ export class PartyManager {
   }
 
   /**
+   * Re-snapshot an NPC's stored template from its live creature so spent HP/FP survive a rebuild.
+   * The slot template only reflects the creature's last save(), so rebuilding from it would restore HP/FP spent since.
+   * @param npcId - The NPC slot to refresh
+   * @param creature - The live creature; defaults to the slot's party member
+   */
+  static RefreshNPCTemplate(npcId: number, creature?: ModuleCreature){
+    const npc = PartyManager.NPCS[npcId];
+    if(!npc) return;
+    const live = creature
+      ?? PartyManager.party.find((pm) => pm instanceof ModuleCreature && pm.npcId == npcId)
+      ?? npc.moduleObject;
+    if(!(live instanceof ModuleCreature) || live.destroyed) return;
+    // A copy, so the live creature's own template keeps its identity fields.
+    const template = new GFFObject(live.save().getExportBuffer());
+    PartyManager.StripInstanceFields(template.RootNode);
+    npc.template = template;
+  }
+
+  /**
+   * A slot template becomes a new object when spawned, so it must not carry the old instance's identity
+   * (ObjectId, also on inventory items) or its runtime state (queued actions, perception, combat round, area).
+   * HP/FP, effects, inventory and variables persist.
+   */
+  static StripInstanceFields(struct: GFFStruct){
+    for(const label of ['ActionList', 'PerceptionList', 'CombatRoundData', 'AreaId']){
+      struct.removeFieldByLabel(label);
+    }
+    for(const field of struct.getFields().slice()){
+      if(field.getLabel() === 'ObjectId'){
+        struct.removeField(field);
+      }else{
+        for(const child of field.getChildStructs() || []) PartyManager.StripInstanceFields(child);
+      }
+    }
+  }
+
+  /**
    * Switch the player character
    * @param npcId - The ID of the NPC to switch the player character to
    * @returns ModuleCreature
@@ -842,12 +879,15 @@ export class PartyManager {
     if(oldPC instanceof ModuleCreature && (oldPC instanceof ModulePlayer || oldPC.isPlayer || oldPC.npcId < 0)){
       PartyManager.ActualPlayerTemplate = oldPC.save();
       CurrentGame.WriteFile('pc.utc', PartyManager.ActualPlayerTemplate.getExportBuffer());
+    }else if(oldPC instanceof ModuleCreature && oldPC.npcId >= 0){
+      PartyManager.RefreshNPCTemplate(oldPC.npcId, oldPC);
     }
 
     if(npcId == -1){
       partyMember = new ModulePlayer(PartyManager.ActualPlayerTemplate);
       PartyManager.PlayerTemplate = PartyManager.ActualPlayerTemplate;
     }else{
+      PartyManager.RefreshNPCTemplate(npcId);
       partyMember = new ModuleCreature(PartyManager.NPCS[npcId].template);
     }
 

@@ -254,8 +254,8 @@ export class ActionMenuManager {
 
         }
 
-        const hostileSpells = ActionMenuManager.oPC.getSpells().filter( (s: any) => {
-          return !isNaN(parseInt(s.forcehostile));
+        const hostileSpells = ActionMenuManager.oPC.getSpells().filter( (s) => {
+          return s.isHostile();
         });
 
         for(let i = 0; i < hostileSpells.length; i++){
@@ -299,8 +299,8 @@ export class ActionMenuManager {
 
     }
 
-    const friendlySpells = ActionMenuManager.oPC.getSpells().filter( (s: any) => {
-      return !isNaN(parseInt(s.forcefriendly));
+    const friendlySpells = ActionMenuManager.oPC.getSpells().filter( (s) => {
+      return s.isFriendly();
     });
 
     for(let i = 0; i < friendlySpells.length; i++){

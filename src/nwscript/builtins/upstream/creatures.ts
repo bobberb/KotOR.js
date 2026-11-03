@@ -210,6 +210,7 @@ export const ActionCastFakeSpellAtObject: INWScriptDefAction = {
       action.setParameter(9, ActionParameterType.INT, args[2] || 0); //ProjectilePath
       action.setParameter(10, ActionParameterType.INT, -1);
       action.setParameter(11, ActionParameterType.INT, -1);
+      action.fake = true; //Animations and visuals only: no force point cost, no impact script
       this.caller.actionQueue.add(action);
     }
   };

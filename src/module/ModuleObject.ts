@@ -1611,7 +1611,7 @@ export class ModuleObject {
     if(!onSpellAt){ return; }
     const instance = onSpellAt.nwscript.newInstance();
     instance.lastSpellCaster = event.getObject(0);
-    instance.lastSpell = event.getInt(0);
+    instance.lastSpell = new GameState.TalentSpell(event.getInt(0));
     instance.lastSpellHarmful = event.getInt(1) ? true : false;
     instance.run(this);
   }

@@ -7,11 +7,13 @@ import { OdysseyModel3D } from "@/three/odyssey";
 import { TwoDAManager } from "@/managers/TwoDAManager";
 import { ActionType } from "@/enums/actions/ActionType";
 import { ActionCombat } from "@/actions/ActionCombat";
-import { CombatRoundAction, SpellCastInstance } from "@/combat";
+import { CombatRoundAction } from "@/combat/CombatRoundAction";
 import { ModuleCreatureAnimState } from "@/enums/module/ModuleCreatureAnimState";
 import { CombatActionType } from "@/enums/combat/CombatActionType";
 import { TalentObjectType } from "@/enums/engine/TalentObjectType";
 import { TwoDAObject } from "@/resource/TwoDAObject";
+import { Utility } from "@/utility/Utility";
+import type * as THREE from "three";
 
 const underscoreParser = (value: string = ''): number[] => {
   return value.split('_').map((val) => {
@@ -100,6 +102,8 @@ export class TalentSpell extends TalentObject {
   formmask: number = 0;
 
   nextSpell: TalentSpell;
+  /** Where the last cast of this talent landed; read by GetSpellTargetLocation (covers location casts with no oTarget). */
+  targetLocation: { x: number, y: number, z: number };
 
   constructor( id = 0 ){
     super(id);
@@ -169,6 +173,25 @@ export class TalentSpell extends TalentObject {
     return 'castoutlp1';
   }
 
+  /**
+   * Force point cost from the spells.2da `forcepoints` column; `****` parses to -1 and means free.
+   * Alignment / Force Focus cost modifiers are not applied.
+   */
+  getForcePointCost(): number {
+    const cost = Number(this.forcepoints);
+    return Number.isFinite(cost) && cost > 0 ? cost : 0;
+  }
+
+  /** spells.2da `forcehostile`: `****` parses to -1, any other value marks a power usable on enemies. */
+  isHostile(){
+    return this.forcehostile >= 0;
+  }
+
+  /** spells.2da `forcefriendly`: `****` parses to -1, any other value marks a power usable on self/allies. */
+  isFriendly(){
+    return this.forcefriendly >= 0;
+  }
+
   getCasterAnimation(){
     
   }
@@ -183,22 +206,19 @@ export class TalentSpell extends TalentObject {
     console.log('Talent.useTalentOnObject', this);
     
     oCaster.combatData.lastSpellTarget = oTarget;
-    oTarget.combatData.lastSpellAttacker = oCaster;
+    if(oTarget?.combatData) oTarget.combatData.lastSpellAttacker = oCaster;
     if(this.hostilesetting == 1){
       oCaster.resetExcitedDuration();
     }
 
-    const combatAction = new CombatRoundAction();
+    // The SpellCastInstance is created by ActionCastSpell once the round starts.
+    const combatAction = new CombatRoundAction(oCaster);
     combatAction.actionType = CombatActionType.CAST_SPELL;
     combatAction.target = oTarget;
     combatAction.setSpell(this);
     combatAction.animation = ModuleCreatureAnimState.CASTOUT1;
     combatAction.animationName = this.getConjureAnimation();
     combatAction.animationTime = 1500;
-
-    combatAction.addSpellInstance(
-      new SpellCastInstance(combatAction.owner, combatAction.target, this)
-    );
 
     oCaster.combatRound.addAction(combatAction);
 
@@ -213,23 +233,24 @@ export class TalentSpell extends TalentObject {
     if(oTarget == oCaster){
       return true;
     }
-    let distance = oCaster.position.distanceTo(oTarget.position);
-    //Spell ranges are defined in the ranges.2da file
-    switch(this.range){
-      case 'L': //Large
-        return distance < 28;
-      case 'M': //Medium
-        return distance < 15;
-      case 'P': //Personal
-        return true;
-      case 'S': //Small
-        return distance < 10;
-      case 'T': //Touch
-        return true;//distance < 2.25;
-      case 'W': //Throw
-        return distance < 15;
-    }
-    return true;
+    return this.isPointInRange(oCaster, oTarget.position);
+  }
+
+  /**
+   * ActionMoveToPoint arrives on 2D distance, so cast range is measured in 2D too; a 3D check would
+   * re-queue the same move forever whenever the target sits higher or lower than the caster.
+   */
+  isPointInRange(oCaster: ModuleObject, point: THREE.Vector3, range: number = this.getCastRange()){
+    if(!Number.isFinite(range)) return true;
+    return Utility.Distance2D(oCaster.position, point) <= range;
+  }
+
+  /**
+   * Distance a walk into range stops at: slightly inside cast range, so a target that keeps moving for the
+   * frame between "arrived" and "cast" is still in range when the cast starts.
+   */
+  getApproachRange(){
+    return this.getCastRange() * 0.9;
   }
 
   getCastRange(){
